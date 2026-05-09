@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/clip.schema.json",
+  "title": "Zakira.Replay Clip Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "source", "runId", "start", "end", "clipPath", "warnings"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "source": { "type": "string", "minLength": 1 },
+    "runId": { "type": "string", "minLength": 1 },
+    "start": { "type": "string", "minLength": 1 },
+    "end": { "type": "string", "minLength": 1 },
+    "clipPath": { "type": "string", "minLength": 1 },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  }
+}

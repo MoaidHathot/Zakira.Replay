@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/manifest.schema.json",
+  "title": "Zakira.Replay Manifest",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "source",
+    "instruction",
+    "createdAt",
+    "runId",
+    "evidencePath",
+    "frames",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "source": { "type": "string", "minLength": 1 },
+    "instruction": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "runId": { "type": "string", "minLength": 1 },
+    "title": { "type": ["string", "null"] },
+    "webpageUrl": { "type": ["string", "null"] },
+    "duration": { "type": ["string", "null"] },
+    "audioPath": { "type": ["string", "null"] },
+    "transcriptPath": { "type": ["string", "null"] },
+    "ocrPath": { "type": ["string", "null"] },
+    "visionPath": { "type": ["string", "null"] },
+    "summaryPath": { "type": ["string", "null"] },
+    "evidencePath": { "type": ["string", "null"] },
+    "frames": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/frameArtifact" }
+    },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "frameArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "timestampSeconds", "timestampLabel"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "timestampSeconds": { "type": "number", "minimum": 0 },
+        "timestampLabel": { "type": "string", "minLength": 1 }
+      }
+    }
+  }
+}

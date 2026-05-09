@@ -1,0 +1,37 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>Zakira.Replay</RootNamespace>
+    <AssemblyName>Zakira.Replay</AssemblyName>
+    <PackAsTool>true</PackAsTool>
+    <ToolCommandName>zakira-replay</ToolCommandName>
+    <PackageId>Zakira.Replay</PackageId>
+    <Version>0.1.0</Version>
+    <Authors>Moaid Hathot</Authors>
+    <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
+    <Description>Turn video sources into replayable, timestamped evidence for LLM agents. Part of the Zakira agent-cognition family (Imprint, Recall, Exchange, Replay).</Description>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <NoWarn>$(NoWarn);NU5111</NoWarn>
+  </PropertyGroup>
+  
+  <ItemGroup>
+    <PackageReference Include="GitHub.Copilot.SDK" Version="0.3.0" />
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
+    <PackageReference Include="Microsoft.Playwright" Version="1.*" />
+    <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
+    <None Include="..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\docs\*.md" Pack="true" PackagePath="docs\" />
+    <None Include="..\schemas\*.schema.json" Pack="true" PackagePath="schemas\" />
+    <None Include="..\skills\zakira-replay\**\*" Pack="true" PackagePath="skills\zakira-replay\" />
+    <None Include="..\skills\zakira-replay-cli\**\*" Pack="true" PackagePath="skills\zakira-replay-cli\" />
+    <None Include="..\skills\zakira-replay-mcp\**\*" Pack="true" PackagePath="skills\zakira-replay-mcp\" />
+  </ItemGroup>
+
+</Project>

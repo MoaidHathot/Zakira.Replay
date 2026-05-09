@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/transcript-normalization.schema.json",
+  "title": "Zakira.Replay Transcript Normalization Report",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "createdAt",
+    "rawSegmentCount",
+    "normalizedSegmentCount",
+    "mergeCount",
+    "merges"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "rawSegmentCount": { "type": "integer", "minimum": 0 },
+    "normalizedSegmentCount": { "type": "integer", "minimum": 0 },
+    "mergeCount": { "type": "integer", "minimum": 0 },
+    "merges": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/merge" }
+    }
+  },
+  "$defs": {
+    "merge": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["reason", "previous", "current", "result"],
+      "properties": {
+        "reason": {
+          "type": "string",
+          "enum": ["exact-duplicate", "contained-fragment", "growing-caption", "overlapping-continuation"]
+        },
+        "previous": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "startSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "timestamp": { "type": ["string", "null"] },
+            "text": { "type": "string" }
+          }
+        },
+        "current": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "startSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "timestamp": { "type": ["string", "null"] },
+            "text": { "type": "string" }
+          }
+        },
+        "result": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["text"],
+          "properties": {
+            "startSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+            "timestamp": { "type": ["string", "null"] },
+            "text": { "type": "string" }
+          }
+        }
+      }
+    }
+  }
+}

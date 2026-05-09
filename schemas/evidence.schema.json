@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/evidence.schema.json",
+  "title": "Zakira.Replay Evidence",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "source",
+    "instruction",
+    "runId",
+    "transcript",
+    "frames",
+    "ocr",
+    "vision",
+    "warnings"
+  ],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "source": { "type": "string", "minLength": 1 },
+    "instruction": { "type": "string" },
+    "runId": { "type": "string", "minLength": 1 },
+    "title": { "type": ["string", "null"] },
+    "webpageUrl": { "type": ["string", "null"] },
+    "durationSeconds": { "type": ["number", "null"], "minimum": 0 },
+    "audioPath": { "type": ["string", "null"] },
+    "transcript": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/transcriptSegment" }
+    },
+    "frames": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/frameArtifact" }
+    },
+    "ocr": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ocrFrameResult" }
+    },
+    "vision": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/visionFrameResult" }
+    },
+    "summary": { "type": ["string", "null"] },
+    "warnings": {
+      "type": "array",
+      "items": { "type": "string" }
+    }
+  },
+  "$defs": {
+    "transcriptSegment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text"],
+      "properties": {
+        "startSeconds": { "type": ["number", "null"], "minimum": 0 },
+        "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+        "timestamp": { "type": ["string", "null"] },
+        "text": { "type": "string" }
+      }
+    },
+    "frameArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "timestampSeconds", "timestampLabel"],
+      "properties": {
+        "path": { "type": "string", "minLength": 1 },
+        "timestampSeconds": { "type": "number", "minimum": 0 },
+        "timestampLabel": { "type": "string", "minLength": 1 }
+      }
+    },
+    "ocrFrameResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["framePath", "timestampSeconds", "timestampLabel", "text"],
+      "properties": {
+        "framePath": { "type": "string", "minLength": 1 },
+        "timestampSeconds": { "type": "number", "minimum": 0 },
+        "timestampLabel": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" }
+      }
+    },
+    "visionFrameResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["framePath", "timestampSeconds", "timestampLabel", "description"],
+      "properties": {
+        "framePath": { "type": "string", "minLength": 1 },
+        "timestampSeconds": { "type": "number", "minimum": 0 },
+        "timestampLabel": { "type": "string", "minLength": 1 },
+        "description": { "type": "string" }
+      }
+    }
+  }
+}

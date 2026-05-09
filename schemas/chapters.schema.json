@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/chapters.schema.json",
+  "title": "Zakira.Replay Chapters",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "createdAt", "method", "chapters"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "method": { "type": "string", "minLength": 1 },
+    "chapters": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/chapter" }
+    }
+  },
+  "$defs": {
+    "chapter": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startSeconds", "endSeconds", "timestamp", "endTimestamp", "title", "summary", "evidence"],
+      "properties": {
+        "startSeconds": { "type": "number", "minimum": 0 },
+        "endSeconds": { "type": "number", "minimum": 0 },
+        "timestamp": { "type": "string", "minLength": 1 },
+        "endTimestamp": { "type": "string", "minLength": 1 },
+        "title": { "type": "string", "minLength": 1 },
+        "summary": { "type": "string" },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "timestamp", "text"],
+            "properties": {
+              "kind": { "type": "string", "minLength": 1 },
+              "timestamp": { "type": "string", "minLength": 1 },
+              "text": { "type": "string" },
+              "path": { "type": ["string", "null"] }
+            }
+          }
+        }
+      }
+    }
+  }
+}

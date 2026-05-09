@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/batch-result.schema.json",
+  "title": "Zakira.Replay Batch Result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["batchId", "batchDirectory", "completedAt", "items"],
+  "properties": {
+    "batchId": { "type": "string", "minLength": 1 },
+    "batchDirectory": { "type": "string", "minLength": 1 },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "succeeded"],
+        "properties": {
+          "source": { "type": "string", "minLength": 1 },
+          "succeeded": { "type": "boolean" },
+          "runId": { "type": ["string", "null"] },
+          "artifactDirectory": { "type": ["string", "null"] },
+          "error": { "type": ["string", "null"] }
+        }
+      }
+    }
+  }
+}

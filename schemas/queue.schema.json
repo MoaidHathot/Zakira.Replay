@@ -1,0 +1,95 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/queue.schema.json",
+  "title": "Zakira.Replay Analysis Queue State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "queueId", "createdAt", "updatedAt", "jobs"],
+  "properties": {
+    "schemaVersion": { "type": "string" },
+    "queueId": { "type": "string" },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "updatedAt": { "type": "string", "format": "date-time" },
+    "jobs": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["jobId", "request", "status", "attempts", "maxAttempts", "enqueuedAt", "attemptHistory"],
+        "properties": {
+          "jobId": { "type": "string" },
+          "request": { "$ref": "#/$defs/analyzeRequest" },
+          "status": { "type": "string", "enum": ["pending", "running", "succeeded", "failed"] },
+          "attempts": { "type": "integer", "minimum": 0 },
+          "maxAttempts": { "type": "integer", "minimum": 1 },
+          "enqueuedAt": { "type": "string", "format": "date-time" },
+          "startedAt": { "type": ["string", "null"], "format": "date-time" },
+          "completedAt": { "type": ["string", "null"], "format": "date-time" },
+          "runId": { "type": ["string", "null"] },
+          "artifactDirectory": { "type": ["string", "null"] },
+          "error": { "type": ["string", "null"] },
+          "attemptHistory": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["attempt", "startedAt", "completedAt", "status"],
+              "properties": {
+                "attempt": { "type": "integer", "minimum": 1 },
+                "startedAt": { "type": "string", "format": "date-time" },
+                "completedAt": { "type": "string", "format": "date-time" },
+                "status": { "type": "string", "enum": ["succeeded", "failed"] },
+                "runId": { "type": ["string", "null"] },
+                "artifactDirectory": { "type": ["string", "null"] },
+                "error": { "type": ["string", "null"] }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "analyzeRequest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source",
+        "instruction",
+        "includeTranscript",
+        "frameCount",
+        "extractAudio",
+        "useSpeechToText",
+        "useOcr",
+        "useVision",
+        "useSummary",
+        "maxAiFrames",
+        "model",
+        "llmProvider",
+        "force",
+        "useCache",
+        "frameStrategy"
+      ],
+      "properties": {
+        "source": { "type": "string", "minLength": 1 },
+        "instruction": { "type": "string" },
+        "includeTranscript": { "type": "boolean" },
+        "frameCount": { "type": "integer", "minimum": 0 },
+        "runId": { "type": ["string", "null"] },
+        "extractAudio": { "type": "boolean" },
+        "useSpeechToText": { "type": "boolean" },
+        "useOcr": { "type": "boolean" },
+        "useVision": { "type": "boolean" },
+        "useSummary": { "type": "boolean" },
+        "maxAiFrames": { "type": "integer", "minimum": 0 },
+        "model": { "type": "string" },
+        "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai"] },
+        "force": { "type": "boolean" },
+        "useCache": { "type": "boolean" },
+        "frameStrategy": { "type": "string", "enum": ["interval", "scene", "every-frame"] },
+        "cookiesPath": { "type": ["string", "null"] },
+        "cookiesFromBrowser": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

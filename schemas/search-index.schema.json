@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/search-index.schema.json",
+  "title": "Zakira.Replay JSON Search Index",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "runId", "createdAt", "documentCount", "documents"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.1" },
+    "runId": { "type": "string", "minLength": 1 },
+    "createdAt": { "type": "string", "format": "date-time" },
+    "documentCount": { "type": "integer", "minimum": 0 },
+    "documents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "kind", "text", "weights"],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "kind": { "type": "string", "minLength": 1 },
+          "text": { "type": "string" },
+          "startSeconds": { "type": ["number", "null"], "minimum": 0 },
+          "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+          "timestamp": { "type": ["string", "null"] },
+          "path": { "type": ["string", "null"] },
+          "weights": {
+            "type": "object",
+            "additionalProperties": { "type": "number" }
+          }
+        }
+      }
+    }
+  }
+}

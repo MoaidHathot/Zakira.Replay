@@ -21,7 +21,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Zakira.Replay\Zakira.Replay.csproj" />
+    <ProjectReference Include="..\..\src\Zakira.Replay\Zakira.Replay.csproj" />
   </ItemGroup>
 
 </Project>

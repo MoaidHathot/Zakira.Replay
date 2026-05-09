@@ -1,4 +1,4 @@
 <Solution>
-  <Project Path="Zakira.Replay/Zakira.Replay.csproj" />
-  <Project Path="Zakira.Replay.Tests/Zakira.Replay.Tests.csproj" />
+  <Project Path="src/Zakira.Replay/Zakira.Replay.csproj" />
+  <Project Path="tests/Zakira.Replay.Tests/Zakira.Replay.Tests.csproj" />
 </Solution>

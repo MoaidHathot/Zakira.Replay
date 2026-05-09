@@ -41,7 +41,7 @@ $vocabPath = Join-Path $target "vocab.txt"
 "  zakira-replay search build runs\example-run --backend sqlite-onnx --onnx-model `"$modelPath`" --onnx-vocab `"$vocabPath`""
 
 if ($Configure) {
-    dotnet run --project "Zakira.Replay\Zakira.Replay.csproj" -- config set search.onnx.modelPath $modelPath
-    dotnet run --project "Zakira.Replay\Zakira.Replay.csproj" -- config set search.onnx.vocabularyPath $vocabPath
+    dotnet run --project "src\Zakira.Replay\Zakira.Replay.csproj" -- config set search.onnx.modelPath $modelPath
+    dotnet run --project "src\Zakira.Replay\Zakira.Replay.csproj" -- config set search.onnx.vocabularyPath $vocabPath
     "Configured Zakira.Replay ONNX search paths."
 }

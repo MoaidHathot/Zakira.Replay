@@ -20,7 +20,7 @@ public sealed class SchemaTests
     [InlineData("queue-run-result.schema.json")]
     public async Task SchemaFilesAreValidJson(string fileName)
     {
-        var path = System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "schemas", fileName);
+        var path = System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "schemas", fileName);
 
         await using var stream = File.OpenRead(System.IO.Path.GetFullPath(path));
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: CancellationToken.None);
@@ -194,7 +194,7 @@ public sealed class SchemaTests
 
     private static string GetSchemaPath(string fileName)
     {
-        return System.IO.Path.GetFullPath(System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "schemas", fileName));
+        return System.IO.Path.GetFullPath(System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "schemas", fileName));
     }
 
     private static async Task<string> CreateSearchRunAsync(TestTempDirectory temp)

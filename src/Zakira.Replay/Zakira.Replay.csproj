@@ -25,13 +25,13 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageReference Include="Microsoft.Playwright" Version="1.*" />
     <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
-    <None Include="..\README.md" Pack="true" PackagePath="\" />
-    <None Include="..\LICENSE" Pack="true" PackagePath="\" />
-    <None Include="..\docs\*.md" Pack="true" PackagePath="docs\" />
-    <None Include="..\schemas\*.schema.json" Pack="true" PackagePath="schemas\" />
-    <None Include="..\skills\zakira-replay\**\*" Pack="true" PackagePath="skills\zakira-replay\" />
-    <None Include="..\skills\zakira-replay-cli\**\*" Pack="true" PackagePath="skills\zakira-replay-cli\" />
-    <None Include="..\skills\zakira-replay-mcp\**\*" Pack="true" PackagePath="skills\zakira-replay-mcp\" />
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    <None Include="..\..\docs\*.md" Pack="true" PackagePath="docs\" />
+    <None Include="..\..\schemas\*.schema.json" Pack="true" PackagePath="schemas\" />
+    <None Include="..\..\skills\zakira-replay\**\*" Pack="true" PackagePath="skills\zakira-replay\" />
+    <None Include="..\..\skills\zakira-replay-cli\**\*" Pack="true" PackagePath="skills\zakira-replay-cli\" />
+    <None Include="..\..\skills\zakira-replay-mcp\**\*" Pack="true" PackagePath="skills\zakira-replay-mcp\" />
   </ItemGroup>
 
 </Project>

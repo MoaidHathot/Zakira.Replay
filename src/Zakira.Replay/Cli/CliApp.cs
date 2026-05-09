@@ -680,7 +680,7 @@ internal static class AppInfo
 {
     public const string Name = "Zakira.Replay";
 
-    public const string Version = "0.1.0";
+    public static string Version => ReplayVersion.Current;
 }
 
 internal sealed record ReplayInfo(

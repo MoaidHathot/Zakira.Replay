@@ -4,6 +4,7 @@ runs/
 artifacts/
 TestResults/
 models/
+Temp/
 .vs/
 .vscode/
 *.user

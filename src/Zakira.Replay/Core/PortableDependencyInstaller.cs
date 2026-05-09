@@ -28,7 +28,7 @@ public sealed class PortableDependencyInstaller
         this.httpClient = httpClient ?? new HttpClient();
         if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
-            this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("Zakira.Replay/0.1.0");
+            this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"Zakira.Replay/{ReplayVersion.Current}");
         }
     }
 

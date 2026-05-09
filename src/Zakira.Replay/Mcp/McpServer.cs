@@ -7,7 +7,7 @@ namespace Zakira.Replay.Mcp;
 
 public sealed class McpServer
 {
-    private const string ServerVersion = "0.1.0";
+    private static readonly string ServerVersion = ReplayVersion.Current;
 
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {

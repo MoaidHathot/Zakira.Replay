@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -9,7 +10,7 @@ public interface IYtDlpClient
 {
     Task<YtDlpInfo> GetInfoAsync(AnalyzeRequest request, CancellationToken cancellationToken);
 
-    Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken);
+    Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken);
 
     Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken);
 
@@ -54,33 +55,38 @@ public sealed class YtDlpClient : IYtDlpClient
         }
     }
 
-    public async Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken)
+    public async Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken)
     {
         var ytDlp = dependencies.RequireYtDlp("extracting existing subtitles/captions");
+        var languageSpec = FormatSubtitleLanguageSpec(subtitleLanguages);
         var outputTemplate = Path.Combine(run.Directory, "captions", "subtitle.%(ext)s");
         var args = CreateBaseArguments(request);
         args.AddRange([
             "--skip-download",
             "--write-subs",
             "--write-auto-subs",
-            "--sub-langs", "en.*,en,live_chat",
+            "--sub-langs", languageSpec,
             "--sub-format", "vtt/srt/best",
             "--no-playlist",
             "-o", outputTemplate,
             request.Source
         ]);
-        var result = await processRunner.RunAsync(
+        await processRunner.RunAsync(
             ytDlp,
             args,
             timeout: TimeSpan.FromMinutes(10),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
-        if (result.ExitCode != 0)
+        // yt-dlp can exit non-zero when one of the requested languages is unavailable while still
+        // writing the available languages' subtitle files. Trust the filesystem: if a .vtt/.srt
+        // landed in captions/, use it.
+        var captionsDirectory = Path.Combine(run.Directory, "captions");
+        if (!Directory.Exists(captionsDirectory))
         {
             return null;
         }
 
-        var subtitle = Directory.EnumerateFiles(Path.Combine(run.Directory, "captions"), "*.*", SearchOption.TopDirectoryOnly)
+        var subtitle = Directory.EnumerateFiles(captionsDirectory, "*.*", SearchOption.TopDirectoryOnly)
             .Where(path => Path.GetExtension(path).Equals(".vtt", StringComparison.OrdinalIgnoreCase)
                 || Path.GetExtension(path).Equals(".srt", StringComparison.OrdinalIgnoreCase))
             .OrderByDescending(path => Path.GetExtension(path).Equals(".vtt", StringComparison.OrdinalIgnoreCase))
@@ -92,11 +98,47 @@ public sealed class YtDlpClient : IYtDlpClient
             return null;
         }
 
-        var markdown = await SubtitleConverter.ToMarkdownAsync(subtitle, cancellationToken).ConfigureAwait(false);
+        var segments = await SubtitleConverter.ParseSegmentsAsync(subtitle, cancellationToken).ConfigureAwait(false);
         var markdownPath = run.GetPath("transcript.md");
-        await File.WriteAllTextAsync(markdownPath, markdown, cancellationToken).ConfigureAwait(false);
+        await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
 
-        return new TranscriptArtifact(subtitle, markdownPath, "yt-dlp-subtitle");
+        return new TranscriptArtifact(subtitle, markdownPath, "yt-dlp-subtitle", segments);
+    }
+
+    private static string FormatSubtitleLanguageSpec(IReadOnlyList<string> subtitleLanguages)
+    {
+        if (subtitleLanguages.Count == 0)
+        {
+            return "en.*,en,live_chat";
+        }
+
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var entries = new List<string>();
+        foreach (var rawLanguage in subtitleLanguages)
+        {
+            if (string.IsNullOrWhiteSpace(rawLanguage))
+            {
+                continue;
+            }
+
+            var language = rawLanguage.Trim();
+            if (language.Equals("auto", StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (seen.Add(language))
+            {
+                entries.Add(language);
+            }
+        }
+
+        if (entries.Count == 0)
+        {
+            return "en.*,en,live_chat";
+        }
+
+        return string.Join(',', entries);
     }
 
     public async Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken)
@@ -174,7 +216,11 @@ public sealed class YtDlpClient : IYtDlpClient
     }
 }
 
-public sealed record TranscriptArtifact(string SourcePath, string MarkdownPath, string Kind);
+public sealed record TranscriptArtifact(
+    string SourcePath,
+    string MarkdownPath,
+    string Kind,
+    IReadOnlyList<TranscriptSegment>? Segments = null);
 
 public sealed class YtDlpInfo
 {
@@ -196,8 +242,41 @@ public sealed class YtDlpInfo
     [JsonPropertyName("uploader")]
     public string? Uploader { get; set; }
 
+    [JsonPropertyName("language")]
+    public string? Language { get; set; }
+
+    /// <summary>
+    /// Manual subtitle tracks per language code, as advertised by yt-dlp.
+    /// Keys are BCP-47-style language codes; values are arrays of available format descriptors.
+    /// </summary>
+    [JsonPropertyName("subtitles")]
+    public Dictionary<string, JsonElement>? Subtitles { get; set; }
+
+    /// <summary>
+    /// Auto-generated/captioned subtitle tracks per language code, as advertised by yt-dlp.
+    /// </summary>
+    [JsonPropertyName("automatic_captions")]
+    public Dictionary<string, JsonElement>? AutomaticCaptions { get; set; }
+
+    /// <summary>
+    /// Derived per-language summary written to <c>metadata.json</c>: which languages have manual
+    /// subtitles, automatic captions, or both. Set by <see cref="AnalysisPipeline"/> after metadata
+    /// is fetched; ignored when deserializing yt-dlp output.
+    /// </summary>
+    [JsonPropertyName("availableSubtitleLanguages")]
+    public Dictionary<string, AvailableSubtitleLanguage>? AvailableSubtitleLanguages { get; set; }
+
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
+}
+
+public sealed class AvailableSubtitleLanguage
+{
+    [JsonPropertyName("hasManual")]
+    public bool HasManual { get; set; }
+
+    [JsonPropertyName("hasAuto")]
+    public bool HasAuto { get; set; }
 }
 
 internal static class YtDlpJson
@@ -212,11 +291,23 @@ internal static class YtDlpJson
 
 public static partial class SubtitleConverter
 {
-    public static async Task<string> ToMarkdownAsync(string path, CancellationToken cancellationToken)
+    /// <summary>
+    /// Parses a VTT or SRT file into structured transcript segments, attaching <c>SpeakerId</c>
+    /// and <c>SpeakerDisplayName</c> when the source carries speaker tags. Recognises VTT voice
+    /// spans (<c>&lt;v Speaker Name&gt;...&lt;/v&gt;</c> or self-terminating <c>&lt;v Speaker Name&gt;</c>),
+    /// SRT line prefixes (<c>Speaker Name: utterance</c>), and bracketed prefixes
+    /// (<c>[Speaker Name] utterance</c>). Lines without an attributable speaker carry <c>null</c>.
+    /// </summary>
+    public static async Task<IReadOnlyList<TranscriptSegment>> ParseSegmentsAsync(string path, CancellationToken cancellationToken)
     {
         var text = await File.ReadAllTextAsync(path, cancellationToken).ConfigureAwait(false);
+        return ParseSegments(text);
+    }
+
+    public static IReadOnlyList<TranscriptSegment> ParseSegments(string text)
+    {
         var blocks = Regex.Split(text.Replace("\r\n", "\n", StringComparison.Ordinal), "\n\n+");
-        var builder = new StringBuilder();
+        var segments = new List<TranscriptSegment>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
 
         foreach (var block in blocks)
@@ -235,28 +326,170 @@ public static partial class SubtitleConverter
             }
 
             var timingParts = timing.Split("-->", StringSplitOptions.TrimEntries);
-            var timestamp = timingParts[0];
+            var startTimestamp = timingParts[0];
             var endTimestamp = timingParts.Length > 1 ? timingParts[1].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[0] : null;
-            var spoken = string.Join(' ', lines.Where(line => !line.Contains("-->", StringComparison.Ordinal))
-                .Select(CleanSubtitleLine)
-                .Where(line => !string.IsNullOrWhiteSpace(line)));
 
-            spoken = WhitespaceRegex().Replace(spoken, " ").Trim();
-            if (spoken.Length == 0 || !seen.Add($"{timestamp}|{spoken}"))
+            string? speakerDisplayName = null;
+            var spokenLines = new List<string>();
+            foreach (var line in lines.Where(line => !line.Contains("-->", StringComparison.Ordinal)))
+            {
+                var (lineSpeaker, cleaned) = ExtractSpeakerAndCleanLine(line);
+                if (lineSpeaker is not null && speakerDisplayName is null)
+                {
+                    speakerDisplayName = lineSpeaker;
+                }
+
+                if (!string.IsNullOrWhiteSpace(cleaned))
+                {
+                    spokenLines.Add(cleaned);
+                }
+            }
+
+            var spoken = WhitespaceRegex().Replace(string.Join(' ', spokenLines), " ").Trim();
+            if (spoken.Length == 0)
             {
                 continue;
             }
 
-            builder.Append("**[").Append(timestamp);
-            if (!string.IsNullOrWhiteSpace(endTimestamp))
+            var dedupeKey = $"{startTimestamp}|{speakerDisplayName ?? string.Empty}|{spoken}";
+            if (!seen.Add(dedupeKey))
             {
-                builder.Append(" - ").Append(endTimestamp);
+                continue;
             }
 
-            builder.Append("]** ").AppendLine(spoken);
+            var startSeconds = ParseTimestampSeconds(startTimestamp);
+            var endSeconds = endTimestamp is null ? null : ParseTimestampSeconds(endTimestamp);
+            var timestamp = endTimestamp is null ? startTimestamp : $"{startTimestamp} - {endTimestamp}";
+            segments.Add(new TranscriptSegment(
+                StartSeconds: startSeconds,
+                EndSeconds: endSeconds,
+                Timestamp: timestamp,
+                Text: spoken,
+                SpeakerId: NormalizeSpeakerId(speakerDisplayName),
+                SpeakerDisplayName: speakerDisplayName));
+        }
+
+        return segments;
+    }
+
+    public static async Task<string> ToMarkdownAsync(string path, CancellationToken cancellationToken)
+    {
+        var segments = await ParseSegmentsAsync(path, cancellationToken).ConfigureAwait(false);
+        return ToMarkdown(segments);
+    }
+
+    public static string ToMarkdown(IReadOnlyList<TranscriptSegment> segments)
+    {
+        var builder = new StringBuilder();
+        foreach (var segment in segments)
+        {
+            if (string.IsNullOrWhiteSpace(segment.Text))
+            {
+                continue;
+            }
+
+            builder.Append("**[").Append(segment.Timestamp ?? string.Empty).Append("]** ");
+            if (!string.IsNullOrWhiteSpace(segment.SpeakerDisplayName))
+            {
+                builder.Append('[').Append(segment.SpeakerDisplayName).Append("] ");
+            }
+
+            builder.AppendLine(segment.Text);
         }
 
         return builder.ToString();
+    }
+
+    private static (string? SpeakerDisplayName, string CleanedText) ExtractSpeakerAndCleanLine(string line)
+    {
+        // Try VTT voice tag first: <v Speaker Name>text</v> or self-terminating <v Speaker Name>
+        var voiceMatch = VttVoiceRegex().Match(line);
+        if (voiceMatch.Success)
+        {
+            var name = voiceMatch.Groups[1].Value.Trim();
+            var residual = (voiceMatch.Groups[2].Value + line[(voiceMatch.Index + voiceMatch.Length)..]).Trim();
+            var cleaned = CleanSubtitleLine(residual);
+            return (string.IsNullOrWhiteSpace(name) ? null : name, cleaned);
+        }
+
+        var cleanedLine = CleanSubtitleLine(line);
+
+        // Bracketed speaker: [Speaker Name] text
+        var bracketMatch = BracketSpeakerRegex().Match(cleanedLine);
+        if (bracketMatch.Success)
+        {
+            var name = bracketMatch.Groups[1].Value.Trim();
+            return (string.IsNullOrWhiteSpace(name) ? null : name, bracketMatch.Groups[2].Value.Trim());
+        }
+
+        // Colon-separated speaker prefix: Speaker Name: text. Limited to short, name-shaped prefixes
+        // to avoid swallowing punctuation like time mentions ("at 12:00") or sentences with colons.
+        var colonMatch = ColonSpeakerRegex().Match(cleanedLine);
+        if (colonMatch.Success && IsLikelySpeakerLabel(colonMatch.Groups[1].Value))
+        {
+            return (colonMatch.Groups[1].Value.Trim(), colonMatch.Groups[2].Value.Trim());
+        }
+
+        return (null, cleanedLine);
+    }
+
+    /// <summary>
+    /// Heuristic: a speaker label is a short string (≤ 60 chars) made of letters, digits, spaces,
+    /// hyphens, and apostrophes; not all-numeric, not a single character.
+    /// </summary>
+    private static bool IsLikelySpeakerLabel(string candidate)
+    {
+        var trimmed = candidate.Trim();
+        if (trimmed.Length is 0 or > 60)
+        {
+            return false;
+        }
+
+        if (trimmed.All(char.IsDigit))
+        {
+            return false;
+        }
+
+        return SpeakerLabelShapeRegex().IsMatch(trimmed);
+    }
+
+    private static string? NormalizeSpeakerId(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            return null;
+        }
+
+        var slug = Slug.Create(displayName, 80);
+        return string.IsNullOrEmpty(slug) ? null : slug;
+    }
+
+    private static double? ParseTimestampSeconds(string timestamp)
+    {
+        var normalized = timestamp.Trim().Replace(',', '.');
+        var parts = normalized.Split(':');
+        if (parts.Length is < 2 or > 3)
+        {
+            return null;
+        }
+
+        if (!double.TryParse(parts[^1], NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+        {
+            return null;
+        }
+
+        if (!int.TryParse(parts[^2], NumberStyles.Integer, CultureInfo.InvariantCulture, out var minutes))
+        {
+            return null;
+        }
+
+        var hours = 0;
+        if (parts.Length == 3 && !int.TryParse(parts[0], NumberStyles.Integer, CultureInfo.InvariantCulture, out hours))
+        {
+            return null;
+        }
+
+        return (hours * 3600) + (minutes * 60) + seconds;
     }
 
     private static string CleanSubtitleLine(string line)
@@ -278,4 +511,16 @@ public static partial class SubtitleConverter
 
     [GeneratedRegex("\\s+")]
     private static partial Regex WhitespaceRegex();
+
+    [GeneratedRegex("<v(?:\\.[^\\s>]*)?\\s+([^>]+)>([^<]*)(?:</v>)?", RegexOptions.IgnoreCase)]
+    private static partial Regex VttVoiceRegex();
+
+    [GeneratedRegex("^\\[([^\\]]{1,60})\\]\\s*(.+)$")]
+    private static partial Regex BracketSpeakerRegex();
+
+    [GeneratedRegex("^([\\p{L}\\p{N}][\\p{L}\\p{N} '\\-\\.]{0,58}[\\p{L}\\p{N}\\.])\\s*:\\s+(.+)$")]
+    private static partial Regex ColonSpeakerRegex();
+
+    [GeneratedRegex("^[\\p{L}\\p{N}][\\p{L}\\p{N} '\\-\\.]*[\\p{L}\\p{N}\\.]$")]
+    private static partial Regex SpeakerLabelShapeRegex();
 }

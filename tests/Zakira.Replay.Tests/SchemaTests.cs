@@ -18,6 +18,11 @@ public sealed class SchemaTests
     [InlineData("batch-result.schema.json")]
     [InlineData("queue.schema.json")]
     [InlineData("queue-run-result.schema.json")]
+    [InlineData("audio-chunks.schema.json")]
+    [InlineData("slides.schema.json")]
+    [InlineData("ocr.schema.json")]
+    [InlineData("vision.schema.json")]
+    [InlineData("evidence-aligned.schema.json")]
     public async Task SchemaFilesAreValidJson(string fileName)
     {
         var path = System.IO.Path.Combine(AppContext.BaseDirectory, "..", "..", "..", "..", "..", "schemas", fileName);
@@ -26,7 +31,15 @@ public sealed class SchemaTests
         using var document = await JsonDocument.ParseAsync(stream, cancellationToken: CancellationToken.None);
 
         Assert.Equal("https://json-schema.org/draft/2020-12/schema", document.RootElement.GetProperty("$schema").GetString());
-        Assert.Equal("object", document.RootElement.GetProperty("type").GetString());
+        if (document.RootElement.TryGetProperty("type", out var typeElement))
+        {
+            Assert.True(typeElement.GetString() is "object" or "array");
+        }
+        else
+        {
+            // Schemas using top-level oneOf (e.g. evidence-aligned) intentionally omit `type`.
+            Assert.True(document.RootElement.TryGetProperty("oneOf", out _));
+        }
     }
 
     [Fact]
@@ -75,9 +88,11 @@ public sealed class SchemaTests
         var runDirectory = temp.GetPath("runs", "chapters-schema");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "chapters-schema",
             Title: "Chapters Schema Fixture",
             WebpageUrl: null,
@@ -90,9 +105,10 @@ public sealed class SchemaTests
                 new TranscriptSegment(50, 70, "00:50 - 01:10", "Travel accessories are compared for airports and daily carry.")
             ],
             Frames: [],
+            Slides: [],
             Ocr: [],
             Vision: [],
-            Summary: null,
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
 
@@ -202,9 +218,11 @@ public sealed class SchemaTests
         var runDirectory = temp.GetPath("runs", "search-schema");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "search-schema",
             Title: "Search Schema Fixture",
             WebpageUrl: null,
@@ -212,9 +230,10 @@ public sealed class SchemaTests
             AudioPath: null,
             Transcript: [new TranscriptSegment(1, 5, "00:01 - 00:05", "WireGuard VPN router setup.")],
             Frames: [],
+            Slides: [],
             Ocr: [],
             Vision: [],
-            Summary: "Router setup summary.",
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
         return runDirectory;
@@ -224,7 +243,7 @@ public sealed class SchemaTests
     {
         public Task<YtDlpInfo> GetInfoAsync(AnalyzeRequest request, CancellationToken cancellationToken) => Task.FromResult(new YtDlpInfo());
 
-        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken) => Task.FromResult<TranscriptArtifact?>(null);
+        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken) => Task.FromResult<TranscriptArtifact?>(null);
 
         public Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 
@@ -233,7 +252,7 @@ public sealed class SchemaTests
 
     private sealed class FakeClipFfmpegClient : IFfmpegClient
     {
-        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, CancellationToken cancellationToken)
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken)
         {
             return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
         }
@@ -254,6 +273,23 @@ public sealed class SchemaTests
         public Task<double?> TryProbeDurationAsync(string mediaSource, CancellationToken cancellationToken)
         {
             return Task.FromResult<double?>(3);
+        }
+
+        public Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<SilenceWindow>>([]);
+        }
+
+        public Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+            File.WriteAllText(outputPath, "fake clip chunk");
+            return Task.CompletedTask;
+        }
+
+        public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<string?>("0000000000000000");
         }
     }
 }

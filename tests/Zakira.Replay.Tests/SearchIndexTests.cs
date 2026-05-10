@@ -15,7 +15,7 @@ public sealed class SearchIndexTests
         var manifest = await service.BuildAsync(runDirectory, CancellationToken.None);
         var result = await service.QueryAsync(runDirectory, "wireguard vpn", top: 3, CancellationToken.None);
 
-        Assert.Equal(4, manifest.DocumentCount);
+        Assert.Equal(3, manifest.DocumentCount);
         Assert.NotEmpty(result.Matches);
         Assert.Contains(result.Matches, match => match.Text.Contains("WireGuard", StringComparison.OrdinalIgnoreCase));
         Assert.True(File.Exists(Path.Combine(runDirectory, "search", "index.json")));
@@ -32,7 +32,7 @@ public sealed class SearchIndexTests
         var result = await service.QueryAsync(runDirectory, "wireguard vpn", top: 3, new SearchIndexQueryOptions(SearchBackends.Sqlite), CancellationToken.None);
 
         Assert.Equal(SearchBackends.Sqlite, build.Backend);
-        Assert.Equal(4, build.DocumentCount);
+        Assert.Equal(3, build.DocumentCount);
         Assert.NotEmpty(result.Matches);
         Assert.Contains(result.Matches, match => match.Text.Contains("WireGuard", StringComparison.OrdinalIgnoreCase));
         Assert.True(File.Exists(Path.Combine(runDirectory, "search", "index.sqlite")));
@@ -72,9 +72,11 @@ public sealed class SearchIndexTests
         var runDirectory = temp.GetPath("runs", "search-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "search-run",
             Title: "Search Fixture",
             WebpageUrl: null,
@@ -86,9 +88,10 @@ public sealed class SearchIndexTests
                 new TranscriptSegment(30, 40, "00:30", "The speaker discusses travel bags and accessories.")
             ],
             Frames: [],
-            Ocr: [new OcrFrameResult("frames/frame-001.jpg", 11, "00:11", "WireGuard throughput chart")],
+            Slides: [],
+            Ocr: [new OcrFrameResult("frame-001", "frames/frame-001.jpg", 11, "00:11", "WireGuard throughput chart")],
             Vision: [],
-            Summary: "A router comparison with VPN notes.",
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
         return runDirectory;

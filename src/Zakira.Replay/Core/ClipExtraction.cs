@@ -18,7 +18,7 @@ public sealed class ClipExtractionService
         SourceLocator.ThrowIfMissingLocalPathLikeSource(request.Source);
         var isLocalFile = SourceLocator.TryGetLocalFilePath(request.Source, out var localPath);
         var run = artifactStore.CreateRun(request.Source, request.RunId);
-        var warnings = new List<string>();
+        var warnings = new List<ReplayWarning>();
 
         progress?.Report($"Run directory: {run.Directory}");
         var mediaSource = isLocalFile ? localPath : (string?)null;
@@ -26,17 +26,22 @@ public sealed class ClipExtractionService
         {
             var analyzeRequest = new AnalyzeRequest(
                 Source: request.Source,
-                Instruction: "Extract a timestamped video clip.",
+                VisionInstruction: string.Empty,
                 IncludeTranscript: false,
                 FrameCount: 0,
                 RunId: request.RunId,
+                OcrInstruction: string.Empty,
                 CookiesPath: request.CookiesPath,
                 CookiesFromBrowser: request.CookiesFromBrowser);
             progress?.Report("Resolving direct media URL for ffmpeg...");
             mediaSource = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
             {
-                warnings.Add("Could not resolve a direct media URL; downloading media locally for clipping.");
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.ClipMediaUrlUnresolved,
+                    "Could not resolve a direct media URL; downloading media locally for clipping.",
+                    Source: "yt-dlp",
+                    Severity: ReplayWarningSeverities.Info));
                 mediaSource = await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -48,7 +53,7 @@ public sealed class ClipExtractionService
 
         progress?.Report($"Extracting clip {request.Start} to {request.End}...");
         var clipPath = await ffmpeg.ExtractClipAsync(mediaSource, run, request.Start, request.End, request.OutputName, cancellationToken).ConfigureAwait(false);
-        var manifest = new ClipManifest("0.1", request.Source, run.Id, request.Start, request.End, clipPath, warnings);
+        var manifest = new ClipManifest("0.2", request.Source, run.Id, request.Start, request.End, clipPath, warnings);
         await artifactStore.WriteJsonAsync(run, "clip.json", manifest, cancellationToken).ConfigureAwait(false);
         return new ClipExtractionResult(run, manifest);
     }
@@ -70,6 +75,6 @@ public sealed record ClipManifest(
     TimeSpan Start,
     TimeSpan End,
     string ClipPath,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<ReplayWarning> Warnings);
 
 public sealed record ClipExtractionResult(VideoRun Run, ClipManifest Manifest);

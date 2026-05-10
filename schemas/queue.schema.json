@@ -55,14 +55,14 @@
       "additionalProperties": false,
       "required": [
         "source",
-        "instruction",
+        "visionInstruction",
+        "ocrInstruction",
         "includeTranscript",
         "frameCount",
         "extractAudio",
         "useSpeechToText",
         "useOcr",
         "useVision",
-        "useSummary",
         "maxAiFrames",
         "model",
         "llmProvider",
@@ -72,7 +72,8 @@
       ],
       "properties": {
         "source": { "type": "string", "minLength": 1 },
-        "instruction": { "type": "string" },
+        "visionInstruction": { "type": "string" },
+        "ocrInstruction": { "type": "string" },
         "includeTranscript": { "type": "boolean" },
         "frameCount": { "type": "integer", "minimum": 0 },
         "runId": { "type": ["string", "null"] },
@@ -80,7 +81,6 @@
         "useSpeechToText": { "type": "boolean" },
         "useOcr": { "type": "boolean" },
         "useVision": { "type": "boolean" },
-        "useSummary": { "type": "boolean" },
         "maxAiFrames": { "type": "integer", "minimum": 0 },
         "model": { "type": "string" },
         "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai"] },
@@ -88,7 +88,15 @@
         "useCache": { "type": "boolean" },
         "frameStrategy": { "type": "string", "enum": ["interval", "scene", "every-frame"] },
         "cookiesPath": { "type": ["string", "null"] },
-        "cookiesFromBrowser": { "type": ["string", "null"] }
+        "cookiesFromBrowser": { "type": ["string", "null"] },
+        "captionLanguages": {
+          "type": ["array", "null"],
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "slideGrouping": { "type": ["boolean", "null"] },
+        "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
+        "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
+        "sceneSafetyCap": { "type": ["integer", "null"], "minimum": 1 }
       }
     }
   }

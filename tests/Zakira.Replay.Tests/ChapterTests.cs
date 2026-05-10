@@ -17,11 +17,9 @@ public sealed class ChapterTests
         Assert.True(result.ChapterCount >= 2);
         Assert.True(File.Exists(Path.Combine(runDirectory, "chapters", "chapters.json")));
         Assert.True(File.Exists(Path.Combine(runDirectory, "chapters", "chapters.md")));
-        Assert.Contains(result.Document.Chapters, chapter => chapter.Summary.Contains("router", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Document.Chapters, chapter => chapter.Summary.Contains("travel", StringComparison.OrdinalIgnoreCase));
-        Assert.Contains(result.Document.Chapters, chapter => chapter.Title.Contains("Router", StringComparison.Ordinal));
-        Assert.Contains(result.Document.Chapters, chapter => chapter.Title.Contains("Travel", StringComparison.Ordinal));
-        Assert.DoesNotContain(result.Document.Chapters, chapter => chapter.Title.Contains("The", StringComparison.Ordinal));
+        Assert.All(result.Document.Chapters, chapter => Assert.True(chapter.EndSeconds >= chapter.StartSeconds));
+        Assert.Contains(result.Document.Chapters, chapter => chapter.Evidence.Any(item => item.Text.Contains("router", StringComparison.OrdinalIgnoreCase)));
+        Assert.Contains(result.Document.Chapters, chapter => chapter.Evidence.Any(item => item.Text.Contains("travel", StringComparison.OrdinalIgnoreCase)));
     }
 
     [Fact]
@@ -44,9 +42,11 @@ public sealed class ChapterTests
         var runDirectory = temp.GetPath("runs", "chapter-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "chapter-run",
             Title: "Chapter Fixture",
             WebpageUrl: null,
@@ -61,10 +61,11 @@ public sealed class ChapterTests
                 new TranscriptSegment(65, 82, "01:05", "Travel bags are compared by size, durability, compartments, and airport convenience."),
                 new TranscriptSegment(82, 104, "01:22", "The conclusion recommends the best bag for short trips and daily carry.")
             ],
-            Frames: [new FrameArtifact("frames/frame-001.jpg", 10, "00:10")],
+            Frames: [new FrameArtifact("frame-001", "frames/frame-001.jpg", 10, "00:10")],
+            Slides: [],
             Ocr: [],
             Vision: [],
-            Summary: null,
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
         return runDirectory;

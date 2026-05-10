@@ -11,11 +11,14 @@ It is part of the **Zakira** family of agent-cognition primitives:
 
 The first implementation focuses on durable extraction primitives:
 
-- Existing captions/subtitles via `yt-dlp` for URLs.
+- Existing captions/subtitles via `yt-dlp` for URLs, with multi-language support.
 - Sidecar `.vtt`/`.srt` subtitles for local media files.
+- Speaker attribution from caption tags (`<v Name>` in VTT, `Speaker:` line prefixes in SRT) propagated through transcripts.
 - Audio and representative frame extraction via `ffmpeg`/`ffprobe`.
-- Optional GitHub Copilot SDK analysis for audio transcription, OCR, frame vision, and evidence summaries.
-- Artifact folders with `manifest.json`, `metadata.json`, `evidence.json`, `transcript.md`, frames, and `evidence.md`.
+- Silence-aware audio chunking so long-audio STT (Whisper, Copilot SDK) does not hit per-request size limits.
+- Perceptual-hash slide grouping so OCR/vision is run once per unique on-screen slide, with first/last visible timestamps recorded as facts.
+- Optional GitHub Copilot SDK analysis for audio transcription, structured OCR, and structured vision.
+- Artifact folders with `manifest.json`, `metadata.json`, `evidence.json`, `transcript.md`, frames, slides, structured warnings, and a per-speaker registry.
 - CLI and MCP stdio entrypoints.
 
 Dependencies are not installed automatically unless explicitly configured. Missing dependencies fail with a clear error.
@@ -26,13 +29,14 @@ Dependencies are not installed automatically unless explicitly configured. Missi
 zakira-replay doctor [--json]
 zakira-replay info [--json]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--instruction <text>] [--frames <count>] [--frame-strategy interval|scene|every-frame] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--summary] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
 zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
 zakira-replay search build <run-directory> [--backend json|sqlite|sqlite-onnx]
 zakira-replay search query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]
 zakira-replay chapters build <run-directory> [--min-duration <seconds>] [--max-duration <seconds>]
+zakira-replay align <run-directory>
 zakira-replay discover <url> [--browser] [--output <path>]
 zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
@@ -111,10 +115,86 @@ zakira-replay config set llm.openai.apiKeyEnvVars OPENAI_API_KEY,WORK_OPENAI_API
 zakira-replay config set llm.azureOpenAi.endpoint https://example.openai.azure.com
 zakira-replay config set llm.azureOpenAi.deployment video-analysis
 zakira-replay config set llm.azureOpenAi.apiKeyEnvVars AZURE_OPENAI_API_KEY,WORK_AZURE_OPENAI_API_KEY
+zakira-replay config set captions.languages auto
+zakira-replay config set captions.languages fr,en,live_chat
 zakira-replay config get yt-dlp.path
 ```
 
 If the value passed to `config set` is a directory, Zakira.Replay appends the expected executable name.
+
+## Caption Languages
+
+Caption preferences default to `["auto"]`, which unions the source's advertised manual subtitles, automatic captions, and the source's primary language with English (`en`, `en.*`) and YouTube live-chat replay so an existing transcript is found whenever yt-dlp knows of one. Override per run with `--caption-languages fr,en` (CLI), `captionLanguages: ["fr", "en"]` (MCP/batch), or globally with `zakira-replay config set captions.languages fr,en`. The languages yt-dlp advertises for a source are written to `metadata.json` under `availableSubtitleLanguages` so orchestrators can branch on what is actually available before retrying.
+
+## Speakers
+
+When captions carry speaker tags, Zakira.Replay extracts them as facts, not synthesis:
+
+- VTT voice spans `<v Speaker Name>...</v>` (and self-terminating `<v Name>` lines).
+- SRT line prefixes `Speaker Name: utterance` (only when the prefix shape looks like a name).
+- Bracketed prefixes `[Speaker Name] utterance`.
+
+Each `transcript[*]` segment carries `speakerId` (slugified, stable) and `speakerDisplayName` (verbatim from the source). A per-speaker registry is written under `evidence.speakers[]` with `segmentCount`, `totalSeconds`, `firstSeenSeconds`, and `lastSeenSeconds`. Transcript normalization treats speaker changes as hard boundaries: two near-duplicate utterances by different speakers are kept separate. Speakers are never invented; segments without a recognisable tag carry `null` for both fields.
+
+STT-derived transcripts do not carry speakers in this phase. Provider-backed diarization is out of scope for this release; the schema fields are stable so a future phase can plug in cloud or local diarization without breaking consumers.
+
+## STT Chunking
+
+Speech-to-text on long audio is silence-chunked before each provider call to stay under per-request size limits (for example OpenAI Whisper's 25 MB cap). Audio shorter than the configured target duration is sent in one shot. When chunking actually splits the audio:
+
+- Boundaries snap to the centre of `ffmpeg silencedetect` windows nearest each target step, falling back to a hard cut when no usable silence exists.
+- Each chunk is re-encoded as 16 kHz mono PCM under `audio/chunks/chunk-NNN.wav`.
+- Per-chunk transcript responses have their timestamps shifted by the chunk's start offset so downstream consumers continue to see one continuous timeline.
+- A `audio/chunks/chunks.json` artifact records chunk metadata and detected silence windows (schema `audio-chunks.schema.json`).
+- Per-chunk failures are recorded as structured warnings (`STT_CHUNK_FAILED`) instead of failing the whole run.
+
+## Slides
+
+Frames are perceptually hashed (64-bit dHash via ffmpeg, no managed image library required) and adjacent frames within a Hamming distance threshold are grouped into slides. Slides are facts about visible-content continuity: an orchestrator can answer "when was slide X visible?" by reading `firstSeenSeconds`/`lastSeenSeconds` directly from `evidence.slides[]` (also written to `slides/slides.json`).
+
+OCR and vision run once per slide (the slide's `primaryFrameId`), not per individual frame, so a 60-minute talk with 30 scene frames typically pays for far fewer LLM calls. Each `OcrFrameResult` and `VisionFrameResult` carries a `slideId` reference back to its slide.
+
+Tunables:
+
+- `slides.enabled` (default `true`) — set false to disable grouping; every frame becomes its own slide.
+- `slides.hashDistance` (default `6`, range 0-64) — maximum Hamming distance between adjacent dHash values still considered the same slide.
+- CLI: `--no-slide-grouping` and `--slide-hash-distance <n>`.
+- MCP: `slideGrouping: false` and `slideHashDistance: <n>`.
+
+## Frame Budgeting
+
+`--frames N` is a per-strategy parameter, not a global density:
+
+| Strategy | What `--frames N` produces |
+|---|---|
+| `interval` (default) | exactly N frames spaced evenly across the duration |
+| `scene` | up to `frames.sceneSafetyCap` (default 2000) scene-cut frames; `--frames` is ignored. Slide grouping deduplicates the unbounded stream so OCR/vision cost still scales with unique slides only |
+| `every-frame` | the first N decoded frames of the video (a debug/inspection tool) |
+
+For long videos, `--frames 30` with the `interval` strategy means a frame every `duration/30` seconds — likely too sparse for a 40-minute video. Two ways to densify:
+
+- `--frames-per-minute <n>` (CLI), `framesPerMinute` (MCP/batch). Scales the count by duration; `--frames` becomes the floor: `effective = max(framesPerMinute * durationMinutes, --frames)`. Ignored for `scene` and `every-frame`.
+- `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 2000 is generous for typical talks.
+
+If a run looks undersampled (fewer than 1 frame per 5 minutes for the `interval` strategy without `--frames-per-minute`), Zakira.Replay emits a `FRAMES_LIKELY_UNDERSAMPLED` warning naming the actual ratio. When the scene safety cap is reached, it emits `FRAMES_SCENE_CAP_REACHED`. Both are facts; orchestrators can branch on the codes.
+
+## Structured OCR/Vision
+
+OCR and vision prompts ask the model to return strict JSON. Each `OcrFrameResult.Structured` carries `{ freeText, lines[], tables[] }`; each `VisionFrameResult.Structured` carries `{ kind, title?, bullets[], codeBlocks[], charts[], uiElements[], freeText }`. When the model returns prose instead of JSON, a tolerant fallback stores the raw text under `freeText` and a structured warning (`OCR_PARSE_FALLBACK` / `VISION_PARSE_FALLBACK`) is emitted so orchestrators can branch.
+
+Per-frame artifacts are also written for direct loading without parsing `evidence.json`:
+
+- `ocr/{frameId}.json` — `ocr.schema.json`
+- `vision/{frameId}.json` — `vision.schema.json`
+
+## Evidence Alignment
+
+`zakira-replay align <run-directory>` (and the MCP `build_evidence_alignment` tool) emits two cross-modal views under `evidence-aligned/`. Both files share `evidence-aligned.schema.json` and are pure rearrangements of `evidence.json` (and `chapters/chapters.json` when present); no model calls are made.
+
+- `evidence-aligned/by-chapter.json` — one entry per chapter, joining `slideIds`, `transcriptSegmentIds`, `ocrFrameIds`, `visionFrameIds`, and per-speaker statistics within the chapter window.
+- `evidence-aligned/by-slide.json` — one entry per slide, joining `frameIds`, the slide's `ocr` and `vision` results, `transcriptSegmentIds` spoken while the slide was visible, per-speaker statistics over the slide window, and the chapters the slide overlaps.
+
+Slide visibility windows are extended to `[slide[i].firstSeenSeconds, slide[i+1].firstSeenSeconds)` (with the last slide covering up to `evidence.durationSeconds`) so the answer to "which transcript segments were spoken while slide N was on screen" matches the obvious "slide N is shown until slide N+1 appears" assumption. Run `chapters build` first if you want a populated `by-chapter` view; without it, `by-chapter.json` is emitted with an empty `chapters[]` array.
 
 For sites that require browser cookies or an authenticated session, pass through `yt-dlp` auth options:
 
@@ -134,12 +214,12 @@ Secrets themselves should stay out of JSON config. The config can store secret e
 
 ```json
 {
-  "instruction": "Extract transcript and frames for later summarization.",
+  "visionInstruction": "Focus on slide titles and chart axes.",
+  "ocrInstruction": "Preserve indentation in code-like text.",
   "frames": 7,
   "useSpeechToText": true,
   "useOcr": true,
   "useVision": true,
-  "useSummary": true,
   "items": [
     { "source": "https://example.com/video1", "runId": "video-1" },
     { "source": "C:/media/video2.mp4", "frames": 5 }
@@ -147,7 +227,24 @@ Secrets themselves should stay out of JSON config. The config can store secret e
 }
 ```
 
-The batch runner calls the same single-video pipeline for each item and writes a batch summary under `runs/`.
+The batch runner calls the same single-video pipeline for each item and writes a batch result under `runs/`. Both instructions are optional; the pipeline's baseline already extracts everything visible from frames and every readable piece of text.
+
+## Vision and OCR Steering
+
+OCR and vision both have comprehensive baselines. Out of the box (no instruction provided) they extract:
+
+- Vision: every distinct piece of visible content — title text, bullets, body text, code blocks, chart titles/axes/series, UI controls and labels, captioned text, diagram annotations.
+- OCR: every readable piece of text in the frame, preserving line breaks, with tables surfaced when actually visible.
+
+`--vision-instruction <text>` and `--ocr-instruction <text>` (and the equivalent `visionInstruction` / `ocrInstruction` fields in MCP and batch) are optional *focus signals* that bias enumeration order. They never relax the "do not invent" guardrails. Good steering instructions describe *what visible aspects matter*, not what to conclude:
+
+| Good (fact-shaped) | Bad (asks for synthesis) |
+|---|---|
+| `Bias toward slide titles, code blocks, and chart axes.` | `Tell me which approach is better.` |
+| `Identify on-screen UI controls and their labels.` | `Summarize the speaker's argument.` |
+| `Capture visible commit messages and terminal output.` | `Score the slide quality.` |
+
+Both instructions are persisted verbatim into `evidence.json` and `manifest.json` (empty string when not provided) so the audit trail records exactly how the run was framed.
 
 ## Queue / Worker Mode
 
@@ -175,7 +272,7 @@ Clip extraction writes timestamped clips under `clips/`:
 zakira-replay clip C:\media\demo.mp4 --start 01:20 --end 02:05 --output-name dashboard-demo
 ```
 
-Search indexing builds over `evidence.json` transcript, OCR, vision, summary, and warnings. The default backend is a portable JSON TF-IDF index at `search/index.json`:
+Search indexing builds over `evidence.json` transcript, OCR, vision, and warnings. The default backend is a portable JSON TF-IDF index at `search/index.json`:
 
 ```bash
 zakira-replay search build runs\example-run
@@ -223,7 +320,7 @@ MCP exposes both a blocking compatibility tool and non-blocking job tools:
 - `query_search_index`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`.
 - `build_chapters`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
 
-Agents should prefer the job tools for long videos or LLM-backed OCR/vision/summary work.
+Agents should prefer the job tools for long videos or LLM-backed OCR/vision work.
 
 MCP job snapshots are persisted under `runs/.mcp/jobs/`. Completed job status and results survive MCP server restarts. Jobs that were pending or running when the server stopped are restored as failed with a restart message.
 
@@ -243,24 +340,29 @@ Agents should load `zakira-replay-cli` when shell access is available, or `zakir
 
 ## Artifact Contract
 
-Zakira.Replay does not generate books, reports, presentations, or PDFs. It provides video evidence that external orchestrators can consume.
+Zakira.Replay does not generate books, reports, presentations, summaries, work items, or any other synthesized output. It produces fact-shaped evidence that external orchestrators consume.
 
 Each analyzed video run writes a folder under `runs/` containing:
 
 - `request.json`: original source, instruction, transcript flag, frame count, and optional run ID.
-- `metadata.json`: source metadata resolved from the URL or local file.
-- `manifest.json`: stable summary of produced artifacts.
-- `evidence.json`: structured evidence for downstream agents/orchestrators.
-- `transcript.md`: normalized timestamped transcript when captions or sidecar subtitles are available.
+- `metadata.json`: source metadata resolved from the URL or local file, including `availableSubtitleLanguages` when the source advertises any.
+- `manifest.json`: stable index of produced artifacts and structured warnings.
+- `evidence.json`: structured evidence for downstream agents/orchestrators, including per-slide grouping, per-speaker registry, and structured warnings.
+- `transcript.md`: normalized timestamped transcript when captions or sidecar subtitles are available; `[Speaker Name]` prefixes are inserted when the source carries speaker tags.
 - `transcript/raw.md` and `transcript/raw.json`: raw parsed transcript before normalization.
 - `transcript/normalization.json`: transcript merge audit report with merge reasons and source/result segments.
 - `captions/`: raw extracted subtitle files.
 - `audio/`: extracted audio when requested or needed for STT.
+- `audio/chunks/`: per-chunk WAV files and `chunks.json` when long audio is silence-chunked for STT.
 - `frames/`: representative frame images.
-- `ocr/`: frame OCR results when requested.
-- `vision/`: frame visual descriptions when requested.
-- `summary.md`: evidence summary when requested.
-- `evidence.md`: human-readable summary of the artifact paths.
+- `slides/slides.json`: slide grouping facts (first/last visible per slide, frame IDs, primary frame).
+- `ocr/{frameId}.json` plus `ocr/combined.md`: structured OCR result per slide primary frame.
+- `vision/{frameId}.json` plus `vision/combined.md`: structured vision result per slide primary frame.
+- `chapters/chapters.json` and `chapters/chapters.md`: deterministic transcript-based chapter boundaries (when built).
+- `evidence-aligned/by-chapter.json` and `evidence-aligned/by-slide.json`: cross-modal alignment views (when built).
+- `evidence.md`: human-readable index of the artifact paths.
+
+Synthesis (summaries, work items, decisions, sentiment) is the responsibility of the calling orchestrator; Zakira.Replay does not produce inferences.
 
 JSON schemas for stable machine-readable artifacts are in `schemas/`:
 
@@ -271,6 +373,11 @@ JSON schemas for stable machine-readable artifacts are in `schemas/`:
 - `schemas/chapters.schema.json`
 - `schemas/clip.schema.json`
 - `schemas/search-index.schema.json`
+- `schemas/audio-chunks.schema.json`
+- `schemas/slides.schema.json`
+- `schemas/ocr.schema.json`
+- `schemas/vision.schema.json`
+- `schemas/evidence-aligned.schema.json`
 - `schemas/batch.schema.json`
 - `schemas/batch-result.schema.json`
 - `schemas/queue.schema.json`

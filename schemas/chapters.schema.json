@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "runId", "createdAt", "method", "chapters"],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.1" },
+    "schemaVersion": { "type": "string", "const": "0.7" },
     "runId": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string", "format": "date-time" },
     "method": { "type": "string", "minLength": 1 },
@@ -19,14 +19,12 @@
     "chapter": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["startSeconds", "endSeconds", "timestamp", "endTimestamp", "title", "summary", "evidence"],
+      "required": ["startSeconds", "endSeconds", "timestamp", "endTimestamp", "evidence"],
       "properties": {
         "startSeconds": { "type": "number", "minimum": 0 },
         "endSeconds": { "type": "number", "minimum": 0 },
         "timestamp": { "type": "string", "minLength": 1 },
         "endTimestamp": { "type": "string", "minLength": 1 },
-        "title": { "type": "string", "minLength": 1 },
-        "summary": { "type": "string" },
         "evidence": {
           "type": "array",
           "items": {

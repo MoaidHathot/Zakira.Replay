@@ -2,11 +2,13 @@
 
 Semantic chapter detection means grouping video evidence into meaningful sections such as introduction, setup, demo, benchmark, Q&A, or conclusion.
 
-Zakira.Replay implements deterministic offline lexical chapter generation. Embedding-backed and LLM-refined chapters remain future enhancements.
+Zakira.Replay implements deterministic offline lexical chapter boundary detection. Embedding-backed and LLM-refined boundaries remain future enhancements.
+
+Chapters produced by Zakira.Replay are pure time spans plus per-chapter evidence references. They do not carry titles or prose summaries: those are inferences and the orchestrating agent generates them from the evidence as needed.
 
 ## Inputs
 
-Chapters can be inferred from:
+Chapter boundaries can be inferred from:
 
 - Transcript segment timestamps and text.
 - Existing captions or sidecar subtitles.
@@ -21,14 +23,14 @@ Chapters can be inferred from:
 2. Create evidence windows around each candidate boundary.
 3. Score topic shifts between neighboring windows using lexical similarity, embeddings, or an LLM.
 4. Merge short adjacent sections and split sections that exceed a max duration.
-5. Generate chapter labels from the transcript/OCR/vision evidence in each section.
-6. Write `chapters.json` and `chapters.md` with timestamp ranges, labels, summaries, and supporting evidence references.
+5. Emit each chapter as `{ startSeconds, endSeconds, timestamp, endTimestamp, evidence[] }`.
+6. Write `chapters.json` and `chapters.md` with timestamp ranges and supporting evidence references.
 
 ## Implementation Options
 
 ### Offline Lexical
 
-Use the local search/index tokenization and cosine similarity to detect large topic shifts between transcript windows.
+Use the local search/index tokenization and Jaccard similarity to detect large topic shifts between transcript windows.
 
 Pros:
 
@@ -55,19 +57,18 @@ Cons:
 - Requires an embedding provider and cache.
 - Adds provider/version reproducibility concerns.
 
-### LLM-Backed
+### LLM-Backed Boundary Detection
 
-Ask the LLM to produce chapters from bounded evidence windows.
+Ask the LLM to propose boundaries from bounded evidence windows. Note: even in this future mode, Zakira.Replay would still emit only `{ start, end, evidence[] }`. The orchestrator labels and summarizes chapters.
 
 Pros:
 
-- Best labels and summaries.
 - Can combine transcript, OCR, and vision evidence naturally.
 
 Cons:
 
 - Slower and more expensive.
-- Requires careful chunking and evidence citation to avoid hallucinated chapters.
+- Requires careful chunking and evidence citation to avoid hallucinated boundaries.
 
 ## Current Implementation
 
@@ -88,26 +89,20 @@ The current algorithm:
 2. Groups transcript text into time windows.
 3. Scores lexical topic shifts between adjacent windows.
 4. Splits when the topic shift is high and the minimum duration is met, or when the maximum duration is reached.
-5. Generates deterministic labels and evidence references from transcript/OCR/vision/frame artifacts.
+5. Emits per-chapter evidence references from transcript/OCR/vision/frame artifacts.
 
-Future refinements can add:
-
-```bash
-zakira-replay chapters refine <run-directory> --model gpt-5.5
-```
-
-Suggested schema:
+Schema (current `0.2`):
 
 ```json
 {
-  "schemaVersion": "0.1",
+  "schemaVersion": "0.2",
   "runId": "example-run",
   "chapters": [
     {
       "startSeconds": 0,
       "endSeconds": 120,
-      "title": "Introduction and goals",
-      "summary": "The speaker introduces the router comparison and evaluation criteria.",
+      "timestamp": "00:00",
+      "endTimestamp": "02:00",
       "evidence": [
         { "kind": "transcript", "timestamp": "00:12", "text": "..." },
         { "kind": "frame", "timestamp": "01:05", "path": "frames/frame-001.jpg" }

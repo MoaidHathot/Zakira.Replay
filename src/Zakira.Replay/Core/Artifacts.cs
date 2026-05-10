@@ -153,7 +153,8 @@ public static class Slug
 public sealed record ArtifactManifest(
     string SchemaVersion,
     string Source,
-    string Instruction,
+    string VisionInstruction,
+    string OcrInstruction,
     DateTimeOffset CreatedAt,
     string RunId,
     string? Title,
@@ -163,20 +164,22 @@ public sealed record ArtifactManifest(
     string? TranscriptPath,
     string? OcrPath,
     string? VisionPath,
-    string? SummaryPath,
     string? EvidencePath,
     IReadOnlyList<FrameArtifact> Frames,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<ReplayWarning> Warnings);
 
 public sealed record FrameArtifact(
+    string Id,
     string Path,
     double TimestampSeconds,
-    string TimestampLabel);
+    string TimestampLabel,
+    string? PerceptualHash = null);
 
 public sealed record EvidenceDocument(
     string SchemaVersion,
     string Source,
-    string Instruction,
+    string VisionInstruction,
+    string OcrInstruction,
     string RunId,
     string? Title,
     string? WebpageUrl,
@@ -184,25 +187,96 @@ public sealed record EvidenceDocument(
     string? AudioPath,
     IReadOnlyList<TranscriptSegment> Transcript,
     IReadOnlyList<FrameArtifact> Frames,
+    IReadOnlyList<SlideArtifact> Slides,
     IReadOnlyList<OcrFrameResult> Ocr,
     IReadOnlyList<VisionFrameResult> Vision,
-    string? Summary,
-    IReadOnlyList<string> Warnings);
+    IReadOnlyList<SpeakerSummary> Speakers,
+    IReadOnlyList<ReplayWarning> Warnings);
 
 public sealed record TranscriptSegment(
     double? StartSeconds,
     double? EndSeconds,
     string? Timestamp,
-    string Text);
+    string Text,
+    string? Id = null,
+    string? SpeakerId = null,
+    string? SpeakerDisplayName = null);
+
+public sealed record SpeakerSummary(
+    string Id,
+    string? DisplayName,
+    int SegmentCount,
+    double TotalSeconds,
+    double? FirstSeenSeconds,
+    double? LastSeenSeconds);
+
+/// <summary>
+/// A run of perceptually-similar frames treated as a single visible "slide" or scene. Each slide
+/// is identified by <see cref="Id"/> (e.g. <c>"slide-001"</c>) and carries the first/last
+/// timestamps it was visible, the frames that map to it, and the primary frame chosen for OCR
+/// and vision analysis. Slides are facts derived from perceptual hashing; they are emitted even
+/// when grouping reduces to one frame per slide so the contract stays uniform.
+/// </summary>
+public sealed record SlideArtifact(
+    string Id,
+    double FirstSeenSeconds,
+    double LastSeenSeconds,
+    string FirstSeenLabel,
+    string LastSeenLabel,
+    string PrimaryFrameId,
+    IReadOnlyList<string> FrameIds,
+    string? PerceptualHash);
 
 public sealed record OcrFrameResult(
+    string FrameId,
     string FramePath,
     double TimestampSeconds,
     string TimestampLabel,
-    string Text);
+    string Text,
+    string? SlideId = null,
+    OcrFrameStructured? Structured = null);
+
+/// <summary>
+/// Structured OCR result extracted from a frame. <see cref="FreeText"/> always carries the full
+/// raw response (or a tolerant-parsed fallback when the model returned non-JSON). Structured
+/// fields are populated when the model output successfully parsed against the documented OCR
+/// JSON shape.
+/// </summary>
+public sealed record OcrFrameStructured(
+    string FreeText,
+    IReadOnlyList<string> Lines,
+    IReadOnlyList<OcrTable> Tables);
+
+public sealed record OcrTable(
+    IReadOnlyList<string> Headers,
+    IReadOnlyList<IReadOnlyList<string>> Rows);
 
 public sealed record VisionFrameResult(
+    string FrameId,
     string FramePath,
     double TimestampSeconds,
     string TimestampLabel,
-    string Description);
+    string Description,
+    string? SlideId = null,
+    VisionFrameStructured? Structured = null);
+
+/// <summary>
+/// Structured vision analysis of a frame. <see cref="FreeText"/> always carries the full raw
+/// response (or a tolerant-parsed fallback). <see cref="Kind"/> is one of <c>slide</c>,
+/// <c>ui</c>, <c>code</c>, <c>diagram</c>, <c>chart</c>, <c>dashboard</c>, or <c>other</c>.
+/// </summary>
+public sealed record VisionFrameStructured(
+    string Kind,
+    string? Title,
+    IReadOnlyList<string> Bullets,
+    IReadOnlyList<VisionCodeBlock> CodeBlocks,
+    IReadOnlyList<VisionChart> Charts,
+    IReadOnlyList<string> UiElements,
+    string FreeText);
+
+public sealed record VisionCodeBlock(string? Language, string Text);
+
+public sealed record VisionChart(
+    string? Title,
+    IReadOnlyList<string> Axes,
+    IReadOnlyList<string> Series);

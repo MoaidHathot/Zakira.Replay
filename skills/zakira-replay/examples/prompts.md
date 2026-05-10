@@ -10,12 +10,12 @@ Summarize this video and include timestamps for the main claims: https://example
 
 Agent behavior:
 
-- Start `create_analysis_job` with `frames: 7`, `frameStrategy: "scene"`, `cache: true`, and `summary: true`.
+- Start `create_analysis_job` with `frames: 7`, `frameStrategy: "scene"`, and `cache: true`.
 - Add `ocr: true` and `vision: true` if slides, UI, code, or diagrams matter.
 - Poll until succeeded.
 - Read `manifest.json`, `evidence.json`, and `transcript.md`.
 - If exact transcript fidelity matters, inspect `transcript/normalization.json` and `transcript/raw.md` before quoting.
-- Produce a timestamped summary and mention warnings.
+- Synthesize the timestamped summary yourself from the evidence; Zakira.Replay does not produce summaries. Mention warnings by `code`.
 
 ## Answer A Specific Question
 
@@ -79,7 +79,7 @@ Agent behavior:
 
 - Use `zakira-replay batch run <manifest.json>` if working through CLI.
 - Use MCP jobs one-by-one if the orchestrator needs progress control.
-- After artifacts are ready, synthesize study notes from each `evidence.json` and `transcript.md`.
+- After artifacts are ready, synthesize study notes yourself from each `evidence.json` and `transcript.md`.
 
 ## Build Chapters
 
@@ -93,4 +93,4 @@ Agent behavior:
 
 - Analyze the video with transcript extraction.
 - Call `build_chapters` with the completed run directory.
-- Read `chapters/chapters.json` and cite chapter evidence timestamps.
+- Read `chapters/chapters.json` and cite chapter evidence timestamps. Generate any per-chapter labels yourself; chapters carry pure time spans plus evidence references, no titles or prose summaries.

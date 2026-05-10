@@ -32,6 +32,14 @@ public static partial class TranscriptNormalizer
                 continue;
             }
 
+            // Speaker changes are hard boundaries. Two segments attributed to different speakers
+            // are facts about turn-taking; never collapse them, even when text overlaps.
+            if (!SpeakerIdEquals(previous.SpeakerId, current.SpeakerId))
+            {
+                normalized.Add(current);
+                continue;
+            }
+
             var previousTokens = Tokenize(previous.Text).ToArray();
             var currentTokens = Tokenize(current.Text).ToArray();
             if (previousTokens.Length == 0 || currentTokens.Length == 0)
@@ -68,6 +76,8 @@ public static partial class TranscriptNormalizer
             normalized.Add(current);
         }
 
+        normalized = AssignSegmentIds(normalized);
+
         var report = new TranscriptNormalizationReport(
             SchemaVersion: "0.1",
             CreatedAt: DateTimeOffset.UtcNow,
@@ -76,6 +86,29 @@ public static partial class TranscriptNormalizer
             MergeCount: merges.Count,
             Merges: merges);
         return new TranscriptNormalizationResult(normalized, report);
+    }
+
+    private static List<TranscriptSegment> AssignSegmentIds(IReadOnlyList<TranscriptSegment> segments)
+    {
+        var withIds = new List<TranscriptSegment>(segments.Count);
+        for (var i = 0; i < segments.Count; i++)
+        {
+            var id = $"segment-{i + 1:0000}";
+            withIds.Add(segments[i] with { Id = id });
+        }
+
+        return withIds;
+    }
+
+    private static bool SpeakerIdEquals(string? left, string? right)
+    {
+        // null == null (both unattributed) is allowed; otherwise speaker ids must match exactly.
+        if (string.IsNullOrEmpty(left) && string.IsNullOrEmpty(right))
+        {
+            return true;
+        }
+
+        return string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
     }
 
     public static string ToMarkdown(IReadOnlyList<TranscriptSegment> segments)
@@ -91,15 +124,26 @@ public static partial class TranscriptNormalizer
             var timestamp = segment.Timestamp ?? FormatTimestampRange(segment);
             if (string.IsNullOrWhiteSpace(timestamp))
             {
+                AppendSpeakerPrefix(builder, segment);
                 builder.Append(segment.Text.Trim()).Append('\n');
             }
             else
             {
-                builder.Append("**[").Append(timestamp).Append("]** ").Append(segment.Text.Trim()).Append('\n');
+                builder.Append("**[").Append(timestamp).Append("]** ");
+                AppendSpeakerPrefix(builder, segment);
+                builder.Append(segment.Text.Trim()).Append('\n');
             }
         }
 
         return builder.ToString();
+    }
+
+    private static void AppendSpeakerPrefix(StringBuilder builder, TranscriptSegment segment)
+    {
+        if (!string.IsNullOrWhiteSpace(segment.SpeakerDisplayName))
+        {
+            builder.Append('[').Append(segment.SpeakerDisplayName).Append("] ");
+        }
     }
 
     private static bool IsNearDuplicateWindow(TranscriptSegment previous, TranscriptSegment current)

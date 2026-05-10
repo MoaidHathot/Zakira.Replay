@@ -1,11 +1,10 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Text.RegularExpressions;
 
 namespace Zakira.Replay.Core;
 
-public sealed partial class ChapterBuilder
+public sealed class ChapterBuilder
 {
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
@@ -41,7 +40,7 @@ public sealed partial class ChapterBuilder
         var windows = BuildWindows(transcript, evidence.DurationSeconds, minDuration).ToArray();
         var boundaries = DetectBoundaries(windows, minDuration, maxDuration).ToArray();
         var chapters = BuildChapters(evidence, transcript, boundaries).ToArray();
-        var document = new ChapterDocument("0.1", evidence.RunId, DateTimeOffset.UtcNow, "offline-lexical", chapters);
+        var document = new ChapterDocument("0.7", evidence.RunId, DateTimeOffset.UtcNow, "offline-lexical", chapters);
 
         var chapterDirectory = Path.Combine(fullRunDirectory, "chapters");
         Directory.CreateDirectory(chapterDirectory);
@@ -124,8 +123,6 @@ public sealed partial class ChapterBuilder
                 continue;
             }
 
-            var title = CreateTitle(segments);
-            var summary = CreateSummary(segments);
             var chapterEvidence = segments.Take(4)
                 .Select(segment => new ChapterEvidence("transcript", segment.Timestamp ?? Timestamp.Format(segment.StartSeconds ?? start), segment.Text, null))
                 .Concat(FindFrameEvidence(evidence, start, end))
@@ -136,8 +133,6 @@ public sealed partial class ChapterBuilder
                 EndSeconds: Math.Max(start, end),
                 Timestamp: Timestamp.Format(start),
                 EndTimestamp: Timestamp.Format(Math.Max(start, end)),
-                Title: title,
-                Summary: summary,
                 Evidence: chapterEvidence);
         }
     }
@@ -158,53 +153,6 @@ public sealed partial class ChapterBuilder
         {
             yield return new ChapterEvidence("frame", frame.TimestampLabel, "Representative frame", frame.Path);
         }
-    }
-
-    private static string CreateTitle(IReadOnlyList<TranscriptSegment> segments)
-    {
-        var text = string.Join(" ", segments.Take(3).Select(segment => segment.Text.Trim()).Where(value => value.Length > 0));
-        foreach (var candidate in text.Split(['.', '?', '!', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(4))
-        {
-            var title = CreateTitleFromPhrase(candidate);
-            if (!string.IsNullOrWhiteSpace(title))
-            {
-                return title;
-            }
-        }
-
-        var fallbackTerms = segments
-            .SelectMany(segment => Tokenize(segment.Text))
-            .GroupBy(token => token, StringComparer.Ordinal)
-            .OrderByDescending(group => group.Count())
-            .ThenBy(group => group.Key, StringComparer.Ordinal)
-            .Take(6)
-            .Select(group => group.Key.ToDisplayTitleWord())
-            .ToArray();
-        return fallbackTerms.Length == 0 ? "Chapter" : string.Join(" ", fallbackTerms);
-    }
-
-    private static string? CreateTitleFromPhrase(string phrase)
-    {
-        var words = TitleWordRegex().Matches(phrase.Replace(">>", string.Empty, StringComparison.Ordinal))
-            .Select(match => match.Value.Trim('\'', '-'))
-            .Where(word => word.Length >= 2)
-            .Where(word => !TitleStopWords.Contains(word.ToLowerInvariant()))
-            .Take(7)
-            .Select(word => word.ToDisplayTitleWord())
-            .ToArray();
-        return words.Length < 2 ? null : string.Join(" ", words);
-    }
-
-    private static string CreateSummary(IReadOnlyList<TranscriptSegment> segments)
-    {
-        var text = string.Join(" ", segments.Select(segment => segment.Text.Trim()).Where(value => value.Length > 0));
-        if (text.Length <= 260)
-        {
-            return text;
-        }
-
-        var split = text.LastIndexOfAny(['.', '?', '!'], 260);
-        return split >= 120 ? text[..(split + 1)] : text[..260].TrimEnd() + "...";
     }
 
     private static double LexicalSimilarity(string left, string right)
@@ -239,9 +187,7 @@ public sealed partial class ChapterBuilder
 
         foreach (var chapter in document.Chapters)
         {
-            builder.AppendLine($"## {chapter.Timestamp}-{chapter.EndTimestamp} {chapter.Title}");
-            builder.AppendLine();
-            builder.AppendLine(chapter.Summary);
+            builder.AppendLine($"## {chapter.Timestamp}-{chapter.EndTimestamp}");
             builder.AppendLine();
             foreach (var evidenceItem in chapter.Evidence)
             {
@@ -271,14 +217,6 @@ public sealed partial class ChapterBuilder
     {
         "about", "after", "again", "also", "and", "are", "because", "but", "can", "for", "from", "has", "have", "into", "not", "now", "one", "our", "out", "the", "then", "there", "this", "that", "they", "was", "were", "with", "you", "your"
     };
-
-    private static readonly HashSet<string> TitleStopWords = new(StringComparer.Ordinal)
-    {
-        "about", "after", "again", "also", "and", "are", "because", "been", "being", "but", "can", "could", "for", "from", "had", "has", "have", "here", "into", "its", "let", "lets", "now", "okay", "our", "out", "she", "speaker", "that", "the", "their", "them", "there", "these", "they", "this", "those", "was", "were", "will", "with", "would", "yeah", "yes", "you", "your"
-    };
-
-    [GeneratedRegex("[\\p{L}\\p{N}][\\p{L}\\p{N}'-]*")]
-    private static partial Regex TitleWordRegex();
 }
 
 public sealed record ChapterBuildOptions(double MinDurationSeconds = 60, double MaxDurationSeconds = 600);
@@ -297,8 +235,6 @@ public sealed record Chapter(
     double EndSeconds,
     string Timestamp,
     string EndTimestamp,
-    string Title,
-    string Summary,
     IReadOnlyList<ChapterEvidence> Evidence);
 
 public sealed record ChapterEvidence(string Kind, string Timestamp, string Text, string? Path);
@@ -306,16 +242,3 @@ public sealed record ChapterEvidence(string Kind, string Timestamp, string Text,
 internal sealed record ChapterWindow(double StartSeconds, double EndSeconds, string Text, IReadOnlyList<ChapterEvidence> Evidence);
 
 internal sealed record ChapterBoundary(int WindowIndex, double StartSeconds);
-
-internal static class ChapterStringExtensions
-{
-    public static string ToDisplayTitleWord(this string value)
-    {
-        if (value.Length == 0 || value.Skip(1).Any(char.IsUpper) || value.Any(char.IsDigit))
-        {
-            return value;
-        }
-
-        return char.ToUpperInvariant(value[0]) + value[1..].ToLowerInvariant();
-    }
-}

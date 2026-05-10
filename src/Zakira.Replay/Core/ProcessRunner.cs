@@ -3,9 +3,9 @@ using System.Text;
 
 namespace Zakira.Replay.Core;
 
-public sealed class ProcessRunner
+public class ProcessRunner
 {
-    public async Task<ProcessResult> RunAsync(
+    public virtual async Task<ProcessResult> RunAsync(
         string fileName,
         IEnumerable<string> arguments,
         string? workingDirectory = null,

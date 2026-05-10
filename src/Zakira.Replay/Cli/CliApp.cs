@@ -27,6 +27,7 @@ public static class CliApp
             "clip" => await RunClipAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "search" => await RunSearchAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "chapters" => await RunChaptersAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
+            "align" => await RunAlignAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "discover" => await RunDiscoverAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "batch" => await RunBatchAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "queue" => await RunQueueAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
@@ -69,7 +70,12 @@ public static class CliApp
                 "batch.schema.json",
                 "batch-result.schema.json",
                 "queue.schema.json",
-                "queue-run-result.schema.json"
+                "queue-run-result.schema.json",
+                "audio-chunks.schema.json",
+                "slides.schema.json",
+                "ocr.schema.json",
+                "vision.schema.json",
+                "evidence-aligned.schema.json"
             ]);
 
         if (parsed.GetBool("json", defaultValue: false))
@@ -157,11 +163,10 @@ public static class CliApp
     private static Task<int> RunAnalyzeAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
     {
         var parsed = CommandOptions.Parse(args);
-        var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay analyze <url-or-file> [--instruction <text>] [--frames <count>] [--run-id <id>]");
-        var instruction = parsed.Get("instruction") ?? "Extract transcript and representative frames for later LLM analysis.";
+        var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--run-id <id>]");
         var frames = parsed.GetInt("frames", 7);
         var runId = parsed.Get("run-id");
-        var request = CreateAnalyzeRequest(parsed, source, instruction, includeTranscript: true, frameCount: frames, runId);
+        var request = CreateAnalyzeRequest(parsed, source, includeTranscript: true, frameCount: frames, runId);
 
         return RunPipelineAsync(request, stdout, cancellationToken);
     }
@@ -171,7 +176,7 @@ public static class CliApp
         var parsed = CommandOptions.Parse(args);
         var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay transcribe <url-or-file> [--run-id <id>]");
         var runId = parsed.Get("run-id");
-        var request = CreateAnalyzeRequest(parsed, source, "Extract an existing caption transcript or transcribe audio.", includeTranscript: true, frameCount: 0, runId) with
+        var request = CreateAnalyzeRequest(parsed, source, includeTranscript: true, frameCount: 0, runId) with
         {
             ExtractAudio = parsed.GetBool("stt", defaultValue: false) || parsed.GetBool("audio", defaultValue: false),
             UseSpeechToText = parsed.GetBool("stt", defaultValue: false)
@@ -186,7 +191,7 @@ public static class CliApp
         var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay frames <url-or-file> [--count <count>] [--run-id <id>]");
         var count = parsed.GetInt("count", parsed.GetInt("frames", 7));
         var runId = parsed.Get("run-id");
-        var request = CreateAnalyzeRequest(parsed, source, "Extract representative video frames.", includeTranscript: false, frameCount: count, runId);
+        var request = CreateAnalyzeRequest(parsed, source, includeTranscript: false, frameCount: count, runId);
 
         return RunPipelineAsync(request, stdout, cancellationToken);
     }
@@ -286,6 +291,23 @@ public static class CliApp
         return 0;
     }
 
+    private static async Task<int> RunAlignAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
+    {
+        var parsed = CommandOptions.Parse(args);
+        var runDirectory = parsed.GetRequiredPositional("run-directory", "Usage: zakira-replay align <run-directory>");
+        var result = await new EvidenceAlignmentService().BuildAsync(Path.GetFullPath(runDirectory), new EvidenceAlignmentOptions(), cancellationToken).ConfigureAwait(false);
+
+        stdout.WriteLine($"Aligned evidence for run {result.RunId}.");
+        stdout.WriteLine($"By chapter: {result.ByChapterPath} ({result.ByChapter.Chapters.Count} chapter(s))");
+        stdout.WriteLine($"By slide: {result.BySlidePath} ({result.BySlide.Slides.Count} slide(s))");
+        if (!result.ChaptersLoaded)
+        {
+            stdout.WriteLine("Note: chapters/chapters.json was not found; by-chapter view is empty. Run `zakira-replay chapters build` first to populate it.");
+        }
+
+        return 0;
+    }
+
     private static async Task<int> RunDiscoverAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
     {
         var parsed = CommandOptions.Parse(args);
@@ -349,9 +371,8 @@ public static class CliApp
         {
             case "enqueue":
                 var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]");
-                var instruction = parsed.Get("instruction") ?? "Extract transcript and representative frames for later LLM analysis.";
                 var frames = parsed.GetInt("frames", parsed.GetInt("count", 7));
-                var request = CreateAnalyzeRequest(parsed, source, instruction, includeTranscript: !parsed.GetBool("no-transcript", defaultValue: false), frameCount: frames, parsed.Get("run-id"));
+                var request = CreateAnalyzeRequest(parsed, source, includeTranscript: !parsed.GetBool("no-transcript", defaultValue: false), frameCount: frames, parsed.Get("run-id"));
                 var enqueueResult = await queue.EnqueueAsync(parsed.Get("queue-id"), request, parsed.Get("job-id"), parsed.GetInt("retries", 0), cancellationToken).ConfigureAwait(false);
                 stdout.WriteLine($"Enqueued job: {enqueueResult.JobId}");
                 stdout.WriteLine($"Queue: {enqueueResult.QueueId}");
@@ -529,7 +550,7 @@ public static class CliApp
             stdout.WriteLine("Warnings:");
             foreach (var warning in result.Manifest.Warnings)
             {
-                stdout.WriteLine($"- {warning}");
+                stdout.WriteLine($"- [{warning.Severity}] {warning.Code}: {warning.Message}");
             }
         }
 
@@ -583,23 +604,29 @@ public static class CliApp
     private static AnalyzeRequest CreateAnalyzeRequest(
         CommandOptions parsed,
         string source,
-        string instruction,
         bool includeTranscript,
         int frameCount,
         string? runId)
     {
         var useOcr = parsed.GetBool("ocr", defaultValue: false);
         var useVision = parsed.GetBool("vision", defaultValue: false);
-        var useSummary = parsed.GetBool("summary", defaultValue: false);
         var useStt = parsed.GetBool("stt", defaultValue: false);
         var extractAudio = parsed.GetBool("audio", defaultValue: false) || useStt;
         var browserAuth = parsed.Get("browser-auth");
         var config = new ConfigStore().Load();
         var llmProvider = LlmProviderFactory.GetConfiguredProvider(config);
         llmProvider = LlmProviderFactory.Normalize(parsed.Get("llm-provider") ?? parsed.Get("provider") ?? llmProvider);
+        var captionLanguages = ParseCaptionLanguagesOption(parsed);
+        bool? slideGrouping = parsed.GetBool("no-slide-grouping", defaultValue: false) ? false : null;
+        var slideHashDistance = parsed.GetOptionalInt("slide-hash-distance");
+        var framesPerMinute = parsed.GetOptionalInt("frames-per-minute");
+        var sceneSafetyCap = parsed.GetOptionalInt("scene-safety-cap");
+        var visionInstruction = parsed.Get("vision-instruction") ?? string.Empty;
+        var ocrInstruction = parsed.Get("ocr-instruction") ?? string.Empty;
         return new AnalyzeRequest(
             Source: source,
-            Instruction: instruction,
+            VisionInstruction: visionInstruction,
+            OcrInstruction: ocrInstruction,
             IncludeTranscript: includeTranscript,
             FrameCount: frameCount,
             RunId: runId,
@@ -607,7 +634,6 @@ public static class CliApp
             UseSpeechToText: useStt,
             UseOcr: useOcr,
             UseVision: useVision,
-            UseSummary: useSummary,
             MaxAiFrames: parsed.GetInt("max-ai-frames", 5),
             Model: parsed.Get("model") ?? LlmProviderFactory.GetDefaultModel(llmProvider, config),
             LlmProvider: llmProvider,
@@ -615,7 +641,27 @@ public static class CliApp
             UseCache: parsed.GetBool("cache", defaultValue: false),
             FrameStrategy: ResolveFrameStrategy(parsed),
             CookiesPath: parsed.Get("cookies"),
-            CookiesFromBrowser: browserAuth ?? parsed.Get("cookies-from-browser"));
+            CookiesFromBrowser: browserAuth ?? parsed.Get("cookies-from-browser"),
+            CaptionLanguages: captionLanguages,
+            SlideGrouping: slideGrouping,
+            SlideHashDistance: slideHashDistance,
+            FramesPerMinute: framesPerMinute,
+            SceneSafetyCap: sceneSafetyCap);
+    }
+
+    private static IReadOnlyList<string>? ParseCaptionLanguagesOption(CommandOptions parsed)
+    {
+        var raw = parsed.Get("caption-languages") ?? parsed.Get("captions-languages") ?? parsed.Get("sub-langs");
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var languages = raw.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return languages.Length == 0 ? null : languages;
     }
 
     private static string ResolveFrameStrategy(CommandOptions parsed)
@@ -650,13 +696,14 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay version");
         stdout.WriteLine("  zakira-replay info [--json]");
         stdout.WriteLine("  zakira-replay doctor [--json]");
-        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--instruction <text>] [--frames <count>] [--frame-strategy interval|scene|every-frame] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--summary] [--run-id <id>] [--cache] [--force]");
+        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]");
         stdout.WriteLine("  zakira-replay search build <run-directory> [--backend json|sqlite|sqlite-onnx]");
         stdout.WriteLine("  zakira-replay search query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]");
         stdout.WriteLine("  zakira-replay chapters build <run-directory> [--min-duration <seconds>] [--max-duration <seconds>]");
+        stdout.WriteLine("  zakira-replay align <run-directory>");
         stdout.WriteLine("  zakira-replay discover <url> [--browser] [--output <path>]");
         stdout.WriteLine("  zakira-replay batch run <manifest.json>");
         stdout.WriteLine("  zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]");

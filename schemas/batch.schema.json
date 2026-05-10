@@ -7,14 +7,14 @@
   "required": ["items"],
   "properties": {
     "batchId": { "type": ["string", "null"] },
-    "instruction": { "type": ["string", "null"] },
+    "visionInstruction": { "type": ["string", "null"] },
+    "ocrInstruction": { "type": ["string", "null"] },
     "frames": { "type": ["integer", "null"], "minimum": 0 },
     "includeTranscript": { "type": ["boolean", "null"] },
     "extractAudio": { "type": ["boolean", "null"] },
     "useSpeechToText": { "type": ["boolean", "null"] },
     "useOcr": { "type": ["boolean", "null"] },
     "useVision": { "type": ["boolean", "null"] },
-    "useSummary": { "type": ["boolean", "null"] },
     "maxAiFrames": { "type": ["integer", "null"], "minimum": 0 },
     "model": { "type": ["string", "null"] },
     "llmProvider": { "type": ["string", "null"] },
@@ -22,6 +22,14 @@
     "frameStrategy": { "type": ["string", "null"] },
     "cookiesPath": { "type": ["string", "null"] },
     "cookiesFromBrowser": { "type": ["string", "null"] },
+    "captionLanguages": {
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "slideGrouping": { "type": ["boolean", "null"] },
+    "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
+    "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
+    "sceneSafetyCap": { "type": ["integer", "null"], "minimum": 1 },
     "continueOnError": { "type": "boolean" },
     "items": {
       "type": "array",
@@ -32,14 +40,14 @@
         "required": ["source"],
         "properties": {
           "source": { "type": "string", "minLength": 1 },
-          "instruction": { "type": ["string", "null"] },
+          "visionInstruction": { "type": ["string", "null"] },
+          "ocrInstruction": { "type": ["string", "null"] },
           "frames": { "type": ["integer", "null"], "minimum": 0 },
           "includeTranscript": { "type": ["boolean", "null"] },
           "extractAudio": { "type": ["boolean", "null"] },
           "useSpeechToText": { "type": ["boolean", "null"] },
           "useOcr": { "type": ["boolean", "null"] },
           "useVision": { "type": ["boolean", "null"] },
-          "useSummary": { "type": ["boolean", "null"] },
           "maxAiFrames": { "type": ["integer", "null"], "minimum": 0 },
           "model": { "type": ["string", "null"] },
           "llmProvider": { "type": ["string", "null"] },
@@ -47,7 +55,15 @@
           "useCache": { "type": ["boolean", "null"] },
           "frameStrategy": { "type": ["string", "null"] },
           "cookiesPath": { "type": ["string", "null"] },
-          "cookiesFromBrowser": { "type": ["string", "null"] }
+          "cookiesFromBrowser": { "type": ["string", "null"] },
+          "captionLanguages": {
+            "type": ["array", "null"],
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "slideGrouping": { "type": ["boolean", "null"] },
+          "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
+          "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
+          "sceneSafetyCap": { "type": ["integer", "null"], "minimum": 1 }
         }
       }
     }

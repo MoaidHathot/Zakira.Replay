@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/audio-chunks.schema.json",
+  "title": "Zakira.Replay Audio Chunks",
+  "description": "Per-chunk metadata produced by AudioChunker when long audio is split for chunked transcription. Only written when the audio actually had to be split.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "sourceAudioPath", "totalDurationSeconds", "chunks", "silenceWindows"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.7" },
+    "sourceAudioPath": { "type": "string", "minLength": 1 },
+    "totalDurationSeconds": { "type": "number", "minimum": 0 },
+    "chunks": {
+      "type": "array",
+      "minItems": 1,
+      "items": { "$ref": "#/$defs/audioChunk" }
+    },
+    "silenceWindows": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/silenceWindow" }
+    }
+  },
+  "$defs": {
+    "audioChunk": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "startSeconds", "durationSeconds", "path"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "startSeconds": { "type": "number", "minimum": 0 },
+        "durationSeconds": { "type": "number", "minimum": 0 },
+        "path": { "type": "string", "minLength": 1 }
+      }
+    },
+    "silenceWindow": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["startSeconds", "endSeconds", "durationSeconds"],
+      "properties": {
+        "startSeconds": { "type": "number", "minimum": 0 },
+        "endSeconds": { "type": "number", "minimum": 0 },
+        "durationSeconds": { "type": "number", "minimum": 0 }
+      }
+    }
+  }
+}

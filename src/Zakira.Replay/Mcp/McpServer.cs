@@ -164,6 +164,12 @@ public sealed class McpServer
                         },
                         new
                         {
+                            name = "build_evidence_alignment",
+                            description = "Builds cross-modal evidence alignment views (by-chapter and by-slide) over a completed run. Pure rearrangement; no model calls.",
+                            inputSchema = AlignmentBuildInputSchema()
+                        },
+                        new
+                        {
                             name = "doctor",
                             description = "Reports Zakira.Replay dependency availability without installing anything.",
                             inputSchema = new { type = "object", properties = new { } }
@@ -333,6 +339,21 @@ public sealed class McpServer
                 }, JsonOptions), cancellationToken).ConfigureAwait(false);
                 break;
 
+            case "build_evidence_alignment":
+                var alignmentRunDirectory = GetRequiredString(args, "runDirectory", "build_evidence_alignment requires `runDirectory`.");
+                var alignmentResult = await new EvidenceAlignmentService().BuildAsync(alignmentRunDirectory, new EvidenceAlignmentOptions(), cancellationToken).ConfigureAwait(false);
+                await WriteToolTextAsync(request.Id, JsonSerializer.Serialize(new
+                {
+                    runDirectory = alignmentRunDirectory,
+                    runId = alignmentResult.RunId,
+                    byChapterPath = alignmentResult.ByChapterPath,
+                    bySlidePath = alignmentResult.BySlidePath,
+                    chapterCount = alignmentResult.ByChapter.Chapters.Count,
+                    slideCount = alignmentResult.BySlide.Slides.Count,
+                    chaptersLoaded = alignmentResult.ChaptersLoaded
+                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                break;
+
             default:
                 await WriteErrorAsync(request.Id, -32602, $"Unknown tool: {name}", cancellationToken).ConfigureAwait(false);
                 break;
@@ -390,9 +411,16 @@ public sealed class McpServer
 
         var stt = GetBool(args, "stt");
         var llmProvider = LlmProviderFactory.Normalize(GetString(args, "llmProvider") ?? GetString(args, "provider") ?? GetString(args, "llm-provider"));
+        bool? slideGrouping = null;
+        if (args.TryGetPropertyValue("slideGrouping", out var slideGroupingNode) && slideGroupingNode is not null)
+        {
+            slideGrouping = slideGroupingNode.GetValue<bool>();
+        }
+
         return new AnalyzeRequest(
             Source: sourceNode.GetValue<string>(),
-            Instruction: GetString(args, "instruction") ?? "Extract transcript and representative frames for later LLM analysis.",
+            VisionInstruction: GetString(args, "visionInstruction") ?? string.Empty,
+            OcrInstruction: GetString(args, "ocrInstruction") ?? string.Empty,
             IncludeTranscript: !GetBool(args, "noTranscript"),
             FrameCount: GetInt(args, "frames", 7),
             RunId: GetString(args, "runId"),
@@ -400,7 +428,6 @@ public sealed class McpServer
             UseSpeechToText: stt,
             UseOcr: GetBool(args, "ocr"),
             UseVision: GetBool(args, "vision"),
-            UseSummary: GetBool(args, "summary"),
             MaxAiFrames: GetInt(args, "maxAiFrames", 5),
             Model: GetString(args, "model") ?? LlmProviderFactory.GetDefaultModel(llmProvider),
             LlmProvider: llmProvider,
@@ -408,7 +435,43 @@ public sealed class McpServer
             UseCache: GetBool(args, "cache"),
             FrameStrategy: GetFrameStrategy(args),
             CookiesPath: GetString(args, "cookies"),
-            CookiesFromBrowser: GetString(args, "browserAuth") ?? GetString(args, "cookiesFromBrowser"));
+            CookiesFromBrowser: GetString(args, "browserAuth") ?? GetString(args, "cookiesFromBrowser"),
+            CaptionLanguages: GetCaptionLanguages(args),
+            SlideGrouping: slideGrouping,
+            SlideHashDistance: GetOptionalInt(args, "slideHashDistance"),
+            FramesPerMinute: GetOptionalInt(args, "framesPerMinute"),
+            SceneSafetyCap: GetOptionalInt(args, "sceneSafetyCap"));
+    }
+
+    private static IReadOnlyList<string>? GetCaptionLanguages(JsonObject args)
+    {
+        if (!args.TryGetPropertyValue("captionLanguages", out var node) || node is null)
+        {
+            return null;
+        }
+
+        if (node is JsonArray array)
+        {
+            var languages = array
+                .Select(value => value?.GetValue<string>())
+                .Where(value => !string.IsNullOrWhiteSpace(value))
+                .Select(value => value!.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+            return languages.Length == 0 ? null : languages;
+        }
+
+        var raw = node.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(raw))
+        {
+            return null;
+        }
+
+        var parsed = raw.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+        return parsed.Length == 0 ? null : parsed;
     }
 
     private static string GetFrameStrategy(JsonObject args)
@@ -525,7 +588,8 @@ public sealed class McpServer
             properties = new
             {
                 source = new { type = "string", description = "Video URL or local media path." },
-                instruction = new { type = "string", description = "What the agent wants to do with the evidence." },
+                visionInstruction = new { type = "string", description = "Optional focus signal appended to the vision prompt. Defaults to empty (the model still extracts every visible piece of content)." },
+                ocrInstruction = new { type = "string", description = "Optional focus signal appended to the OCR prompt. Defaults to empty (the model still extracts every readable piece of text)." },
                 frames = new { type = "integer", description = "Number of representative frames to extract." },
                 frameStrategy = new { type = "string", description = "Frame selection strategy: interval, scene, or every-frame." },
                 everyFrame = new { type = "boolean", description = "Alias for frameStrategy=every-frame." },
@@ -533,7 +597,6 @@ public sealed class McpServer
                 audio = new { type = "boolean", description = "Extract audio with ffmpeg." },
                 ocr = new { type = "boolean", description = "Use the configured LLM provider as OCR over selected frames." },
                 vision = new { type = "boolean", description = "Use the configured LLM provider to describe selected frames." },
-                summary = new { type = "boolean", description = "Use the configured LLM provider to summarize produced evidence." },
                 maxAiFrames = new { type = "integer", description = "Maximum number of frames to send to AI providers." },
                 llmProvider = new { type = "string", description = "LLM provider: github-copilot, openai, or azure-openai." },
                 model = new { type = "string", description = "Provider model id. Defaults from provider config." },
@@ -542,6 +605,16 @@ public sealed class McpServer
                 cookies = new { type = "string", description = "Path to a Netscape cookies file for yt-dlp." },
                 cookiesFromBrowser = new { type = "string", description = "Browser name/profile spec for yt-dlp --cookies-from-browser." },
                 browserAuth = new { type = "string", description = "Alias for cookiesFromBrowser." },
+                captionLanguages = new
+                {
+                    description = "Caption/subtitle language preferences for yt-dlp --sub-langs. Accepts an array of BCP-47-style codes (e.g. [\"fr\", \"en\"]) or a comma-separated string. Use \"auto\" to merge with the source's advertised languages plus English defaults.",
+                    type = new[] { "array", "string", "null" },
+                    items = new { type = "string" }
+                },
+                slideGrouping = new { type = "boolean", description = "Group perceptually-similar frames into slides before OCR/vision. Defaults to config (true). Set false to run OCR/vision per individual frame." },
+                slideHashDistance = new { type = "integer", description = "Maximum Hamming distance (0-64) between adjacent perceptual hashes still considered the same slide. Defaults to config (6)." },
+                framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is max(framesPerMinute * durationMinutes, frames). Ignored for scene and every-frame strategies." },
+                sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000). Bounds the maximum number of scene-cut frames extracted. When the cap is reached, the run carries a FRAMES_SCENE_CAP_REACHED warning." },
                 force = new { type = "boolean", description = "Recompute even if the run ID already has a completed manifest." }
             },
             required = new[] { "source" }
@@ -573,7 +646,8 @@ public sealed class McpServer
                 queueId = new { type = "string", description = "Persistent queue id. Defaults to default." },
                 jobId = new { type = "string", description = "Optional stable job id. Defaults to a generated id." },
                 retries = new { type = "integer", description = "Retry count beyond the first attempt." },
-                instruction = new { type = "string", description = "What the agent wants to do with the evidence." },
+                visionInstruction = new { type = "string", description = "Optional focus signal appended to the vision prompt. Defaults to empty." },
+                ocrInstruction = new { type = "string", description = "Optional focus signal appended to the OCR prompt. Defaults to empty." },
                 frames = new { type = "integer", description = "Number of frames to extract." },
                 frameStrategy = new { type = "string", description = "Frame selection strategy: interval, scene, or every-frame." },
                 everyFrame = new { type = "boolean", description = "Alias for frameStrategy=every-frame." },
@@ -581,7 +655,6 @@ public sealed class McpServer
                 audio = new { type = "boolean", description = "Extract audio with ffmpeg." },
                 ocr = new { type = "boolean", description = "Run OCR over selected frames." },
                 vision = new { type = "boolean", description = "Analyze selected frames visually." },
-                summary = new { type = "boolean", description = "Summarize produced evidence." },
                 maxAiFrames = new { type = "integer", description = "Maximum frames to send to AI providers." },
                 llmProvider = new { type = "string", description = "LLM provider: github-copilot, openai, or azure-openai." },
                 model = new { type = "string", description = "Provider model id." },
@@ -590,6 +663,16 @@ public sealed class McpServer
                 cookies = new { type = "string", description = "Path to a Netscape cookies file for yt-dlp." },
                 cookiesFromBrowser = new { type = "string", description = "Browser name/profile spec for yt-dlp --cookies-from-browser." },
                 browserAuth = new { type = "string", description = "Alias for cookiesFromBrowser." },
+                captionLanguages = new
+                {
+                    description = "Caption/subtitle language preferences for yt-dlp --sub-langs. Accepts an array of BCP-47-style codes (e.g. [\"fr\", \"en\"]) or a comma-separated string. Use \"auto\" to merge with the source's advertised languages plus English defaults.",
+                    type = new[] { "array", "string", "null" },
+                    items = new { type = "string" }
+                },
+                slideGrouping = new { type = "boolean", description = "Group perceptually-similar frames into slides before OCR/vision. Defaults to config (true)." },
+                slideHashDistance = new { type = "integer", description = "Maximum Hamming distance (0-64) between adjacent perceptual hashes still considered the same slide. Defaults to config (6)." },
+                framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy." },
+                sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000)." },
                 force = new { type = "boolean", description = "Recompute existing run id." }
             },
             required = new[] { "source" }
@@ -691,6 +774,19 @@ public sealed class McpServer
                 runDirectory = new { type = "string", description = "Completed Zakira.Replay run directory containing transcript evidence." },
                 minDuration = new { type = "number", description = "Minimum chapter duration in seconds. Defaults to 60." },
                 maxDuration = new { type = "number", description = "Maximum chapter duration in seconds. Defaults to 600." }
+            },
+            required = new[] { "runDirectory" }
+        };
+    }
+
+    private static object AlignmentBuildInputSchema()
+    {
+        return new
+        {
+            type = "object",
+            properties = new
+            {
+                runDirectory = new { type = "string", description = "Completed Zakira.Replay run directory containing evidence.json. chapters/chapters.json is optional but recommended for the by-chapter view." }
             },
             required = new[] { "runDirectory" }
         };

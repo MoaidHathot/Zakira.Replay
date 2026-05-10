@@ -48,7 +48,7 @@ public sealed class AnalysisQueueTests
         }, temp.GetPath("queues"));
         var request = new AnalyzeRequest(
             Source: "https://example.test/video",
-            Instruction: "retry test",
+            VisionInstruction: "retry test",
             IncludeTranscript: false,
             FrameCount: 0,
             RunId: "queue-retry");
@@ -101,7 +101,7 @@ public sealed class AnalysisQueueTests
     {
         public Task<YtDlpInfo> GetInfoAsync(AnalyzeRequest request, CancellationToken cancellationToken) => throw new ReplayException("simulated metadata failure");
 
-        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken) => throw new ReplayException("simulated subtitle failure");
+        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken) => throw new ReplayException("simulated subtitle failure");
 
         public Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken) => throw new ReplayException("simulated media url failure");
 
@@ -121,7 +121,7 @@ public sealed class AnalysisQueueTests
             });
         }
 
-        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken) => Task.FromResult<TranscriptArtifact?>(null);
+        public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken) => Task.FromResult<TranscriptArtifact?>(null);
 
         public Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken) => Task.FromResult<string?>(null);
 
@@ -130,12 +130,18 @@ public sealed class AnalysisQueueTests
 
     private sealed class ThrowingFfmpegClient : IFfmpegClient
     {
-        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, CancellationToken cancellationToken) => throw new ReplayException("simulated frame failure");
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken) => throw new ReplayException("simulated frame failure");
 
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken) => throw new ReplayException("simulated audio failure");
 
         public Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken) => throw new ReplayException("simulated clip failure");
 
         public Task<double?> TryProbeDurationAsync(string mediaSource, CancellationToken cancellationToken) => throw new ReplayException("simulated probe failure");
+
+        public Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken) => throw new ReplayException("simulated silence detection failure");
+
+        public Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken) => throw new ReplayException("simulated audio range failure");
+
+        public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken) => throw new ReplayException("simulated perceptual hash failure");
     }
 }

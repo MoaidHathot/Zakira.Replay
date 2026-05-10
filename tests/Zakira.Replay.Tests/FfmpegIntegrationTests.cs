@@ -42,12 +42,13 @@ public sealed class FfmpegIntegrationTests
         var client = new FfmpegClient(dependencies, runner);
 
         var duration = await client.TryProbeDurationAsync(fixturePath, CancellationToken.None);
-        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 2, duration, FrameSelectionStrategies.Interval, CancellationToken.None);
+        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 2, duration, FrameSelectionStrategies.Interval, sceneSafetyCap: 2000, CancellationToken.None);
         var audioPath = await client.ExtractAudioAsync(fixturePath, run, CancellationToken.None);
 
         Assert.True(duration >= 1.5);
         Assert.Equal(2, frames.Count);
         Assert.All(frames, frame => Assert.True(File.Exists(run.GetPath(frame.Path))));
+        Assert.Equal(["frame-001", "frame-002"], frames.Select(frame => frame.Id).ToArray());
         Assert.True(File.Exists(run.GetPath(audioPath)));
     }
 
@@ -125,10 +126,10 @@ public sealed class FfmpegIntegrationTests
         var run = store.CreateRun(fixturePath, "ffmpeg-scene-fixture");
         var client = new FfmpegClient(dependencies, runner);
 
-        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 1, durationSeconds: null, FrameSelectionStrategies.Scene, CancellationToken.None);
+        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 1, durationSeconds: null, FrameSelectionStrategies.Scene, sceneSafetyCap: 50, CancellationToken.None);
 
-        Assert.Single(frames);
-        Assert.True(File.Exists(run.GetPath(frames[0].Path)));
+        Assert.NotEmpty(frames);
+        Assert.All(frames, frame => Assert.True(File.Exists(run.GetPath(frame.Path))));
     }
 
     [SkippableFact]
@@ -165,10 +166,11 @@ public sealed class FfmpegIntegrationTests
         var run = store.CreateRun(fixturePath, "ffmpeg-every-frame-fixture");
         var client = new FfmpegClient(dependencies, runner);
 
-        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 3, durationSeconds: null, FrameSelectionStrategies.EveryFrame, CancellationToken.None);
+        var frames = await client.ExtractFramesAsync(fixturePath, run, count: 3, durationSeconds: null, FrameSelectionStrategies.EveryFrame, sceneSafetyCap: 2000, CancellationToken.None);
 
         Assert.Equal(3, frames.Count);
         Assert.All(frames, frame => Assert.True(File.Exists(run.GetPath(frame.Path))));
+        Assert.Equal(["frame-001", "frame-002", "frame-003"], frames.Select(frame => frame.Id).ToArray());
     }
 
     private static async Task SkipIfNotRunnableAsync(ProcessRunner runner, string executablePath, string reason)

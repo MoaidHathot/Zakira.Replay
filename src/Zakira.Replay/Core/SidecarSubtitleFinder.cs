@@ -18,11 +18,11 @@ public static class SidecarSubtitleFinder
         var targetCaptionPath = Path.Combine(captionsDirectory, Path.GetFileName(sidecar));
         File.Copy(sidecar, targetCaptionPath, overwrite: true);
 
-        var markdown = await SubtitleConverter.ToMarkdownAsync(targetCaptionPath, cancellationToken).ConfigureAwait(false);
+        var segments = await SubtitleConverter.ParseSegmentsAsync(targetCaptionPath, cancellationToken).ConfigureAwait(false);
         var markdownPath = run.GetPath("transcript.md");
-        await File.WriteAllTextAsync(markdownPath, markdown, cancellationToken).ConfigureAwait(false);
+        await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
 
-        return new TranscriptArtifact(targetCaptionPath, markdownPath, "sidecar-subtitle");
+        return new TranscriptArtifact(targetCaptionPath, markdownPath, "sidecar-subtitle", segments);
     }
 
     private static string? Find(string mediaPath)

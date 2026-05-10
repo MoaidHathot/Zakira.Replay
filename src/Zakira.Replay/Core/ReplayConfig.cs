@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -10,6 +11,48 @@ public sealed class ReplayConfig
     public SearchConfig Search { get; set; } = new();
 
     public LlmConfig Llm { get; set; } = new();
+
+    public CaptionsConfig Captions { get; set; } = new();
+
+    public SlidesConfig Slides { get; set; } = new();
+
+    public FramesConfig Frames { get; set; } = new();
+}
+
+public sealed class FramesConfig
+{
+    /// <summary>
+    /// Upper bound on the number of frames the scene-strategy ffmpeg pipeline will return for a
+    /// single run, so a pathological video with thousands of scene changes cannot fill the disk.
+    /// Slide grouping deduplicates within this cap. Defaults to 2000.
+    /// </summary>
+    public int SceneSafetyCap { get; set; } = 2000;
+}
+
+public sealed class SlidesConfig
+{
+    /// <summary>
+    /// When false, slide grouping is disabled and every frame becomes its own slide. Useful for
+    /// animated UI walkthroughs where every frame matters. Default: true.
+    /// </summary>
+    public bool Enabled { get; set; } = true;
+
+    /// <summary>
+    /// Maximum Hamming distance between adjacent frames' 64-bit perceptual hashes that are still
+    /// considered the same slide. Lower is stricter. Default: 6.
+    /// </summary>
+    public int HashDistance { get; set; } = 6;
+}
+
+public sealed class CaptionsConfig
+{
+    /// <summary>
+    /// Subtitle/caption language preferences in order of priority. Use <c>"auto"</c> to let
+    /// Zakira.Replay union the languages advertised by the source's metadata with sensible
+    /// defaults (English plus YouTube live chat). Specific BCP-47-style codes such as
+    /// <c>"en"</c>, <c>"fr"</c>, or <c>"es-419"</c> are passed verbatim to yt-dlp.
+    /// </summary>
+    public List<string> Languages { get; set; } = ["auto"];
 }
 
 public sealed class DependencyPathConfig
@@ -174,6 +217,19 @@ public sealed class ConfigStore
                     ModelEnvironmentVariables = ["AZURE_OPENAI_MODEL"],
                     ApiVersionEnvironmentVariables = ["AZURE_OPENAI_API_VERSION"]
                 }
+            },
+            Captions = new CaptionsConfig
+            {
+                Languages = ["auto"]
+            },
+            Slides = new SlidesConfig
+            {
+                Enabled = true,
+                HashDistance = 6
+            },
+            Frames = new FramesConfig
+            {
+                SceneSafetyCap = 2000
             }
         };
     }
@@ -437,6 +493,20 @@ public sealed class ConfigStore
             case "llm.azure-openai.api-version":
                 config.Llm.AzureOpenAi.ApiVersion = NormalizeNonEmpty(value, key);
                 break;
+            case "captions.languages":
+                config.Captions.Languages = ParseCaptionLanguages(value, key);
+                break;
+            case "slides.enabled":
+                config.Slides.Enabled = ParseBool(value, key);
+                break;
+            case "slides.hashdistance":
+            case "slides.hash-distance":
+                config.Slides.HashDistance = ParseHashDistance(value, key);
+                break;
+            case "frames.scenesafetycap":
+            case "frames.scene-safety-cap":
+                config.Frames.SceneSafetyCap = ParseSceneSafetyCap(value, key);
+                break;
             default:
                 throw new ReplayException($"Unknown config key: {key}");
         }
@@ -479,6 +549,10 @@ public sealed class ConfigStore
             "llm.azureopenai.deployment" or "llm.azure-openai.deployment" => config.Llm.AzureOpenAi.Deployment,
             "llm.azureopenai.model" or "llm.azure-openai.model" => config.Llm.AzureOpenAi.Model,
             "llm.azureopenai.apiversion" or "llm.azure-openai.api-version" => config.Llm.AzureOpenAi.ApiVersion,
+            "captions.languages" => FormatCaptionLanguages(config.Captions.Languages),
+            "slides.enabled" => config.Slides.Enabled.ToString(),
+            "slides.hashdistance" or "slides.hash-distance" => config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
+            "frames.scenesafetycap" or "frames.scene-safety-cap" => config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture),
             _ => throw new ReplayException($"Unknown config key: {key}")
         };
     }
@@ -516,7 +590,11 @@ public sealed class ConfigStore
             ["llm.azureOpenAi.endpoint"] = config.Llm.AzureOpenAi.Endpoint,
             ["llm.azureOpenAi.deployment"] = config.Llm.AzureOpenAi.Deployment,
             ["llm.azureOpenAi.model"] = config.Llm.AzureOpenAi.Model,
-            ["llm.azureOpenAi.apiVersion"] = config.Llm.AzureOpenAi.ApiVersion
+            ["llm.azureOpenAi.apiVersion"] = config.Llm.AzureOpenAi.ApiVersion,
+            ["captions.languages"] = FormatCaptionLanguages(config.Captions.Languages),
+            ["slides.enabled"] = config.Slides.Enabled.ToString(),
+            ["slides.hashDistance"] = config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
+            ["frames.sceneSafetyCap"] = config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture)
         };
     }
 
@@ -580,6 +658,27 @@ public sealed class ConfigStore
         return names;
     }
 
+    private static List<string> ParseCaptionLanguages(string value, string key)
+    {
+        var languages = value.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(language => language.Trim().Trim('"').ToLowerInvariant())
+            .Where(language => !string.IsNullOrWhiteSpace(language))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (languages.Count == 0)
+        {
+            throw new ReplayException($"Config key {key} requires one or more language codes (or `auto`) separated by commas or semicolons.");
+        }
+
+        return languages;
+    }
+
+    private static string? FormatCaptionLanguages(IReadOnlyList<string> languages)
+    {
+        return languages.Count == 0 ? null : string.Join(',', languages);
+    }
+
     private static string? FormatEnvironmentVariableNames(IReadOnlyList<string> names)
     {
         return names.Count == 0 ? null : string.Join(',', names);
@@ -593,6 +692,26 @@ public sealed class ConfigStore
         }
 
         throw new ReplayException($"Config key {key} requires a positive integer value.");
+    }
+
+    private static int ParseHashDistance(string value, string key)
+    {
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) || parsed < 0 || parsed > 64)
+        {
+            throw new ReplayException($"Config key {key} requires an integer between 0 and 64 (Hamming distance over a 64-bit hash).");
+        }
+
+        return parsed;
+    }
+
+    private static int ParseSceneSafetyCap(string value, string key)
+    {
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
+        {
+            throw new ReplayException($"Config key {key} requires a positive integer (maximum number of scene frames extracted per run).");
+        }
+
+        return parsed;
     }
 
     private static bool ParseBool(string value, string key)

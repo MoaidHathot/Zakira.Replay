@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/ocr.schema.json",
+  "title": "Zakira.Replay OCR Frame Result",
+  "description": "Per-frame OCR result. Stored both inside evidence.json and as ocr/{frameId}.json for direct orchestrator access. The structured field is null when the model returned non-JSON; in that case the run carries an OCR_PARSE_FALLBACK warning.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["frameId", "framePath", "timestampSeconds", "timestampLabel", "text"],
+  "properties": {
+    "frameId": { "type": "string", "minLength": 1 },
+    "framePath": { "type": "string", "minLength": 1 },
+    "timestampSeconds": { "type": "number", "minimum": 0 },
+    "timestampLabel": { "type": "string", "minLength": 1 },
+    "text": { "type": "string" },
+    "slideId": { "type": ["string", "null"] },
+    "structured": {
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/ocrStructured" }
+      ]
+    }
+  },
+  "$defs": {
+    "ocrStructured": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["freeText", "lines", "tables"],
+      "properties": {
+        "freeText": { "type": "string" },
+        "lines": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "tables": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["headers", "rows"],
+            "properties": {
+              "headers": { "type": "array", "items": { "type": "string" } },
+              "rows": {
+                "type": "array",
+                "items": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

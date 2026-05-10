@@ -22,7 +22,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/MoaidHathot/Zakira.Replay</PackageProjectUrl>
     <PackageTags>video llm agent mcp transcription evidence ffmpeg yt-dlp cli dotnet-tool zakira</PackageTags>
-    <PackageReleaseNotes>Initial release: CLI and MCP server entrypoints; captions, STT, OCR, vision, and summary pipeline; search, chapter, and clip artifacts; persistent queue worker; deps doctor.</PackageReleaseNotes>
+    <PackageReleaseNotes>Initial release: CLI and MCP server entrypoints; multi-language captions; speaker attribution from VTT/SRT tags with per-speaker registry; silence-chunked STT for long audio; perceptual-hash slide grouping with first/last visible timestamps; structured OCR and vision JSON with comprehensive baselines and optional focus instructions (visionInstruction, ocrInstruction); duration-aware frame budgeting (framesPerMinute, sceneSafetyCap) with under-sampling warnings; cross-modal alignment views (by-chapter, by-slide); search, chapter, and clip artifacts; persistent queue worker; deps doctor. Zakira.Replay produces facts for external orchestrators; it does not synthesize summaries or insights.</PackageReleaseNotes>
     <RepositoryUrl>https://github.com/MoaidHathot/Zakira.Replay</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
@@ -44,6 +44,10 @@
     <PackageReference Include="Microsoft.Playwright" Version="1.59.0" />
     <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <InternalsVisibleTo Include="Zakira.Replay.Tests" />
   </ItemGroup>
 
   <ItemGroup>

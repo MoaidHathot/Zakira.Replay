@@ -5,14 +5,38 @@ namespace Zakira.Replay.Core;
 
 public interface IFfmpegClient
 {
-    Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, CancellationToken cancellationToken);
+    Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken);
 
     Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken);
 
     Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken);
 
     Task<double?> TryProbeDurationAsync(string mediaSource, CancellationToken cancellationToken);
+
+    Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken);
+
+    Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Computes a 64-bit perceptual difference hash (dHash) for a still image and returns it as
+    /// a 16-character lowercase hex string. The image is downscaled to 9x8 grayscale by ffmpeg
+    /// itself; no managed image library is required. Returns <c>null</c> when the hash cannot
+    /// be computed (e.g. the image is unreadable).
+    /// </summary>
+    Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// A contiguous span of audio considered silence by ffmpeg's <c>silencedetect</c> filter.
+/// </summary>
+public sealed record SilenceWindow(double StartSeconds, double EndSeconds, double DurationSeconds);
+
+/// <summary>
+/// Tunables for ffmpeg's <c>silencedetect</c> filter.
+/// </summary>
+/// <param name="NoiseDb">Noise threshold below which audio is considered silent. Defaults to -30 dB.</param>
+/// <param name="MinSilenceSeconds">Minimum contiguous silence duration before a window is reported. Defaults to 0.5 s.</param>
+public sealed record SilenceDetectionOptions(double NoiseDb = -30, double MinSilenceSeconds = 0.5);
 
 public sealed class FfmpegClient : IFfmpegClient
 {
@@ -31,16 +55,17 @@ public sealed class FfmpegClient : IFfmpegClient
         int count,
         double? durationSeconds,
         string strategy,
+        int sceneSafetyCap,
         CancellationToken cancellationToken)
     {
-        if (count <= 0)
+        if (count <= 0 && !strategy.Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase))
         {
             return [];
         }
 
         if (strategy.Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase))
         {
-            return await ExtractSceneFramesAsync(mediaSource, run, count, cancellationToken).ConfigureAwait(false);
+            return await ExtractSceneFramesAsync(mediaSource, run, sceneSafetyCap, cancellationToken).ConfigureAwait(false);
         }
 
         if (strategy.Equals(FrameSelectionStrategies.EveryFrame, StringComparison.OrdinalIgnoreCase))
@@ -60,7 +85,8 @@ public sealed class FfmpegClient : IFfmpegClient
         {
             var timestamp = duration.Value * i / (count + 1);
             var label = Timestamp.Format(timestamp);
-            var fileName = $"frame-{i:000}-{label.Replace(':', '-').Replace('.', '-')}.jpg";
+            var frameId = $"frame-{i:000}";
+            var fileName = $"{frameId}-{label.Replace(':', '-').Replace('.', '-')}.jpg";
             var relativePath = Path.Combine("frames", fileName);
             var outputPath = run.GetPath(relativePath);
 
@@ -81,7 +107,7 @@ public sealed class FfmpegClient : IFfmpegClient
 
             if (result.ExitCode == 0 && File.Exists(outputPath))
             {
-                frames.Add(new FrameArtifact(relativePath.Replace('\\', '/'), timestamp, label));
+                frames.Add(new FrameArtifact(frameId, relativePath.Replace('\\', '/'), timestamp, label));
             }
         }
 
@@ -131,7 +157,8 @@ public sealed class FfmpegClient : IFfmpegClient
         {
             var timestamp = i < timestamps.Length ? timestamps[i] : i;
             var label = Timestamp.Format(timestamp);
-            frames.Add(new FrameArtifact(Path.GetRelativePath(run.Directory, files[i]).Replace('\\', '/'), timestamp, label));
+            var frameId = $"frame-{i + 1:000}";
+            frames.Add(new FrameArtifact(frameId, Path.GetRelativePath(run.Directory, files[i]).Replace('\\', '/'), timestamp, label));
         }
 
         return frames;
@@ -140,11 +167,12 @@ public sealed class FfmpegClient : IFfmpegClient
     private async Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesAsync(
         string mediaSource,
         VideoRun run,
-        int count,
+        int sceneSafetyCap,
         CancellationToken cancellationToken)
     {
+        var safetyCap = Math.Max(1, sceneSafetyCap);
         var ffmpeg = dependencies.RequireFfmpeg("extracting scene-change frames from video media");
-        var outputPattern = run.GetPath(Path.Combine("frames", "scene-%03d.jpg"));
+        var outputPattern = run.GetPath(Path.Combine("frames", "scene-%04d.jpg"));
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
@@ -152,12 +180,12 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-i", mediaSource,
                 "-vf", "select=gt(scene\\,0.35),showinfo",
                 "-vsync", "vfr",
-                "-frames:v", count.ToString(CultureInfo.InvariantCulture),
+                "-frames:v", safetyCap.ToString(CultureInfo.InvariantCulture),
                 "-q:v", "2",
                 "-y",
                 outputPattern
             ],
-            timeout: TimeSpan.FromMinutes(5),
+            timeout: TimeSpan.FromMinutes(15),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var timestamps = FfmpegOutputPatterns.ShowInfoTimeRegex().Matches(result.StandardError)
@@ -167,7 +195,7 @@ public sealed class FfmpegClient : IFfmpegClient
             .ToArray();
         var files = Directory.EnumerateFiles(run.GetPath("frames"), "scene-*.jpg", SearchOption.TopDirectoryOnly)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
-            .Take(count)
+            .Take(safetyCap)
             .ToArray();
 
         var frames = new List<FrameArtifact>();
@@ -175,7 +203,8 @@ public sealed class FfmpegClient : IFfmpegClient
         {
             var timestamp = i < timestamps.Length ? timestamps[i] : i;
             var label = Timestamp.Format(timestamp);
-            frames.Add(new FrameArtifact(Path.GetRelativePath(run.Directory, files[i]).Replace('\\', '/'), timestamp, label));
+            var frameId = $"scene-{i + 1:0000}";
+            frames.Add(new FrameArtifact(frameId, Path.GetRelativePath(run.Directory, files[i]).Replace('\\', '/'), timestamp, label));
         }
 
         if (frames.Count > 0)
@@ -189,7 +218,8 @@ public sealed class FfmpegClient : IFfmpegClient
         }
 
         var duration = await TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false);
-        return await ExtractFramesAsync(mediaSource, run, count, duration, FrameSelectionStrategies.Interval, cancellationToken).ConfigureAwait(false);
+        // No scene cuts detected; fall back to a small interval sample so the orchestrator still has frames to inspect.
+        return await ExtractFramesAsync(mediaSource, run, count: 7, duration, FrameSelectionStrategies.Interval, sceneSafetyCap, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken)
@@ -295,12 +325,186 @@ public sealed class FfmpegClient : IFfmpegClient
             ? duration
             : null;
     }
+
+    public async Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken)
+    {
+        var ffmpeg = dependencies.RequireFfmpeg("detecting silence boundaries for audio chunking");
+        var noise = options.NoiseDb.ToString("0.###", CultureInfo.InvariantCulture);
+        var minSilence = options.MinSilenceSeconds.ToString("0.###", CultureInfo.InvariantCulture);
+        var result = await processRunner.RunAsync(
+            ffmpeg,
+            [
+                "-hide_banner",
+                "-nostats",
+                "-i", mediaSource,
+                "-af", $"silencedetect=noise={noise}dB:d={minSilence}",
+                "-f", "null",
+                "-"
+            ],
+            timeout: TimeSpan.FromMinutes(15),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode != 0)
+        {
+            return [];
+        }
+
+        return ParseSilenceWindows(result.StandardError);
+    }
+
+    public async Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken)
+    {
+        if (duration <= TimeSpan.Zero)
+        {
+            throw new ReplayException($"Audio range duration must be positive: {duration}.");
+        }
+
+        var ffmpeg = dependencies.RequireFfmpeg("extracting audio range for chunked transcription");
+        var directory = Path.GetDirectoryName(outputPath);
+        if (!string.IsNullOrEmpty(directory))
+        {
+            Directory.CreateDirectory(directory);
+        }
+
+        var result = await processRunner.RunAsync(
+            ffmpeg,
+            [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-ss", start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
+                "-t", duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
+                "-i", mediaSource,
+                "-vn",
+                "-ac", "1",
+                "-ar", "16000",
+                "-y",
+                outputPath
+            ],
+            timeout: TimeSpan.FromMinutes(10),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        result.EnsureSuccess();
+    }
+
+    public async Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath))
+        {
+            return null;
+        }
+
+        var ffmpeg = dependencies.RequireFfmpeg("computing perceptual hashes for slide grouping");
+        var tempPath = Path.Combine(Path.GetTempPath(), $"zakira-replay-dhash-{Guid.NewGuid():N}.bin");
+        try
+        {
+            var result = await processRunner.RunAsync(
+                ffmpeg,
+                [
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-i", imagePath,
+                    "-vf", "scale=9:8,format=gray",
+                    "-f", "rawvideo",
+                    "-y",
+                    tempPath
+                ],
+                timeout: TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0 || !File.Exists(tempPath))
+            {
+                return null;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(tempPath, cancellationToken).ConfigureAwait(false);
+            return ComputeDifferenceHash(bytes);
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup; ignore filesystem races.
+            }
+        }
+    }
+
+    /// <summary>
+    /// dHash from a 9x8 grayscale byte buffer (72 bytes). For each row, compares each pixel with
+    /// the next column and emits a bit (1 if left > right, else 0). 8 rows × 8 comparisons = 64 bits.
+    /// Returned as a 16-character lowercase hex string.
+    /// </summary>
+    internal static string? ComputeDifferenceHash(byte[] grayscale9x8)
+    {
+        if (grayscale9x8.Length < 72)
+        {
+            return null;
+        }
+
+        ulong hash = 0;
+        var bit = 0;
+        for (var row = 0; row < 8; row++)
+        {
+            var rowOffset = row * 9;
+            for (var column = 0; column < 8; column++)
+            {
+                var left = grayscale9x8[rowOffset + column];
+                var right = grayscale9x8[rowOffset + column + 1];
+                if (left > right)
+                {
+                    hash |= 1UL << bit;
+                }
+
+                bit++;
+            }
+        }
+
+        return hash.ToString("x16", CultureInfo.InvariantCulture);
+    }
+
+    internal static IReadOnlyList<SilenceWindow> ParseSilenceWindows(string ffmpegStderr)
+    {
+        var windows = new List<SilenceWindow>();
+        double? pendingStart = null;
+        foreach (Match entry in FfmpegOutputPatterns.SilenceLineRegex().Matches(ffmpegStderr))
+        {
+            var kind = entry.Groups[1].Value;
+            if (!double.TryParse(entry.Groups[2].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds))
+            {
+                continue;
+            }
+
+            if (kind.Equals("silence_start", StringComparison.Ordinal))
+            {
+                pendingStart = seconds;
+            }
+            else if (kind.Equals("silence_end", StringComparison.Ordinal) && pendingStart is not null)
+            {
+                var duration = entry.Groups[3].Success && double.TryParse(entry.Groups[3].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsedDuration)
+                    ? parsedDuration
+                    : Math.Max(0, seconds - pendingStart.Value);
+                windows.Add(new SilenceWindow(pendingStart.Value, seconds, duration));
+                pendingStart = null;
+            }
+        }
+
+        return windows;
+    }
 }
 
 public static partial class FfmpegOutputPatterns
 {
     [GeneratedRegex("pts_time:([0-9.]+)")]
     public static partial Regex ShowInfoTimeRegex();
+
+    [GeneratedRegex("(silence_start|silence_end): ([0-9.]+)(?: \\| silence_duration: ([0-9.]+))?")]
+    public static partial Regex SilenceLineRegex();
 }
 
 public static class Timestamp

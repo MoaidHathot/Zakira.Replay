@@ -52,7 +52,8 @@ public sealed class BatchRunner
             {
                 var request = new AnalyzeRequest(
                     Source: item.Source,
-                    Instruction: item.Instruction ?? manifest.Instruction ?? "Extract transcript and representative frames for later LLM analysis.",
+                    VisionInstruction: item.VisionInstruction ?? manifest.VisionInstruction ?? string.Empty,
+                    OcrInstruction: item.OcrInstruction ?? manifest.OcrInstruction ?? string.Empty,
                     IncludeTranscript: item.IncludeTranscript ?? manifest.IncludeTranscript ?? true,
                     FrameCount: item.Frames ?? manifest.Frames ?? 7,
                     RunId: item.RunId,
@@ -60,14 +61,18 @@ public sealed class BatchRunner
                     UseSpeechToText: item.UseSpeechToText ?? manifest.UseSpeechToText ?? false,
                     UseOcr: item.UseOcr ?? manifest.UseOcr ?? false,
                     UseVision: item.UseVision ?? manifest.UseVision ?? false,
-                    UseSummary: item.UseSummary ?? manifest.UseSummary ?? false,
                     MaxAiFrames: item.MaxAiFrames ?? manifest.MaxAiFrames ?? 5,
                     Model: item.Model ?? manifest.Model ?? LlmProviderFactory.GetDefaultModel(item.LlmProvider ?? manifest.LlmProvider),
                     LlmProvider: LlmProviderFactory.Normalize(item.LlmProvider ?? manifest.LlmProvider),
                     UseCache: item.UseCache ?? manifest.UseCache ?? false,
                     FrameStrategy: item.FrameStrategy ?? manifest.FrameStrategy ?? FrameSelectionStrategies.Interval,
                     CookiesPath: item.CookiesPath ?? manifest.CookiesPath,
-                    CookiesFromBrowser: item.CookiesFromBrowser ?? manifest.CookiesFromBrowser);
+                    CookiesFromBrowser: item.CookiesFromBrowser ?? manifest.CookiesFromBrowser,
+                    CaptionLanguages: item.CaptionLanguages ?? manifest.CaptionLanguages,
+                    SlideGrouping: item.SlideGrouping ?? manifest.SlideGrouping,
+                    SlideHashDistance: item.SlideHashDistance ?? manifest.SlideHashDistance,
+                    FramesPerMinute: item.FramesPerMinute ?? manifest.FramesPerMinute,
+                    SceneSafetyCap: item.SceneSafetyCap ?? manifest.SceneSafetyCap);
 
                 var result = await pipelineFactory().AnalyzeAsync(request, progress, cancellationToken).ConfigureAwait(false);
                 itemResults.Add(new BatchItemResult(item.Source, true, result.Run.Id, result.Run.Directory, null));
@@ -95,7 +100,9 @@ public sealed class BatchManifest
 {
     public string? BatchId { get; set; }
 
-    public string? Instruction { get; set; }
+    public string? VisionInstruction { get; set; }
+
+    public string? OcrInstruction { get; set; }
 
     public int? Frames { get; set; }
 
@@ -108,8 +115,6 @@ public sealed class BatchManifest
     public bool? UseOcr { get; set; }
 
     public bool? UseVision { get; set; }
-
-    public bool? UseSummary { get; set; }
 
     public int? MaxAiFrames { get; set; }
 
@@ -125,6 +130,16 @@ public sealed class BatchManifest
 
     public string? CookiesFromBrowser { get; set; }
 
+    public List<string>? CaptionLanguages { get; set; }
+
+    public bool? SlideGrouping { get; set; }
+
+    public int? SlideHashDistance { get; set; }
+
+    public int? FramesPerMinute { get; set; }
+
+    public int? SceneSafetyCap { get; set; }
+
     public bool ContinueOnError { get; set; } = true;
 
     public List<BatchItem> Items { get; set; } = [];
@@ -134,7 +149,9 @@ public sealed class BatchItem
 {
     public string Source { get; set; } = string.Empty;
 
-    public string? Instruction { get; set; }
+    public string? VisionInstruction { get; set; }
+
+    public string? OcrInstruction { get; set; }
 
     public int? Frames { get; set; }
 
@@ -147,8 +164,6 @@ public sealed class BatchItem
     public bool? UseOcr { get; set; }
 
     public bool? UseVision { get; set; }
-
-    public bool? UseSummary { get; set; }
 
     public int? MaxAiFrames { get; set; }
 
@@ -165,6 +180,16 @@ public sealed class BatchItem
     public string? CookiesPath { get; set; }
 
     public string? CookiesFromBrowser { get; set; }
+
+    public List<string>? CaptionLanguages { get; set; }
+
+    public bool? SlideGrouping { get; set; }
+
+    public int? SlideHashDistance { get; set; }
+
+    public int? FramesPerMinute { get; set; }
+
+    public int? SceneSafetyCap { get; set; }
 }
 
 public sealed record BatchResult(

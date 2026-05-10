@@ -145,22 +145,34 @@ public sealed partial class SearchIndexService
 
         foreach (var ocr in evidence.Ocr)
         {
-            yield return new SearchSourceDocument($"ocr-{++index:0000}", "ocr", ocr.Text, ocr.TimestampSeconds, null, ocr.TimestampLabel, ocr.FramePath);
+            var text = ocr.Structured is { Lines.Count: > 0 } structured
+                ? string.Join('\n', structured.Lines)
+                : ocr.Text;
+            yield return new SearchSourceDocument($"ocr-{++index:0000}", "ocr", text, ocr.TimestampSeconds, null, ocr.TimestampLabel, ocr.FramePath);
         }
 
         foreach (var vision in evidence.Vision)
         {
-            yield return new SearchSourceDocument($"vision-{++index:0000}", "vision", vision.Description, vision.TimestampSeconds, null, vision.TimestampLabel, vision.FramePath);
-        }
+            var combined = new List<string> { vision.Description };
+            if (vision.Structured is { } visionStructured)
+            {
+                if (!string.IsNullOrWhiteSpace(visionStructured.Title))
+                {
+                    combined.Add(visionStructured.Title);
+                }
 
-        if (!string.IsNullOrWhiteSpace(evidence.Summary))
-        {
-            yield return new SearchSourceDocument($"summary-{++index:0000}", "summary", evidence.Summary, null, null, null, "summary.md");
+                combined.AddRange(visionStructured.Bullets);
+                combined.AddRange(visionStructured.UiElements);
+                combined.AddRange(visionStructured.CodeBlocks.Select(block => block.Text));
+                combined.AddRange(visionStructured.Charts.Select(chart => chart.Title ?? string.Empty).Where(value => !string.IsNullOrWhiteSpace(value)));
+            }
+
+            yield return new SearchSourceDocument($"vision-{++index:0000}", "vision", string.Join('\n', combined.Where(line => !string.IsNullOrWhiteSpace(line))), vision.TimestampSeconds, null, vision.TimestampLabel, vision.FramePath);
         }
 
         foreach (var warning in evidence.Warnings)
         {
-            yield return new SearchSourceDocument($"warning-{++index:0000}", "warning", warning, null, null, null, null);
+            yield return new SearchSourceDocument($"warning-{++index:0000}", "warning", $"{warning.Code}: {warning.Message}", null, null, null, null);
         }
     }
 

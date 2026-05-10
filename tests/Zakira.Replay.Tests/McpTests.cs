@@ -262,14 +262,53 @@ public sealed class McpTests
         });
     }
 
+    [Fact]
+    public async Task BuildEvidenceAlignmentToolWritesAlignmentArtifacts()
+    {
+        using var temp = new TestTempDirectory();
+        var runDirectory = await CreateChapterRunAsync(temp);
+        var chapterDirectory = Path.Combine(runDirectory, "chapters");
+        Directory.CreateDirectory(chapterDirectory);
+        var chapters = new ChapterDocument("0.5", "chapter-run", DateTimeOffset.UtcNow, "offline-lexical",
+            [new Chapter(0, 60, "00:00", "01:00", []), new Chapter(60, 90, "01:00", "01:30", [])]);
+        await File.WriteAllTextAsync(Path.Combine(chapterDirectory, "chapters.json"), JsonSerializer.Serialize(chapters, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+        var server = new McpServer(() => throw new InvalidOperationException("Pipeline should not be created for alignment tools."), stdout, stderr);
+        var request = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 1,
+            method = "tools/call",
+            @params = new
+            {
+                name = "build_evidence_alignment",
+                arguments = new { runDirectory }
+            }
+        });
+
+        await server.RunAsync(new StringReader(request + Environment.NewLine), CancellationToken.None);
+
+        using var response = JsonDocument.Parse(stdout.ToString());
+        var text = response.RootElement.GetProperty("result").GetProperty("content")[0].GetProperty("text").GetString();
+        using var payload = JsonDocument.Parse(text!);
+
+        Assert.True(payload.RootElement.GetProperty("chaptersLoaded").GetBoolean());
+        Assert.True(payload.RootElement.GetProperty("chapterCount").GetInt32() >= 1);
+        Assert.True(File.Exists(Path.Combine(runDirectory, "evidence-aligned", "by-chapter.json")));
+        Assert.True(File.Exists(Path.Combine(runDirectory, "evidence-aligned", "by-slide.json")));
+    }
+
     private static async Task<string> CreateSearchRunAsync(TestTempDirectory temp)
     {
         var runDirectory = temp.GetPath("runs", "search-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "search-run",
             Title: "Search Fixture",
             WebpageUrl: null,
@@ -281,9 +320,10 @@ public sealed class McpTests
                 new TranscriptSegment(10, 12, "00:10", "The speaker shows travel accessories.")
             ],
             Frames: [],
+            Slides: [],
             Ocr: [],
             Vision: [],
-            Summary: null,
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
         return runDirectory;
@@ -294,9 +334,11 @@ public sealed class McpTests
         var runDirectory = temp.GetPath("runs", "chapter-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.7",
             Source: "source.mp4",
-            Instruction: "test",
+            VisionInstruction: "test",
+
+            OcrInstruction: "",
             RunId: "chapter-run",
             Title: "Chapter Fixture",
             WebpageUrl: null,
@@ -310,9 +352,10 @@ public sealed class McpTests
                 new TranscriptSegment(60, 80, "01:00", "Travel accessories are compared for airports and daily carry.")
             ],
             Frames: [],
+            Slides: [],
             Ocr: [],
             Vision: [],
-            Summary: null,
+            Speakers: [],
             Warnings: []);
         await File.WriteAllTextAsync(Path.Combine(runDirectory, "evidence.json"), JsonSerializer.Serialize(evidence, new JsonSerializerOptions(JsonSerializerDefaults.Web)), CancellationToken.None);
         return runDirectory;

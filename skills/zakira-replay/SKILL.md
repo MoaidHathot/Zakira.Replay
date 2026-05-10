@@ -15,4 +15,4 @@ If this is the only available Zakira.Replay skill, choose the surface you can ac
 - Shell available: follow `../zakira-replay-cli/SKILL.md`.
 - MCP tools available: follow `../zakira-replay-mcp/SKILL.md`.
 
-Core rule: never pretend you watched a video directly. Use Zakira.Replay to create durable artifacts, then answer from `manifest.json`, `evidence.json`, `transcript.md`, frame images, `ocr/combined.md`, `vision/combined.md`, `summary.md`, and `chapters/chapters.md`.
+Core rule: never pretend you watched a video directly. Use Zakira.Replay to create durable, fact-shaped artifacts, then answer from `manifest.json`, `evidence.json`, `transcript.md`, frame images, `ocr/combined.md`, `vision/combined.md`, and `chapters/chapters.md`. Zakira.Replay does not produce summaries, work items, or any other synthesized output; that is your job as the orchestrating agent.

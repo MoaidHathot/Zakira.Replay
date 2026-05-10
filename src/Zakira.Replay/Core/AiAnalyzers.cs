@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text;
 using System.Text.RegularExpressions;
 
 namespace Zakira.Replay.Core;
@@ -11,12 +10,12 @@ public interface ITranscriptionProvider
 
 public interface IOcrProvider
 {
-    Task<string> ExtractTextAsync(string imagePath, CancellationToken cancellationToken);
+    Task<string> ExtractTextAsync(string imagePath, string ocrInstruction, CancellationToken cancellationToken);
 }
 
 public interface IVisionProvider
 {
-    Task<string> DescribeAsync(string imagePath, string instruction, CancellationToken cancellationToken);
+    Task<string> DescribeAsync(string imagePath, string visionInstruction, CancellationToken cancellationToken);
 }
 
 public sealed class CopilotTranscriptionProvider : ITranscriptionProvider
@@ -52,13 +51,32 @@ public sealed class CopilotOcrProvider : IOcrProvider
         this.model = model;
     }
 
-    public Task<string> ExtractTextAsync(string imagePath, CancellationToken cancellationToken)
+    public Task<string> ExtractTextAsync(string imagePath, string ocrInstruction, CancellationToken cancellationToken)
     {
+        var focus = string.IsNullOrWhiteSpace(ocrInstruction)
+            ? string.Empty
+            : "\n\nAdditional focus from the orchestrator: " + ocrInstruction.Trim() + "\nUse this as a hint about which visible text aspects to enumerate first; never invent characters that are not visible.";
+
         return llm.CompleteAsync(new LlmRequest(
-            Prompt: "Extract all readable text from the attached frame. Preserve line breaks where useful. Return only extracted text; do not describe the image.",
+            Prompt: $$"""
+                Extract every readable piece of text from the attached frame and return ONLY a JSON object with this exact shape:
+                {
+                  "freeText": "all extracted text concatenated, preserving line breaks",
+                  "lines": ["line 1", "line 2", "..."],
+                  "tables": [
+                    { "headers": ["col 1", "col 2"], "rows": [["r1c1", "r1c2"], ["r2c1", "r2c2"]] }
+                  ]
+                }{{focus}}
+                Rules:
+                - Return only the JSON object, no commentary, no Markdown fences.
+                - "freeText" is required and must contain every visible character (including punctuation), one occurrence each.
+                - "lines" preserves visible line breaks; omit fully empty lines.
+                - "tables" is an array; emit it only when actual tabular content is visible. Skip when no tables.
+                - Never invent text that is not visible.
+                """,
             AttachmentPaths: [imagePath],
             Model: model,
-            SystemMessage: "You are an OCR engine for video frames. Return exact visible text only.",
+            SystemMessage: "You are an OCR engine for video frames. Return strict JSON containing exact visible text only.",
             Timeout: TimeSpan.FromMinutes(2)), cancellationToken);
     }
 }
@@ -74,85 +92,37 @@ public sealed class CopilotVisionProvider : IVisionProvider
         this.model = model;
     }
 
-    public Task<string> DescribeAsync(string imagePath, string instruction, CancellationToken cancellationToken)
+    public Task<string> DescribeAsync(string imagePath, string visionInstruction, CancellationToken cancellationToken)
     {
+        var focus = string.IsNullOrWhiteSpace(visionInstruction)
+            ? string.Empty
+            : "\n\nAdditional focus from the orchestrator: " + visionInstruction.Trim() + "\nTreat this as a hint about which visible aspects to enumerate first; never invent content to satisfy it.";
+
         return llm.CompleteAsync(new LlmRequest(
-            Prompt: $"Analyze the attached video frame for this task: {instruction}\n\nDescribe visible slides, diagrams, UI, charts, code, objects, and any important visual evidence. Keep it factual and concise.",
+            Prompt: $$"""
+                You analyze a single video frame as evidence. Extract every distinct piece of visible content: title text, bullets, body text, code blocks, chart titles/axes/series, UI controls and labels, captioned text, diagram annotations, and anything else readable on screen. Do not invent content that is not visible.{{focus}}
+
+                Return ONLY a JSON object with this exact shape:
+                {
+                  "kind": "slide" | "ui" | "code" | "diagram" | "chart" | "dashboard" | "other",
+                  "title": "optional title text or null",
+                  "bullets": ["..."],
+                  "codeBlocks": [{ "language": "csharp" | "python" | "..." | null, "text": "..." }],
+                  "charts": [{ "title": "...", "axes": ["x label", "y label"], "series": ["series name 1", "..."] }],
+                  "uiElements": ["button: Submit", "field: Email", "..."],
+                  "freeText": "concise factual description of visible content"
+                }
+                Rules:
+                - Return only the JSON object, no commentary, no Markdown fences.
+                - "kind" is required; pick the closest category.
+                - "freeText" is required and never empty; describe what is actually visible.
+                - Omit array entries you cannot fill from the visible frame; do not invent.
+                - Code blocks must contain text exactly as written on the screen.
+                """,
             AttachmentPaths: [imagePath],
             Model: model,
-            SystemMessage: "You analyze individual video frames as evidence. Do not infer unsupported facts.",
+            SystemMessage: "You analyze individual video frames as evidence. Return strict JSON. Do not infer unsupported facts.",
             Timeout: TimeSpan.FromMinutes(2)), cancellationToken);
-    }
-}
-
-public sealed class VideoSummaryService
-{
-    private readonly ILlmProvider llm;
-    private readonly string model;
-
-    public VideoSummaryService(ILlmProvider llm, string model)
-    {
-        this.llm = llm;
-        this.model = model;
-    }
-
-    public Task<string> SummarizeAsync(EvidenceDocument evidence, string runDirectory, CancellationToken cancellationToken)
-    {
-        var prompt = new StringBuilder();
-        prompt.AppendLine("Summarize this video evidence according to the user instruction.");
-        prompt.AppendLine();
-        prompt.AppendLine($"Instruction: {evidence.Instruction}");
-        prompt.AppendLine($"Title: {evidence.Title}");
-        prompt.AppendLine($"Source: {evidence.Source}");
-        prompt.AppendLine();
-
-        if (evidence.Transcript.Count > 0)
-        {
-            prompt.AppendLine("Transcript:");
-            foreach (var segment in evidence.Transcript.Take(500))
-            {
-                prompt.AppendLine($"[{segment.Timestamp ?? FormatSeconds(segment.StartSeconds)}] {segment.Text}");
-            }
-            prompt.AppendLine();
-        }
-
-        if (evidence.Ocr.Count > 0)
-        {
-            prompt.AppendLine("OCR from frames:");
-            foreach (var item in evidence.Ocr)
-            {
-                prompt.AppendLine($"[{item.TimestampLabel}] {item.Text}");
-            }
-            prompt.AppendLine();
-        }
-
-        if (evidence.Vision.Count > 0)
-        {
-            prompt.AppendLine("Visual frame descriptions:");
-            foreach (var item in evidence.Vision)
-            {
-                prompt.AppendLine($"[{item.TimestampLabel}] {item.Description}");
-            }
-            prompt.AppendLine();
-        }
-
-        prompt.AppendLine("Rules:");
-        prompt.AppendLine("- Use only the supplied evidence.");
-        prompt.AppendLine("- Include timestamps for important claims when available.");
-        prompt.AppendLine("- Say what evidence is missing if the request cannot be fully answered.");
-
-        return llm.CompleteAsync(new LlmRequest(
-            Prompt: prompt.ToString(),
-            AttachmentPaths: [],
-            Model: model,
-            SystemMessage: "You summarize video evidence accurately for downstream agents.",
-            WorkingDirectory: runDirectory,
-            Timeout: TimeSpan.FromMinutes(3)), cancellationToken);
-    }
-
-    private static string? FormatSeconds(double? seconds)
-    {
-        return seconds is null ? null : Timestamp.Format(seconds.Value);
     }
 }
 
@@ -183,7 +153,14 @@ public static partial class TranscriptParser
             if (match.Success)
             {
                 var timestamp = match.Groups[1].Value;
-                segments.Add(new TranscriptSegment(ParseTimestampStart(timestamp), ParseTimestampEnd(timestamp), timestamp, match.Groups[2].Value.Trim()));
+                var (speakerDisplayName, body) = ExtractInlineSpeaker(match.Groups[2].Value);
+                segments.Add(new TranscriptSegment(
+                    StartSeconds: ParseTimestampStart(timestamp),
+                    EndSeconds: ParseTimestampEnd(timestamp),
+                    Timestamp: timestamp,
+                    Text: body.Trim(),
+                    SpeakerId: NormalizeSpeakerId(speakerDisplayName),
+                    SpeakerDisplayName: speakerDisplayName));
                 continue;
             }
 
@@ -191,15 +168,50 @@ public static partial class TranscriptParser
             if (bracketMatch.Success)
             {
                 var timestamp = bracketMatch.Groups[1].Value;
-                segments.Add(new TranscriptSegment(ParseTimestampStart(timestamp), ParseTimestampEnd(timestamp), timestamp, bracketMatch.Groups[2].Value.Trim()));
+                var (speakerDisplayName, body) = ExtractInlineSpeaker(bracketMatch.Groups[2].Value);
+                segments.Add(new TranscriptSegment(
+                    StartSeconds: ParseTimestampStart(timestamp),
+                    EndSeconds: ParseTimestampEnd(timestamp),
+                    Timestamp: timestamp,
+                    Text: body.Trim(),
+                    SpeakerId: NormalizeSpeakerId(speakerDisplayName),
+                    SpeakerDisplayName: speakerDisplayName));
             }
             else
             {
-                segments.Add(new TranscriptSegment(null, null, null, line.Trim()));
+                segments.Add(new TranscriptSegment(
+                    StartSeconds: null,
+                    EndSeconds: null,
+                    Timestamp: null,
+                    Text: line.Trim()));
             }
         }
 
         return segments;
+    }
+
+    private static (string? SpeakerDisplayName, string Body) ExtractInlineSpeaker(string text)
+    {
+        var trimmed = text.Trim();
+        var match = SpeakerPrefixRegex().Match(trimmed);
+        if (!match.Success)
+        {
+            return (null, trimmed);
+        }
+
+        var name = match.Groups[1].Value.Trim();
+        return (string.IsNullOrWhiteSpace(name) ? null : name, match.Groups[2].Value.Trim());
+    }
+
+    private static string? NormalizeSpeakerId(string? displayName)
+    {
+        if (string.IsNullOrWhiteSpace(displayName))
+        {
+            return null;
+        }
+
+        var slug = Slug.Create(displayName, 80);
+        return string.IsNullOrEmpty(slug) ? null : slug;
     }
 
     private static double? ParseTimestamp(string timestamp)
@@ -247,4 +259,7 @@ public static partial class TranscriptParser
 
     [GeneratedRegex("^-?\\s*\\[([^\\]]+)\\]\\s*(.*)$")]
     private static partial Regex BracketTimestampLineRegex();
+
+    [GeneratedRegex("^\\[([^\\]]{1,60})\\]\\s*(.+)$")]
+    private static partial Regex SpeakerPrefixRegex();
 }

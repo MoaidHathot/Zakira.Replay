@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/slides.schema.json",
+  "title": "Zakira.Replay Slides",
+  "description": "Per-slide metadata produced by SlideGrouper. Slides are runs of perceptually-similar frames that share visible content. OCR/vision results reference slides via slideId so orchestrators can answer 'when was slide X visible' and 'which transcript segments spoke over slide X' without redoing perceptual work.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/slideArtifact" },
+  "$defs": {
+    "slideArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "firstSeenSeconds", "lastSeenSeconds", "firstSeenLabel", "lastSeenLabel", "primaryFrameId", "frameIds"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "firstSeenSeconds": { "type": "number", "minimum": 0 },
+        "lastSeenSeconds": { "type": "number", "minimum": 0 },
+        "firstSeenLabel": { "type": "string", "minLength": 1 },
+        "lastSeenLabel": { "type": "string", "minLength": 1 },
+        "primaryFrameId": { "type": "string", "minLength": 1 },
+        "frameIds": {
+          "type": "array",
+          "minItems": 1,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "perceptualHash": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

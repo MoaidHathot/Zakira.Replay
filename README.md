@@ -124,7 +124,7 @@ If the value passed to `config set` is a directory, Zakira.Replay appends the ex
 
 ## Caption Languages
 
-Caption preferences default to `["auto"]`, which unions the source's advertised manual subtitles, automatic captions, and the source's primary language with English (`en`, `en.*`) and YouTube live-chat replay so an existing transcript is found whenever yt-dlp knows of one. Override per run with `--caption-languages fr,en` (CLI), `captionLanguages: ["fr", "en"]` (MCP/batch), or globally with `zakira-replay config set captions.languages fr,en`. The languages yt-dlp advertises for a source are written to `metadata.json` under `availableSubtitleLanguages` so orchestrators can branch on what is actually available before retrying.
+Caption preferences default to `["auto"]`, which unions the source's primary language, the languages with **manually uploaded** subtitles (per yt-dlp's `info.subtitles`), English (`en`, `en.*`), and YouTube live-chat replay so an existing transcript is found whenever yt-dlp knows of one. YouTube auto-translation languages (those that appear only under `info.automatic_captions` and not under `info.subtitles`) are intentionally **not** expanded by `auto`, because they are translations inferred from the source rather than facts about what was spoken. To opt into a specific auto-translation, request it explicitly with `--caption-languages es` (CLI), `captionLanguages: ["es"]` (MCP/batch), or `zakira-replay config set captions.languages es`. The languages yt-dlp advertises for a source are written to `metadata.json` under `availableSubtitleLanguages`, with `hasManual` / `hasAuto` flags per language so orchestrators can branch on what is actually available before retrying.
 
 ## Speakers
 

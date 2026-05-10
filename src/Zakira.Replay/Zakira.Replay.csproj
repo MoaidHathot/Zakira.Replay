@@ -14,7 +14,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>zakira-replay</ToolCommandName>
     <PackageId>Zakira.Replay</PackageId>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
     <Authors>Moaid Hathot</Authors>
     <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
     <Description>Turn video sources into replayable, timestamped evidence for LLM agents. Part of the Zakira agent-cognition family (Imprint, Recall, Exchange, Replay).</Description>

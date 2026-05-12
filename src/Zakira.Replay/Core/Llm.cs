@@ -284,6 +284,16 @@ public static class LlmProviders
     public const string GitHubCopilot = "github-copilot";
     public const string OpenAi = "openai";
     public const string AzureOpenAi = "azure-openai";
+
+    /// <summary>
+    /// Fully-local Whisper.net speech-to-text. STT-only — does not implement chat / vision /
+    /// OCR. <see cref="LlmProviderFactory.Create(string?)"/> throws for this value; callers
+    /// resolving the chat LLM in the analysis pipeline use
+    /// <see cref="LlmProviderFactory.TryCreate(string?, ReplayConfig)"/> instead, which returns
+    /// <c>null</c> here so OCR/vision branches degrade gracefully with their existing
+    /// <c>*_NO_LLM_PROVIDER</c> warnings.
+    /// </summary>
+    public const string LocalWhisper = "local-whisper";
 }
 
 public static class LlmProviderFactory
@@ -312,8 +322,38 @@ public static class LlmProviderFactory
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.DeploymentEnvironmentVariables, "AZURE_OPENAI_DEPLOYMENT")) ?? config.Llm.AzureOpenAi.Deployment ?? string.Empty,
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ModelEnvironmentVariables, "AZURE_OPENAI_MODEL")) ?? config.Llm.AzureOpenAi.Model,
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ApiVersionEnvironmentVariables, "AZURE_OPENAI_API_VERSION")) ?? config.Llm.AzureOpenAi.ApiVersion),
+            LlmProviders.LocalWhisper => throw new ReplayException("Provider `local-whisper` is speech-to-text only (no chat/vision/OCR). For chat tasks, pass --llm-provider github-copilot|openai|azure-openai or omit the flag."),
             var value => throw new ReplayException($"Unknown LLM provider: {value}")
         };
+    }
+
+    /// <summary>
+    /// Like <see cref="Create(string?, ReplayConfig)"/> but returns <c>null</c> instead of
+    /// throwing when the requested provider is STT-only (currently
+    /// <see cref="LlmProviders.LocalWhisper"/>). Used by the analysis pipeline so the chat-LLM
+    /// resolution path gracefully reports <c>STT_NO_LLM_PROVIDER</c> / <c>OCR_NO_LLM_PROVIDER</c>
+    /// / <c>VISION_NO_LLM_PROVIDER</c> warnings instead of crashing the whole run.
+    /// </summary>
+    public static ILlmProvider? TryCreate(string? provider, ReplayConfig? config = null)
+    {
+        config ??= new ConfigStore().Load();
+        var normalized = Normalize(provider ?? GetConfiguredProvider(config));
+        if (normalized == LlmProviders.LocalWhisper)
+        {
+            return null;
+        }
+
+        try
+        {
+            return Create(normalized, config);
+        }
+        catch (ReplayException)
+        {
+            // Unknown / misconfigured providers (e.g. OpenAI without an API key) should also
+            // surface as "no chat LLM available" rather than a hard crash. Callers emit a
+            // structured *_NO_LLM_PROVIDER warning instead.
+            return null;
+        }
     }
 
     public static string GetConfiguredProvider(ReplayConfig? config = null)
@@ -334,6 +374,7 @@ public static class LlmProviderFactory
             "copilot" or "github" or "github-copilot" => LlmProviders.GitHubCopilot,
             "openai" => LlmProviders.OpenAi,
             "azure" or "azure-openai" or "azureopenai" => LlmProviders.AzureOpenAi,
+            "local-whisper" or "localwhisper" or "whisper" or "local-stt" or "localstt" => LlmProviders.LocalWhisper,
             var value => value
         };
     }
@@ -345,6 +386,7 @@ public static class LlmProviderFactory
         {
             LlmProviders.OpenAi => GetFirstEnvironmentVariable(WithDefaults(config.Llm.OpenAi.ModelEnvironmentVariables, "OPENAI_MODEL")) ?? config.Llm.OpenAi.Model ?? DefaultOpenAiModel,
             LlmProviders.AzureOpenAi => GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ModelEnvironmentVariables, "AZURE_OPENAI_MODEL")) ?? config.Llm.AzureOpenAi.Model ?? GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.DeploymentEnvironmentVariables, "AZURE_OPENAI_DEPLOYMENT")) ?? config.Llm.AzureOpenAi.Deployment ?? string.Empty,
+            LlmProviders.LocalWhisper => LocalWhisperOptions.NormalizeModelSize(Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_WHISPER_MODEL_SIZE") ?? config.Llm.LocalWhisper.ModelSize),
             _ => GitHubCopilotLlmProvider.DefaultModel
         };
     }

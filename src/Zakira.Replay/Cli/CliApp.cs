@@ -114,6 +114,9 @@ public static class CliApp
             reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, string.IsNullOrWhiteSpace(runnable), status.Path, status.Source, status.Message, runnable));
         }
 
+        var whisperReport = BuildWhisperDoctorReport();
+        reports.Add(whisperReport);
+
         if (parsed.GetBool("json", defaultValue: false))
         {
             stdout.WriteLine(JsonSerializer.Serialize(new DoctorReport(DateTimeOffset.UtcNow, reports), CliJson.Options));
@@ -136,6 +139,44 @@ public static class CliApp
         }
 
         return 0;
+    }
+
+    /// <summary>
+    /// Inspect the resolved local Whisper model and return a synthetic
+    /// <see cref="DoctorDependencyReport"/> so <c>doctor</c> exposes the same diagnostic surface
+    /// for the new <c>--llm-provider local-whisper</c> path as for ffmpeg/yt-dlp/ONNX/OCR.
+    /// </summary>
+    private static DoctorDependencyReport BuildWhisperDoctorReport()
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var options = LocalWhisperOptions.Resolve(config);
+            var modelPath = options.ModelPath ?? string.Empty;
+            var exists = !string.IsNullOrWhiteSpace(modelPath) && File.Exists(modelPath);
+            var message = exists
+                ? $"language={options.Language}, threads={(options.Threads is null ? "auto" : options.Threads.ToString())}"
+                : $"Run `zakira-replay deps install whisper-model {LocalWhisperOptions.DefaultModelSize}` to download.";
+            return new DoctorDependencyReport(
+                Name: "whisper-model",
+                IsFound: exists,
+                IsRunnable: exists,
+                Path: string.IsNullOrWhiteSpace(modelPath) ? null : modelPath,
+                Source: "config",
+                Message: message,
+                RunnableError: exists ? null : "model file not found");
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "whisper-model",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "config",
+                Message: ex.Message,
+                RunnableError: ex.Message);
+        }
     }
 
     private static async Task<string?> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, CancellationToken cancellationToken)
@@ -506,12 +547,14 @@ public static class CliApp
                 var parsed = CommandOptions.Parse(args.Skip(1).ToArray());
                 var targets = parsed.Positionals.Count == 0 ? ["media"] : parsed.Positionals;
                 var progress = new Progress<string>(message => stdout.WriteLine(message));
-                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken).ConfigureAwait(false);
+                var whisperModelSize = parsed.Get("whisper-model") ?? parsed.Get("model-size");
+                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken, whisperModelSize).ConfigureAwait(false);
                 stdout.WriteLine();
                 stdout.WriteLine("Dependency install complete.");
                 stdout.WriteLine($"Portable directory: {result.PortableDirectory}");
                 stdout.WriteLine($"ONNX model directory: {result.OnnxModelDirectory}");
                 stdout.WriteLine($"OCR model directory: {result.OcrModelDirectory}");
+                stdout.WriteLine($"Whisper model directory: {result.WhisperModelDirectory}");
                 foreach (var item in result.Items)
                 {
                     stdout.WriteLine($"{item.Name}: {item.Message} ({item.Path})");
@@ -533,6 +576,8 @@ public static class CliApp
                 stdout.WriteLine($"OCR classification: {installer.GetOcrClassificationModelPath()}");
                 stdout.WriteLine($"OCR recognition: {installer.GetOcrRecognitionModelPath()}");
                 stdout.WriteLine($"OCR dictionary: {installer.GetOcrDictionaryPath()}");
+                stdout.WriteLine($"Whisper model directory: {installer.Layout.WhisperModelDirectory}");
+                stdout.WriteLine($"Whisper default model: {installer.GetWhisperModelPath()}");
                 return 0;
 
             default:
@@ -710,7 +755,7 @@ public static class CliApp
         var ytDlp = new YtDlpClient(dependencies, processRunner);
         var ffmpeg = new FfmpegClient(dependencies, processRunner);
         var browserCapture = new PlaywrightVideoCaptureClient(dependencies);
-        return new AnalysisPipeline(artifactStore, ytDlp, ffmpeg, provider => LlmProviderFactory.Create(provider), browserCapture);
+        return new AnalysisPipeline(artifactStore, ytDlp, ffmpeg, provider => LlmProviderFactory.TryCreate(provider), browserCapture);
     }
 
     private static ClipExtractionService CreateClipService()
@@ -848,7 +893,7 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay version");
         stdout.WriteLine("  zakira-replay info [--json]");
         stdout.WriteLine("  zakira-replay doctor [--json]");
-        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]    # Defaults: --frames 500, --frame-strategy scene, --ocr-provider local (auto-downloads models), --max-ai-frames 50, --scene-safety-cap 5000");
+        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]    # Defaults: --frames 500, --frame-strategy scene, --ocr-provider local (auto-downloads models), --max-ai-frames 50, --scene-safety-cap 5000. local-whisper provides fully-local STT only; chat/vision/OCR still go through the configured chat provider or `--ocr-provider local`.");
         stdout.WriteLine("  zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]");
@@ -861,8 +906,8 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]");
         stdout.WriteLine("  zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]");
         stdout.WriteLine("  zakira-replay queue status [--queue-id <id>] [--json]");
-        stdout.WriteLine("  zakira-replay llm ask <prompt> [--llm-provider github-copilot|openai|azure-openai] [--model <model>] [--attach <path>]");
-        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|media|all] [--force]  # default: media");
+        stdout.WriteLine("  zakira-replay llm ask <prompt> [--llm-provider github-copilot|openai|azure-openai] [--model <model>] [--attach <path>]    # local-whisper is STT-only and not valid for `llm ask`");
+        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]  # defaults: target=media, --whisper-model=small");
         stdout.WriteLine("  zakira-replay deps path");
         stdout.WriteLine("  zakira-replay auth login <profile-name> [--url <start-url>]");
         stdout.WriteLine("  zakira-replay auth list");

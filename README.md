@@ -29,7 +29,7 @@ Dependencies are not installed automatically unless explicitly configured. Missi
 zakira-replay doctor [--json]
 zakira-replay info [--json]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
 zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
@@ -42,7 +42,7 @@ zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
 zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
 zakira-replay queue status [--queue-id <id>] [--json]
-zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|media|all] [--force]
+zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
 zakira-replay deps path
 zakira-replay auth login <profile-name> [--url <start-url>]
 zakira-replay auth list
@@ -81,7 +81,7 @@ Zakira.Replay resolves dependency paths in this order:
 - Portable dependency directory.
 - `PATH` or known install locations.
 
-Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, or `zakira-replay deps install ocr` to download the RapidOCR PP-OCRv5 latin models used by the local (non-LLM) OCR provider. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, and the OCR models.
+Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr` to download the RapidOCR PP-OCRv5 latin models used by the local (non-LLM) OCR provider, or `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, OCR models, and the default Whisper model.
 
 To allow on-demand downloads when a dependency is first required, set `dependencies.autoDownload=true`. To allow ONNX model download when `sqlite-onnx` search needs model files, set `search.onnx.autoDownload=true`. Both are `false` by default.
 
@@ -114,6 +114,13 @@ Environment variables:
 - `ZAKIRA_REPLAY_OCR_DICTIONARY_PATH`
 - `ZAKIRA_REPLAY_AUTH_DIRECTORY`
 - `ZAKIRA_REPLAY_LLM_PROVIDER`
+- `ZAKIRA_REPLAY_WHISPER_MODEL_PATH`
+- `ZAKIRA_REPLAY_WHISPER_MODEL_DIRECTORY`
+- `ZAKIRA_REPLAY_WHISPER_MODEL_SIZE`
+- `ZAKIRA_REPLAY_WHISPER_LANGUAGE`
+- `ZAKIRA_REPLAY_WHISPER_THREADS`
+- `ZAKIRA_REPLAY_WHISPER_AUTODOWNLOAD`
+- `HF_TOKEN` (optional — used by `deps install whisper-model` to lift Hugging Face download rate limits)
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
 - `OPENAI_MODEL`
@@ -447,6 +454,49 @@ zakira-replay analyze https://example.com/video --browser-auth chrome
 LLM calls default to the GitHub Copilot SDK. The SDK uses your existing GitHub/Copilot login. The default requested model is `gpt-5.5`; if unavailable, Zakira.Replay asks the SDK for available models and falls back to a suitable model.
 
 OpenAI and Azure OpenAI can be selected with `--llm-provider openai`, `--llm-provider azure-openai`, `ZAKIRA_REPLAY_LLM_PROVIDER`, or `llm.provider` in config. OpenAI uses chat completions for text/image work and `/audio/transcriptions` for STT. Azure OpenAI currently supports chat/image work only; audio transcription through Azure is not wired yet.
+
+### Local Whisper STT (`--llm-provider local-whisper`)
+
+For fully-local speech-to-text — no API key, no network, no quota — pick `local-whisper`. Zakira.Replay runs [Whisper.net](https://github.com/sandrohanea/whisper.net) (managed bindings to `whisper.cpp`) entirely on the caller's machine and emits the same Markdown timestamps as the cloud STT paths, so chunked stitching, normalisation, evidence alignment, and search work without any other changes.
+
+`local-whisper` is **STT-only**: it has no chat/vision/OCR surface. Compose it with `--ocr-provider local` for a fully-offline run, or combine with a cloud chat provider when you still need vision/OCR. Selecting `local-whisper` for `llm ask` is rejected with a clear error.
+
+Setup (one-time, opt-in):
+
+```bash
+# Default `small` model (~466 MB, recommended balance of accuracy and speed)
+zakira-replay deps install whisper-model
+
+# Or pick a specific size
+zakira-replay deps install whisper-model --whisper-model base
+zakira-replay deps install whisper-model --whisper-model large-v3-turbo
+```
+
+Sizes available (matches the whisper.cpp Hugging Face repository): `tiny`, `tiny.en`, `base`, `base.en`, `small`, `small.en`, `medium`, `medium.en`, `large-v1`, `large-v2`, `large-v3`, `large-v3-turbo`. Set `HF_TOKEN` in your environment to lift Hugging Face rate limits on large downloads.
+
+Run STT locally:
+
+```bash
+zakira-replay analyze https://example.com/video --stt --llm-provider local-whisper --ocr-provider local
+```
+
+Configuration keys (all optional — defaults work):
+
+| Key | Default | Purpose |
+|---|---|---|
+| `llm.localWhisper.modelPath` | derived from `modelSize` | Explicit ggml model path; overrides everything else |
+| `llm.localWhisper.modelSize` | `small` | Size used to derive `modelPath` against the portable Whisper directory |
+| `llm.localWhisper.language` | `auto` | Whisper language hint; `auto` enables built-in language detection |
+| `llm.localWhisper.threads` | `null` (auto) | Native thread count |
+| `llm.localWhisper.autoDownload` | `true` | First-run convenience; set false to require explicit `deps install whisper-model …` |
+
+Environment variables (override config): `ZAKIRA_REPLAY_WHISPER_MODEL_PATH`, `ZAKIRA_REPLAY_WHISPER_MODEL_DIRECTORY`, `ZAKIRA_REPLAY_WHISPER_MODEL_SIZE`, `ZAKIRA_REPLAY_WHISPER_LANGUAGE`, `ZAKIRA_REPLAY_WHISPER_THREADS`, `ZAKIRA_REPLAY_WHISPER_AUTODOWNLOAD`.
+
+`zakira-replay doctor` reports the resolved model path under the synthetic `whisper-model` dependency.
+
+Native runtimes: out of the box, `Whisper.net.Runtime` (CPU) ships with the dotnet tool. For GPU acceleration (CUDA/Vulkan/CoreML/OpenVINO), follow [Whisper.net's pluggable runtime docs](https://github.com/sandrohanea/whisper.net#multiple-runtimes-support) — the loader will pick up alternative native binaries placed under the conventional `runtimes/<rid>/native/` layout.
+
+Warning codes specific to local STT: `STT_LOCAL_MODEL_MISSING`, `STT_LOCAL_INIT_FAILED`, `STT_LOCAL_INFERENCE_FAILED`. Per-chunk failures still surface as `STT_CHUNK_FAILED`, the same way the cloud STT paths do.
 
 Secrets themselves should stay out of JSON config. The config can store secret environment variable names instead, so agents or humans can choose which variables Zakira.Replay reads without embedding keys on disk. For example, `llm.openai.apiKeyEnvVars=OPENAI_API_KEY,WORK_OPENAI_API_KEY` tells Zakira.Replay to try those variable names for the OpenAI API key. Built-in defaults are still appended, so standard names keep working.
 

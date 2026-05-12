@@ -264,6 +264,55 @@ public sealed class LlmConfig
     public OpenAiConfig OpenAi { get; set; } = new();
 
     public AzureOpenAiConfig AzureOpenAi { get; set; } = new();
+
+    /// <summary>
+    /// Options for the fully-local Whisper.net STT path selected via
+    /// <c>--llm-provider local-whisper</c>. Resolved end-to-end by
+    /// <see cref="LocalWhisperOptions.Resolve(ReplayConfig?)"/>.
+    /// </summary>
+    public LocalWhisperConfig LocalWhisper { get; set; } = new();
+}
+
+public sealed class LocalWhisperConfig
+{
+    /// <summary>
+    /// Absolute path to a ggml model file (<c>ggml-&lt;size&gt;.bin</c>). When null, the provider
+    /// derives the path from <see cref="ModelSize"/> against the portable model directory.
+    /// </summary>
+    public string? ModelPath { get; set; }
+
+    /// <summary>
+    /// Whisper model size used when <see cref="ModelPath"/> is null. One of
+    /// <c>tiny</c>/<c>base</c>/<c>small</c>/<c>medium</c>/<c>large-v3</c>/<c>large-v3-turbo</c> or
+    /// their <c>.en</c> variants. Defaults to <c>small</c>.
+    /// </summary>
+    public string? ModelSize { get; set; }
+
+    /// <summary>
+    /// Language hint passed to Whisper. Use <c>auto</c> to enable language detection (default),
+    /// or a two-letter code like <c>en</c>, <c>fr</c>, <c>es</c>.
+    /// </summary>
+    public string? Language { get; set; }
+
+    /// <summary>
+    /// Number of native threads whisper.cpp may use. <c>null</c> or <c>0</c> lets whisper.cpp
+    /// pick a reasonable default for the current machine.
+    /// </summary>
+    public int? Threads { get; set; }
+
+    /// <summary>
+    /// Reserved for ordering Whisper.net's runtime probes (CUDA/Vulkan/CoreML/CPU). Currently
+    /// stored verbatim and not yet consumed by the provider; future releases will pass it through
+    /// to <c>RuntimeOptions.RuntimeLibraryOrder</c>.
+    /// </summary>
+    public List<string> RuntimeOrder { get; set; } = [];
+
+    /// <summary>
+    /// When true (default), <see cref="LocalWhisperTranscriptionProvider"/> may auto-fetch the
+    /// configured model on first use. Mirrors <c>ocr.local.autoDownload</c>. Set false to require
+    /// explicit <c>deps install whisper-model …</c>.
+    /// </summary>
+    public bool AutoDownload { get; set; } = true;
 }
 
 public sealed class OpenAiConfig
@@ -381,6 +430,12 @@ public sealed class ConfigStore
                     DeploymentEnvironmentVariables = ["AZURE_OPENAI_DEPLOYMENT"],
                     ModelEnvironmentVariables = ["AZURE_OPENAI_MODEL"],
                     ApiVersionEnvironmentVariables = ["AZURE_OPENAI_API_VERSION"]
+                },
+                LocalWhisper = new LocalWhisperConfig
+                {
+                    ModelSize = LocalWhisperOptions.DefaultModelSize,
+                    Language = LocalWhisperOptions.DefaultLanguage,
+                    AutoDownload = true
                 }
             },
             Ocr = new OcrConfig
@@ -690,6 +745,34 @@ public sealed class ConfigStore
             case "llm.azure-openai.api-version":
                 config.Llm.AzureOpenAi.ApiVersion = NormalizeNonEmpty(value, key);
                 break;
+            case "llm.localwhisper.modelpath":
+            case "llm.local-whisper.model-path":
+            case "llm.localwhisper.path":
+            case "llm.local-whisper.path":
+                config.Llm.LocalWhisper.ModelPath = NormalizeFilePath(value);
+                break;
+            case "llm.localwhisper.modelsize":
+            case "llm.local-whisper.model-size":
+            case "llm.localwhisper.size":
+            case "llm.local-whisper.size":
+                config.Llm.LocalWhisper.ModelSize = LocalWhisperOptions.NormalizeModelSize(NormalizeNonEmpty(value, key));
+                break;
+            case "llm.localwhisper.language":
+            case "llm.local-whisper.language":
+                config.Llm.LocalWhisper.Language = NormalizeNonEmpty(value, key).ToLowerInvariant();
+                break;
+            case "llm.localwhisper.threads":
+            case "llm.local-whisper.threads":
+                config.Llm.LocalWhisper.Threads = ParsePositiveInt(value, key);
+                break;
+            case "llm.localwhisper.runtimeorder":
+            case "llm.local-whisper.runtime-order":
+                config.Llm.LocalWhisper.RuntimeOrder = ParseRuntimeOrder(value, key);
+                break;
+            case "llm.localwhisper.autodownload":
+            case "llm.local-whisper.auto-download":
+                config.Llm.LocalWhisper.AutoDownload = ParseBool(value, key);
+                break;
             case "captions.languages":
                 config.Captions.Languages = ParseCaptionLanguages(value, key);
                 break;
@@ -833,6 +916,12 @@ public sealed class ConfigStore
             "llm.azureopenai.deployment" or "llm.azure-openai.deployment" => config.Llm.AzureOpenAi.Deployment,
             "llm.azureopenai.model" or "llm.azure-openai.model" => config.Llm.AzureOpenAi.Model,
             "llm.azureopenai.apiversion" or "llm.azure-openai.api-version" => config.Llm.AzureOpenAi.ApiVersion,
+            "llm.localwhisper.modelpath" or "llm.local-whisper.model-path" or "llm.localwhisper.path" or "llm.local-whisper.path" => config.Llm.LocalWhisper.ModelPath,
+            "llm.localwhisper.modelsize" or "llm.local-whisper.model-size" or "llm.localwhisper.size" or "llm.local-whisper.size" => config.Llm.LocalWhisper.ModelSize,
+            "llm.localwhisper.language" or "llm.local-whisper.language" => config.Llm.LocalWhisper.Language,
+            "llm.localwhisper.threads" or "llm.local-whisper.threads" => config.Llm.LocalWhisper.Threads?.ToString(CultureInfo.InvariantCulture),
+            "llm.localwhisper.runtimeorder" or "llm.local-whisper.runtime-order" => FormatRuntimeOrder(config.Llm.LocalWhisper.RuntimeOrder),
+            "llm.localwhisper.autodownload" or "llm.local-whisper.auto-download" => config.Llm.LocalWhisper.AutoDownload.ToString(),
             "captions.languages" => FormatCaptionLanguages(config.Captions.Languages),
             "slides.enabled" => config.Slides.Enabled.ToString(),
             "slides.hashdistance" or "slides.hash-distance" => config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
@@ -895,6 +984,12 @@ public sealed class ConfigStore
             ["llm.azureOpenAi.deployment"] = config.Llm.AzureOpenAi.Deployment,
             ["llm.azureOpenAi.model"] = config.Llm.AzureOpenAi.Model,
             ["llm.azureOpenAi.apiVersion"] = config.Llm.AzureOpenAi.ApiVersion,
+            ["llm.localWhisper.modelPath"] = config.Llm.LocalWhisper.ModelPath,
+            ["llm.localWhisper.modelSize"] = config.Llm.LocalWhisper.ModelSize,
+            ["llm.localWhisper.language"] = config.Llm.LocalWhisper.Language,
+            ["llm.localWhisper.threads"] = config.Llm.LocalWhisper.Threads?.ToString(CultureInfo.InvariantCulture),
+            ["llm.localWhisper.runtimeOrder"] = FormatRuntimeOrder(config.Llm.LocalWhisper.RuntimeOrder),
+            ["llm.localWhisper.autoDownload"] = config.Llm.LocalWhisper.AutoDownload.ToString(),
             ["captions.languages"] = FormatCaptionLanguages(config.Captions.Languages),
             ["slides.enabled"] = config.Slides.Enabled.ToString(),
             ["slides.hashDistance"] = config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
@@ -1001,6 +1096,27 @@ public sealed class ConfigStore
     private static string? FormatCaptionLanguages(IReadOnlyList<string> languages)
     {
         return languages.Count == 0 ? null : string.Join(',', languages);
+    }
+
+    private static List<string> ParseRuntimeOrder(string value, string key)
+    {
+        var runtimes = value.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(runtime => runtime.Trim().Trim('"').ToLowerInvariant())
+            .Where(runtime => !string.IsNullOrWhiteSpace(runtime))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        if (runtimes.Count == 0)
+        {
+            throw new ReplayException($"Config key {key} requires one or more runtime names (e.g. `cuda,vulkan,coreml,cpu`) separated by commas or semicolons.");
+        }
+
+        return runtimes;
+    }
+
+    private static string? FormatRuntimeOrder(IReadOnlyList<string> runtimes)
+    {
+        return runtimes.Count == 0 ? null : string.Join(',', runtimes);
     }
 
     private static string? FormatEnvironmentVariableNames(IReadOnlyList<string> names)

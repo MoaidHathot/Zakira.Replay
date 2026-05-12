@@ -31,6 +31,12 @@ public static class ReplayWarningCodes
 
     public const string SttChunkFailed = "STT_CHUNK_FAILED";
 
+    public const string SttLocalModelMissing = "STT_LOCAL_MODEL_MISSING";
+
+    public const string SttLocalInitFailed = "STT_LOCAL_INIT_FAILED";
+
+    public const string SttLocalInferenceFailed = "STT_LOCAL_INFERENCE_FAILED";
+
     public const string FramesNoMedia = "FRAMES_NO_MEDIA";
 
     public const string FramesRemoteFallback = "FRAMES_REMOTE_FALLBACK";

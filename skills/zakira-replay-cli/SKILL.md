@@ -43,6 +43,7 @@ If dependencies are missing and the user permits local downloads:
 zakira-replay deps install media
 zakira-replay deps install onnx
 zakira-replay deps install ocr
+zakira-replay deps install whisper-model    # default small; use --whisper-model <size> to pick
 ```
 
 `media` installs portable `yt-dlp`, `ffmpeg`, and `ffprobe` where supported. `onnx` installs the default semantic-search model files. `ocr` installs the RapidOCR PP-OCRv5 latin models that the local (non-LLM) OCR provider needs (~30 MB across four files). Automatic downloads only happen when configured with `dependencies.autoDownload=true`, `search.onnx.autoDownload=true`, or `ocr.local.autoDownload=true`.
@@ -133,6 +134,7 @@ Provider notes:
 - `github-copilot` is the default LLM provider for STT (and for OCR/vision when `--ocr-provider copilot`).
 - `openai` supports chat/image and audio transcription via `/audio/transcriptions`.
 - `azure-openai` supports chat/image for OCR/vision, but Zakira.Replay STT is not implemented yet.
+- `local-whisper` runs Whisper.net (whisper.cpp bindings) entirely on-device for STT. **STT-only** — has no chat/vision/OCR surface; combine with `--ocr-provider local` for a fully-offline run. Pre-install the model with `zakira-replay deps install whisper-model [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo]` (default: `small`, ~466 MB). Configure via `llm.localWhisper.*` keys or `ZAKIRA_REPLAY_WHISPER_*` env vars. Surface-specific warnings: `STT_LOCAL_MODEL_MISSING`, `STT_LOCAL_INIT_FAILED`, `STT_LOCAL_INFERENCE_FAILED`.
 - The default OCR provider is `local` (RapidOCR via ONNX) which needs no LLM at all.
 
 ## Read Command Output

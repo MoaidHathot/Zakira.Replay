@@ -169,6 +169,7 @@ Provider notes:
 - `github-copilot` is the default LLM provider for STT/OCR/vision when `ocrProvider: "copilot"`.
 - `openai` supports chat/image and audio transcription.
 - `azure-openai` supports chat/image for OCR/vision, but Zakira.Replay STT is not implemented yet.
+- `local-whisper` runs Whisper.net (whisper.cpp bindings) entirely on-device for STT. **STT-only** — has no chat/vision/OCR surface; combine with `ocrProvider: "local"` for a fully-offline run. The orchestrator must pre-install a model with `zakira-replay deps install whisper-model` (default `small`, ~466 MB) or set `llm.localWhisper.modelPath` to an existing ggml file. Surface-specific warnings: `STT_LOCAL_MODEL_MISSING`, `STT_LOCAL_INIT_FAILED`, `STT_LOCAL_INFERENCE_FAILED`.
 - `ocrProvider: "local"` bypasses LLM providers entirely — useful when GitHub Copilot is rate-limited or behind an agent-loop session that times out, when the user is offline, or when per-frame OCR cost matters.
 
 ## Artifact Reading Order

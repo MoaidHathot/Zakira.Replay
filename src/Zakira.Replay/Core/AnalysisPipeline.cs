@@ -186,37 +186,53 @@ public sealed class AnalysisPipeline
             }
             else
             {
-                llm ??= TryResolveLlm(request);
-                if (llm is null)
+                var providerName = LlmProviderFactory.Normalize(request.LlmProvider);
+                if (providerName == LlmProviders.LocalWhisper)
                 {
-                    warnings.Add(new ReplayWarning(
-                        ReplayWarningCodes.SttNoLlmProvider,
-                        "Speech-to-text was requested but no LLM provider is configured.",
-                        Source: "llm",
-                        Severity: ReplayWarningSeverities.Error));
+                    var localSttResult = await TryRunLocalWhisperAsync(audioPath, run, warnings, progress, cancellationToken).ConfigureAwait(false);
+                    if (localSttResult is { Transcript: { } localTranscript })
+                    {
+                        transcript = localTranscript;
+                        if (missingTranscriptWarning is not null)
+                        {
+                            warnings.Remove(missingTranscriptWarning);
+                        }
+                    }
                 }
                 else
                 {
-                    progress?.Report($"Transcribing audio with {llm.Name} (chunked)...");
-                    var transcriber = new CopilotTranscriptionProvider(llm, request.Model);
-                    var chunkedService = new ChunkedTranscriptionService(transcriber, new AudioChunker(ffmpeg));
-                    var chunkedResult = await chunkedService.TranscribeAsync(run.GetPath(audioPath), run, options: null, progress, cancellationToken).ConfigureAwait(false);
-                    var markdownPath = run.GetPath("transcript.md");
-                    await File.WriteAllTextAsync(markdownPath, chunkedResult.MarkdownTranscript + Environment.NewLine, cancellationToken).ConfigureAwait(false);
-                    transcript = new TranscriptArtifact(run.GetPath(audioPath), markdownPath, $"{llm.Name}-audio-transcription");
-                    if (chunkedResult.Chunks.Chunks.Count > 1)
+                    llm ??= TryResolveLlm(request);
+                    if (llm is null)
                     {
-                        await artifactStore.WriteJsonAsync(run, "audio/chunks/chunks.json", chunkedResult.Chunks, cancellationToken).ConfigureAwait(false);
+                        warnings.Add(new ReplayWarning(
+                            ReplayWarningCodes.SttNoLlmProvider,
+                            "Speech-to-text was requested but no LLM provider is configured.",
+                            Source: "llm",
+                            Severity: ReplayWarningSeverities.Error));
                     }
-
-                    foreach (var chunkWarning in chunkedResult.ChunkedTranscriptionWarnings)
+                    else
                     {
-                        warnings.Add(chunkWarning);
-                    }
+                        progress?.Report($"Transcribing audio with {llm.Name} (chunked)...");
+                        var transcriber = new CopilotTranscriptionProvider(llm, request.Model);
+                        var chunkedService = new ChunkedTranscriptionService(transcriber, new AudioChunker(ffmpeg));
+                        var chunkedResult = await chunkedService.TranscribeAsync(run.GetPath(audioPath), run, options: null, progress, cancellationToken).ConfigureAwait(false);
+                        var markdownPath = run.GetPath("transcript.md");
+                        await File.WriteAllTextAsync(markdownPath, chunkedResult.MarkdownTranscript + Environment.NewLine, cancellationToken).ConfigureAwait(false);
+                        transcript = new TranscriptArtifact(run.GetPath(audioPath), markdownPath, $"{llm.Name}-audio-transcription");
+                        if (chunkedResult.Chunks.Chunks.Count > 1)
+                        {
+                            await artifactStore.WriteJsonAsync(run, "audio/chunks/chunks.json", chunkedResult.Chunks, cancellationToken).ConfigureAwait(false);
+                        }
 
-                    if (missingTranscriptWarning is not null)
-                    {
-                        warnings.Remove(missingTranscriptWarning);
+                        foreach (var chunkWarning in chunkedResult.ChunkedTranscriptionWarnings)
+                        {
+                            warnings.Add(chunkWarning);
+                        }
+
+                        if (missingTranscriptWarning is not null)
+                        {
+                            warnings.Remove(missingTranscriptWarning);
+                        }
                     }
                 }
             }
@@ -572,6 +588,145 @@ public sealed class AnalysisPipeline
 
         return llmFactory(request.LlmProvider);
     }
+
+    /// <summary>
+    /// Run the fully-local Whisper.net STT path. Mirrors the LLM-backed branch above:
+    /// drives <see cref="ChunkedTranscriptionService"/>, writes <c>transcript.md</c> and
+    /// (when chunking actually splits the input) <c>audio/chunks/chunks.json</c>. All failures
+    /// are surfaced as structured warnings instead of exceptions so the pipeline always lands
+    /// on a coherent artifact tree, matching the existing
+    /// <c>OCR_LOCAL_*</c> error-handling pattern.
+    /// </summary>
+    private async Task<LocalWhisperResult?> TryRunLocalWhisperAsync(
+        string audioPath,
+        VideoRun run,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var config = new ConfigStore().Load();
+        LocalWhisperOptions options;
+        try
+        {
+            options = LocalWhisperOptions.Resolve(config);
+        }
+        catch (Exception ex) when (ex is not ReplayException)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.SttLocalInitFailed,
+                $"Failed to resolve local Whisper options: {ex.Message}",
+                Source: "stt",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+
+        var modelPath = options.ModelPath;
+        if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+        {
+            if (IsLocalWhisperAutoDownloadEnabled(config))
+            {
+                progress?.Report("Local Whisper model missing; auto-downloading ggml model (this can take several minutes)...");
+                try
+                {
+                    var installer = new PortableDependencyInstaller(config);
+                    await installer.InstallAsync(
+                        ["whisper-model"],
+                        force: false,
+                        progress,
+                        cancellationToken,
+                        whisperModelSize: config.Llm.LocalWhisper.ModelSize ?? LocalWhisperOptions.DefaultModelSize).ConfigureAwait(false);
+                    options = LocalWhisperOptions.Resolve(config);
+                    modelPath = options.ModelPath;
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.SttLocalModelMissing,
+                        $"Local Whisper auto-download failed: {ex.Message}. Run `zakira-replay deps install whisper-model {LocalWhisperOptions.DefaultModelSize}` manually.",
+                        Source: "stt",
+                        Severity: ReplayWarningSeverities.Error));
+                    return null;
+                }
+            }
+
+            if (string.IsNullOrWhiteSpace(modelPath) || !File.Exists(modelPath))
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.SttLocalModelMissing,
+                    $"Local Whisper model not found. Run `zakira-replay deps install whisper-model {LocalWhisperOptions.DefaultModelSize}` (or set `llm.localWhisper.autoDownload=true`). Looked for: {modelPath ?? "<unresolved>"}.",
+                    Source: "stt",
+                    Severity: ReplayWarningSeverities.Error));
+                return null;
+            }
+        }
+
+        progress?.Report($"Transcribing audio with local Whisper ({Path.GetFileName(modelPath)}, chunked)...");
+        try
+        {
+            using var provider = new LocalWhisperTranscriptionProvider(options);
+            var chunkedService = new ChunkedTranscriptionService(provider, new AudioChunker(ffmpeg));
+            var chunkedResult = await chunkedService.TranscribeAsync(run.GetPath(audioPath), run, options: null, progress, cancellationToken).ConfigureAwait(false);
+            var markdownPath = run.GetPath("transcript.md");
+            await File.WriteAllTextAsync(markdownPath, chunkedResult.MarkdownTranscript + Environment.NewLine, cancellationToken).ConfigureAwait(false);
+            var transcript = new TranscriptArtifact(run.GetPath(audioPath), markdownPath, "local-whisper-audio-transcription");
+            if (chunkedResult.Chunks.Chunks.Count > 1)
+            {
+                await artifactStore.WriteJsonAsync(run, "audio/chunks/chunks.json", chunkedResult.Chunks, cancellationToken).ConfigureAwait(false);
+            }
+
+            foreach (var chunkWarning in chunkedResult.ChunkedTranscriptionWarnings)
+            {
+                warnings.Add(chunkWarning);
+            }
+
+            return new LocalWhisperResult(transcript);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ReplayException ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.SttLocalInferenceFailed,
+                ex.Message,
+                Source: "stt",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.SttLocalInferenceFailed,
+                $"Local Whisper transcription failed: {ex.Message}",
+                Source: "stt",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+    }
+
+    private static bool IsLocalWhisperAutoDownloadEnabled(ReplayConfig config)
+    {
+        // Mirror the OCR autodownload env override so air-gapped / bandwidth-constrained
+        // environments can disable on-demand downloads without touching persistent config.
+        var fromEnv = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_WHISPER_AUTODOWNLOAD");
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+        {
+            var normalized = fromEnv.Trim().ToLowerInvariant();
+            if (normalized is "false" or "0" or "no")
+            {
+                return false;
+            }
+            if (normalized is "true" or "1" or "yes")
+            {
+                return true;
+            }
+        }
+
+        return config.Llm.LocalWhisper.AutoDownload;
+    }
+
+    private sealed record LocalWhisperResult(TranscriptArtifact Transcript);
 
     private static bool IsOcrLocalAutoDownloadEnabled(ReplayConfig config)
     {

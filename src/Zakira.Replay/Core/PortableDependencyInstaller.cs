@@ -10,6 +10,7 @@ public sealed class PortableDependencyInstaller
     public const string Ffprobe = "ffprobe";
     public const string Onnx = "onnx";
     public const string Ocr = "ocr";
+    public const string WhisperModel = "whisper-model";
     public const string All = "all";
     public const string DefaultOnnxModelFile = "model_quantized.onnx";
 
@@ -29,6 +30,9 @@ public sealed class PortableDependencyInstaller
     // RapidAI's RapidOCR model store on ModelScope; same SHA-pinned tag the upstream Python package uses.
     private const string RapidOcrModelBaseUrl = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0";
 
+    // ggml whisper.cpp model store on Hugging Face. Honours HF_TOKEN if set (rate-limit relief).
+    private const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
+
     private readonly ReplayConfig config;
     private readonly HttpClient httpClient;
 
@@ -42,7 +46,7 @@ public sealed class PortableDependencyInstaller
         }
     }
 
-    public PortableDependencyLayout Layout => new(GetPortableDirectory(config), GetOnnxModelDirectory(config), GetOcrModelDirectory(config));
+    public PortableDependencyLayout Layout => new(GetPortableDirectory(config), GetOnnxModelDirectory(config), GetOcrModelDirectory(config), GetWhisperModelDirectory(config));
 
     public string GetPortableExecutablePath(string executableName)
     {
@@ -66,6 +70,17 @@ public sealed class PortableDependencyInstaller
     public string GetOcrRecognitionModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrRecognitionModelFile);
 
     public string GetOcrDictionaryPath() => Path.Combine(Layout.OcrModelDirectory, OcrDictionaryFile);
+
+    public string GetWhisperModelPath(string? modelSize = null)
+    {
+        var fileName = LocalWhisperOptions.BuildModelFileName(modelSize ?? LocalWhisperOptions.DefaultModelSize);
+        return Path.Combine(Layout.WhisperModelDirectory, fileName);
+    }
+
+    public static string GetDefaultWhisperModelDirectory()
+    {
+        return Path.Combine(GetDefaultPortableDirectory(), "models", "whisper");
+    }
 
     public static string GetDefaultPortableDirectory()
     {
@@ -102,6 +117,7 @@ public sealed class PortableDependencyInstaller
                     AddUnique(normalized, Ffmpeg);
                     AddUnique(normalized, Onnx);
                     AddUnique(normalized, Ocr);
+                    AddUnique(normalized, WhisperModel);
                     break;
                 case "media":
                     AddUnique(normalized, YtDlp);
@@ -126,8 +142,15 @@ public sealed class PortableDependencyInstaller
                 case "ocr-models":
                     AddUnique(normalized, Ocr);
                     break;
+                case WhisperModel:
+                case "whisper":
+                case "stt":
+                case "whisper-models":
+                case "ggml":
+                    AddUnique(normalized, WhisperModel);
+                    break;
                 default:
-                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, media, or all.");
+                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, media, or all.");
             }
         }
 
@@ -139,6 +162,16 @@ public sealed class PortableDependencyInstaller
         bool force,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
+    {
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize: null).ConfigureAwait(false);
+    }
+
+    public async Task<PortableDependencyInstallResult> InstallAsync(
+        IEnumerable<string>? targets,
+        bool force,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken,
+        string? whisperModelSize)
     {
         var items = new List<PortableDependencyInstallItem>();
         var layout = Layout;
@@ -161,10 +194,13 @@ public sealed class PortableDependencyInstaller
                 case Ocr:
                     items.AddRange(await InstallOcrModelsAsync(force, progress, cancellationToken).ConfigureAwait(false));
                     break;
+                case WhisperModel:
+                    items.Add(await InstallWhisperModelAsync(whisperModelSize, force, progress, cancellationToken).ConfigureAwait(false));
+                    break;
             }
         }
 
-        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory);
+        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory, layout.WhisperModelDirectory);
     }
 
     private async Task<PortableDependencyInstallItem> InstallYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -254,7 +290,36 @@ public sealed class PortableDependencyInstaller
         return items;
     }
 
-    private async Task<bool> DownloadFileAsync(string url, string destinationPath, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    private async Task<PortableDependencyInstallItem> InstallWhisperModelAsync(string? modelSize, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        var size = LocalWhisperOptions.NormalizeModelSize(string.IsNullOrWhiteSpace(modelSize)
+            ? (config.Llm.LocalWhisper.ModelSize ?? LocalWhisperOptions.DefaultModelSize)
+            : modelSize);
+
+        if (!LocalWhisperOptions.SupportedModelSizes.Contains(size, StringComparer.OrdinalIgnoreCase))
+        {
+            throw new ReplayException(
+                $"Unknown Whisper model size: '{modelSize ?? size}'. Use one of: {string.Join(", ", LocalWhisperOptions.SupportedModelSizes)}.");
+        }
+
+        var modelDirectory = Layout.WhisperModelDirectory;
+        Directory.CreateDirectory(modelDirectory);
+        var fileName = LocalWhisperOptions.BuildModelFileName(size);
+        var url = $"{WhisperModelBaseUrl}/{Uri.EscapeDataString(fileName)}?download=true";
+        var destination = Path.Combine(modelDirectory, fileName);
+
+        // Hugging Face throttles unauthenticated downloads of large model files. Pick up an
+        // optional HF_TOKEN exactly like Whisper.net's own downloader does so users can lift the
+        // rate limit by simply exporting `HF_TOKEN=hf_xxx` in their shell.
+        var hfToken = Environment.GetEnvironmentVariable("HF_TOKEN");
+        var installed = string.IsNullOrWhiteSpace(hfToken)
+            ? await DownloadFileAsync(url, destination, force, progress, cancellationToken).ConfigureAwait(false)
+            : await DownloadFileAsync(url, destination, force, progress, cancellationToken, authorizationHeader: ("Authorization", $"Bearer {hfToken}")).ConfigureAwait(false);
+
+        return new PortableDependencyInstallItem(WhisperModel, destination, installed, url, installed ? $"downloaded ({size})" : $"already exists ({size})");
+    }
+
+    private async Task<bool> DownloadFileAsync(string url, string destinationPath, bool force, IProgress<string>? progress, CancellationToken cancellationToken, (string Name, string Value)? authorizationHeader = null)
     {
         if (!force && File.Exists(destinationPath))
         {
@@ -264,7 +329,13 @@ public sealed class PortableDependencyInstaller
 
         Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
         progress?.Report($"Downloading: {url}");
-        using var response = await httpClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
+        using var requestMessage = new HttpRequestMessage(HttpMethod.Get, url);
+        if (authorizationHeader is { } header)
+        {
+            requestMessage.Headers.TryAddWithoutValidation(header.Name, header.Value);
+        }
+
+        using var response = await httpClient.SendAsync(requestMessage, HttpCompletionOption.ResponseHeadersRead, cancellationToken).ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
         var tempPath = destinationPath + ".tmp";
@@ -332,6 +403,16 @@ public sealed class PortableDependencyInstaller
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY"),
             config.Ocr.Local.ModelDirectory,
             GetDefaultOcrModelDirectory())!));
+    }
+
+    private static string GetWhisperModelDirectory(ReplayConfig config)
+    {
+        return Path.GetFullPath(Environment.ExpandEnvironmentVariables(FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_WHISPER_MODEL_DIRECTORY"),
+            config.Llm.LocalWhisper.ModelPath is { } modelPath && !string.IsNullOrWhiteSpace(modelPath)
+                ? Path.GetDirectoryName(modelPath)
+                : null,
+            GetDefaultWhisperModelDirectory())!));
     }
 
     private static string GetOnnxModelFile(ReplayConfig config)
@@ -403,13 +484,14 @@ public sealed class PortableDependencyInstaller
     private sealed record OnnxDownloadFile(string Name, string Url);
 }
 
-public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory);
+public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory, string WhisperModelDirectory);
 
 public sealed record PortableDependencyInstallResult(
     IReadOnlyList<PortableDependencyInstallItem> Items,
     string PortableDirectory,
     string OnnxModelDirectory,
-    string OcrModelDirectory);
+    string OcrModelDirectory,
+    string WhisperModelDirectory);
 
 public sealed record PortableDependencyInstallItem(
     string Name,

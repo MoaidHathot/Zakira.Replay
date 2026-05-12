@@ -57,6 +57,28 @@
     "sceneSafetyCap": {
       "type": ["integer", "null"],
       "minimum": 1
+    },
+    "ocrProvider": {
+      "description": "Provider used for OCR. 'copilot' routes through an LLM vision model; 'local' uses RapidOCR / PP-OCRv5 via ONNX. Defaults to 'copilot'.",
+      "type": "string",
+      "enum": ["copilot", "local"]
+    },
+    "smartCrop": {
+      "description": "Run smart-crop preprocessing on each frame before perceptual hashing, OCR, and vision. When true (or null + crop.enabled=true in config), Teams/Zoom/WebEx UI chrome is removed.",
+      "type": ["boolean", "null"]
+    },
+    "smartCropProfile": {
+      "description": "Smart-crop profile identifier. auto/teams/zoom/webex/generic share the same algorithm in this release; 'off' disables crop regardless of smartCrop.",
+      "type": ["string", "null"]
+    },
+    "captureMode": {
+      "description": "Frame-capture mode. 'ytdlp' (default) uses yt-dlp + ffmpeg; 'browser' drives Playwright; 'auto' tries yt-dlp first and falls back to browser on failure (emits CAPTURE_BROWSER_FALLBACK).",
+      "type": ["string", "null"],
+      "enum": ["auto", "ytdlp", "browser", null]
+    },
+    "authProfile": {
+      "description": "Name of a Playwright storage-state profile (created by `zakira-replay auth login`) to load into the browser context for SSO/cookie-gated sources. Only consulted in browser or auto capture mode. Emits AUTH_PROFILE_NOT_FOUND or AUTH_PROFILE_STALE warnings.",
+      "type": ["string", "null"]
     }
   }
 }

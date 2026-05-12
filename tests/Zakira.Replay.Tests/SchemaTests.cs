@@ -88,7 +88,7 @@ public sealed class SchemaTests
         var runDirectory = temp.GetPath("runs", "chapters-schema");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 
@@ -218,7 +218,7 @@ public sealed class SchemaTests
         var runDirectory = temp.GetPath("runs", "search-schema");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 

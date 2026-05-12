@@ -17,7 +17,7 @@ public sealed class EvidenceAlignmentTests
         var chapterDirectory = Path.Combine(runDirectory, "chapters");
         Directory.CreateDirectory(chapterDirectory);
         var chapters = new ChapterDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             RunId: evidence.RunId,
             CreatedAt: DateTimeOffset.UtcNow,
             Method: "offline-lexical",
@@ -178,7 +178,7 @@ public sealed class EvidenceAlignmentTests
     private static EvidenceDocument CreateFixtureEvidence()
     {
         return new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "fixture.mp4",
             VisionInstruction: "test alignment",
 

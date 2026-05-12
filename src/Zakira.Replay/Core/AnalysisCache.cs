@@ -36,7 +36,12 @@ public static class AnalysisCache
             SlideGrouping: request.SlideGrouping,
             SlideHashDistance: request.SlideHashDistance,
             FramesPerMinute: request.FramesPerMinute,
-            SceneSafetyCap: request.SceneSafetyCap);
+            SceneSafetyCap: request.SceneSafetyCap,
+            OcrProvider: request.OcrProvider,
+            SmartCrop: request.SmartCrop,
+            SmartCropProfile: request.SmartCropProfile,
+            CaptureMode: request.CaptureMode,
+            AuthProfile: request.AuthProfile);
         var json = JsonSerializer.Serialize(input, JsonOptions);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
     }
@@ -61,7 +66,12 @@ public static class AnalysisCache
         bool? SlideGrouping,
         int? SlideHashDistance,
         int? FramesPerMinute,
-        int? SceneSafetyCap);
+        int? SceneSafetyCap,
+        string OcrProvider,
+        bool? SmartCrop,
+        string? SmartCropProfile,
+        string? CaptureMode,
+        string? AuthProfile);
 }
 
 public sealed record ArtifactCacheEntry(

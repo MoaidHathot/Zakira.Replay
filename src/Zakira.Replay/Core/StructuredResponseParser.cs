@@ -14,10 +14,24 @@ public static partial class StructuredResponseParser
 
     public static OcrFrameStructured ParseOcr(string rawResponse)
     {
+        return ParseOcrWithMode(rawResponse).Structured;
+    }
+
+    /// <summary>
+    /// Parses an OCR response and reports whether the parser found valid structured JSON
+    /// (<see cref="ParsedOcrResult.IsFallback"/> == false) or fell back to free-text storage
+    /// because the response was prose / malformed JSON. Prefer this over
+    /// <see cref="ParseOcr(string)"/> + <see cref="IsTolerantFallback(OcrFrameStructured)"/>
+    /// in callers that have the raw response: the heuristic <c>IsTolerantFallback</c> cannot
+    /// tell a successful empty parse (e.g. local OCR found no text in the frame) from a true
+    /// fallback (LLM returned prose).
+    /// </summary>
+    public static ParsedOcrResult ParseOcrWithMode(string rawResponse)
+    {
         var json = TryFindJson(rawResponse);
         if (json is null)
         {
-            return new OcrFrameStructured(rawResponse?.Trim() ?? string.Empty, [], []);
+            return new ParsedOcrResult(new OcrFrameStructured(rawResponse?.Trim() ?? string.Empty, [], []), IsFallback: true);
         }
 
         try
@@ -26,26 +40,36 @@ public static partial class StructuredResponseParser
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
-                return new OcrFrameStructured(rawResponse.Trim(), [], []);
+                return new ParsedOcrResult(new OcrFrameStructured(rawResponse.Trim(), [], []), IsFallback: true);
             }
 
             var freeText = TryGetString(root, "freeText") ?? rawResponse.Trim();
             var lines = ReadStringArray(root, "lines");
             var tables = ReadTables(root);
-            return new OcrFrameStructured(freeText, lines, tables);
+            return new ParsedOcrResult(new OcrFrameStructured(freeText, lines, tables), IsFallback: false);
         }
         catch (JsonException)
         {
-            return new OcrFrameStructured(rawResponse.Trim(), [], []);
+            return new ParsedOcrResult(new OcrFrameStructured(rawResponse.Trim(), [], []), IsFallback: true);
         }
     }
 
     public static VisionFrameStructured ParseVision(string rawResponse)
     {
+        return ParseVisionWithMode(rawResponse).Structured;
+    }
+
+    /// <summary>
+    /// Parses a vision response and reports whether the parser found valid structured JSON
+    /// (<see cref="ParsedVisionResult.IsFallback"/> == false). See
+    /// <see cref="ParseOcrWithMode(string)"/> for rationale.
+    /// </summary>
+    public static ParsedVisionResult ParseVisionWithMode(string rawResponse)
+    {
         var json = TryFindJson(rawResponse);
         if (json is null)
         {
-            return new VisionFrameStructured("other", null, [], [], [], [], rawResponse?.Trim() ?? string.Empty);
+            return new ParsedVisionResult(new VisionFrameStructured("other", null, [], [], [], [], rawResponse?.Trim() ?? string.Empty), IsFallback: true);
         }
 
         try
@@ -54,7 +78,7 @@ public static partial class StructuredResponseParser
             var root = document.RootElement;
             if (root.ValueKind != JsonValueKind.Object)
             {
-                return new VisionFrameStructured("other", null, [], [], [], [], rawResponse.Trim());
+                return new ParsedVisionResult(new VisionFrameStructured("other", null, [], [], [], [], rawResponse.Trim()), IsFallback: true);
             }
 
             var kind = NormalizeKind(TryGetString(root, "kind"));
@@ -64,24 +88,39 @@ public static partial class StructuredResponseParser
             var charts = ReadCharts(root);
             var uiElements = ReadStringArray(root, "uiElements");
             var freeText = TryGetString(root, "freeText") ?? rawResponse.Trim();
-            return new VisionFrameStructured(kind, title, bullets, codeBlocks, charts, uiElements, freeText);
+            return new ParsedVisionResult(new VisionFrameStructured(kind, title, bullets, codeBlocks, charts, uiElements, freeText), IsFallback: false);
         }
         catch (JsonException)
         {
-            return new VisionFrameStructured("other", null, [], [], [], [], rawResponse.Trim());
+            return new ParsedVisionResult(new VisionFrameStructured("other", null, [], [], [], [], rawResponse.Trim()), IsFallback: true);
         }
     }
 
     /// <summary>
-    /// Returns true when the structured value still represents a model response that did not
-    /// validate as JSON. Pipeline raises an <c>OCR_PARSE_FALLBACK</c> / <c>VISION_PARSE_FALLBACK</c>
-    /// warning in that case so orchestrators can branch.
+    /// Returns true when a structured value <em>likely</em> represents a model response that
+    /// did not validate as JSON. This is a backward-compat heuristic for orchestrators that
+    /// have only the persisted artifact (no raw response) — pipeline code with access to the
+    /// raw response should prefer <see cref="ParseOcrWithMode(string)"/> and read
+    /// <see cref="ParsedOcrResult.IsFallback"/> directly.
     /// </summary>
+    /// <remarks>
+    /// The heuristic flags a structured value as a fallback when there are no <c>Lines</c> and
+    /// no <c>Tables</c>, but ONLY when <c>FreeText</c> is non-empty — an entirely empty
+    /// structured value (e.g. local OCR found no text in the frame) is a valid empty parse and
+    /// not a fallback.
+    /// </remarks>
     public static bool IsTolerantFallback(OcrFrameStructured structured)
     {
-        return structured.Lines.Count == 0 && structured.Tables.Count == 0;
+        return structured.Lines.Count == 0
+            && structured.Tables.Count == 0
+            && !string.IsNullOrEmpty(structured.FreeText);
     }
 
+    /// <summary>
+    /// Vision-side counterpart of <see cref="IsTolerantFallback(OcrFrameStructured)"/>.
+    /// Heuristic: <c>kind == "other"</c> AND no structured fields populated. Pipeline code with
+    /// the raw response should prefer <see cref="ParseVisionWithMode(string)"/>.
+    /// </summary>
     public static bool IsTolerantFallback(VisionFrameStructured structured)
     {
         return structured.Title is null
@@ -89,7 +128,8 @@ public static partial class StructuredResponseParser
             && structured.CodeBlocks.Count == 0
             && structured.Charts.Count == 0
             && structured.UiElements.Count == 0
-            && string.Equals(structured.Kind, "other", StringComparison.OrdinalIgnoreCase);
+            && string.Equals(structured.Kind, "other", StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrEmpty(structured.FreeText);
     }
 
     private static string NormalizeKind(string? raw)
@@ -336,3 +376,16 @@ public static partial class StructuredResponseParser
     [GeneratedRegex("```(?:json|JSON)?\\s*\\n?([\\s\\S]*?)\\n?```", RegexOptions.IgnoreCase)]
     private static partial Regex CodeFenceRegex();
 }
+
+/// <summary>
+/// Output of <see cref="StructuredResponseParser.ParseOcrWithMode(string)"/>: the structured
+/// value plus a precise flag telling callers whether the parser found valid JSON
+/// (<see cref="IsFallback"/> = false) or fell back to free-text storage because the response
+/// was prose / malformed.
+/// </summary>
+public sealed record ParsedOcrResult(OcrFrameStructured Structured, bool IsFallback);
+
+/// <summary>
+/// Vision-side counterpart of <see cref="ParsedOcrResult"/>.
+/// </summary>
+public sealed record ParsedVisionResult(VisionFrameStructured Structured, bool IsFallback);

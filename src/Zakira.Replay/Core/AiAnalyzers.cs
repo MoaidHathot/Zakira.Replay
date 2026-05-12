@@ -77,7 +77,7 @@ public sealed class CopilotOcrProvider : IOcrProvider
             AttachmentPaths: [imagePath],
             Model: model,
             SystemMessage: "You are an OCR engine for video frames. Return strict JSON containing exact visible text only.",
-            Timeout: TimeSpan.FromMinutes(2)), cancellationToken);
+            Timeout: TimeSpan.FromMinutes(5)), cancellationToken);
     }
 }
 
@@ -122,7 +122,7 @@ public sealed class CopilotVisionProvider : IVisionProvider
             AttachmentPaths: [imagePath],
             Model: model,
             SystemMessage: "You analyze individual video frames as evidence. Return strict JSON. Do not infer unsupported facts.",
-            Timeout: TimeSpan.FromMinutes(2)), cancellationToken);
+            Timeout: TimeSpan.FromMinutes(5)), cancellationToken);
     }
 }
 

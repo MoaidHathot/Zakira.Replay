@@ -96,7 +96,12 @@
         "slideGrouping": { "type": ["boolean", "null"] },
         "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
         "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
-        "sceneSafetyCap": { "type": ["integer", "null"], "minimum": 1 }
+        "sceneSafetyCap": { "type": ["integer", "null"], "minimum": 1 },
+        "ocrProvider": { "type": "string", "enum": ["copilot", "local"] },
+        "smartCrop": { "type": ["boolean", "null"] },
+        "smartCropProfile": { "type": ["string", "null"] },
+        "captureMode": { "type": ["string", "null"], "enum": ["auto", "ytdlp", "browser", null] },
+        "authProfile": { "type": ["string", "null"] }
       }
     }
   }

@@ -1,3 +1,5 @@
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
@@ -26,7 +28,7 @@ public sealed class ArtifactStore
     public VideoRun CreateRun(string source, string? requestedRunId = null)
     {
         var runId = string.IsNullOrWhiteSpace(requestedRunId)
-            ? $"{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}-{Slug.Create(source, 48)}"
+            ? CreateDeterministicRunId(source)
             : Slug.Create(requestedRunId, 80);
 
         var directory = Path.Combine(RootDirectory, runId);
@@ -40,6 +42,21 @@ public sealed class ArtifactStore
         Directory.CreateDirectory(Path.Combine(directory, "logs"));
 
         return new VideoRun(runId, directory);
+    }
+
+    /// <summary>
+    /// Builds a deterministic run identifier from the source URL or local path. The result is a
+    /// slug of the source plus a short SHA-256 suffix so two sources that happen to slugify the
+    /// same (e.g. case-only differences in URL paths) still land in distinct run directories
+    /// while same-source reruns reuse the same folder for caching.
+    /// </summary>
+    public static string CreateDeterministicRunId(string source)
+    {
+        var trimmed = source?.Trim() ?? string.Empty;
+        var slug = Slug.Create(trimmed, 60);
+        var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(trimmed));
+        var hashHex = Convert.ToHexString(hashBytes, 0, 4).ToLowerInvariant();
+        return slug.Length == 0 ? hashHex : $"{slug}-{hashHex}";
     }
 
     public bool TryGetExistingRun(string requestedRunId, out VideoRun run)
@@ -173,7 +190,20 @@ public sealed record FrameArtifact(
     string Path,
     double TimestampSeconds,
     string TimestampLabel,
-    string? PerceptualHash = null);
+    string? PerceptualHash = null,
+    int? Width = null,
+    int? Height = null,
+    FrameCropBox? Crop = null,
+    string? OriginalPath = null);
+
+/// <summary>
+/// Rectangular crop applied to a frame during preprocessing (e.g. smart-crop of meeting-platform
+/// UI chrome). Coordinates are pixels in the ORIGINAL (pre-crop) frame; <see cref="Width"/> and
+/// <see cref="Height"/> are the dimensions of the resulting cropped image. <see cref="Source"/>
+/// records the algorithm/profile that produced the crop (e.g. <c>smart-crop-auto</c>) so
+/// orchestrators can audit which heuristic decided what.
+/// </summary>
+public sealed record FrameCropBox(int X, int Y, int Width, int Height, string Source);
 
 public sealed record EvidenceDocument(
     string SchemaVersion,
@@ -234,7 +264,8 @@ public sealed record OcrFrameResult(
     string TimestampLabel,
     string Text,
     string? SlideId = null,
-    OcrFrameStructured? Structured = null);
+    OcrFrameStructured? Structured = null,
+    string? Provider = null);
 
 /// <summary>
 /// Structured OCR result extracted from a frame. <see cref="FreeText"/> always carries the full

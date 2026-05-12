@@ -8,7 +8,9 @@
         "ZAKIRA_REPLAY_FFMPEG_PATH": "C:/tools/ffmpeg/bin/ffmpeg.exe",
         "ZAKIRA_REPLAY_FFPROBE_PATH": "C:/tools/ffmpeg/bin/ffprobe.exe",
         "ZAKIRA_REPLAY_ONNX_MODEL_PATH": "C:/models/all-MiniLM-L6-v2/model.onnx",
-        "ZAKIRA_REPLAY_ONNX_VOCAB_PATH": "C:/models/all-MiniLM-L6-v2/vocab.txt"
+        "ZAKIRA_REPLAY_ONNX_VOCAB_PATH": "C:/models/all-MiniLM-L6-v2/vocab.txt",
+        "ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY": "C:/models/rapidocr-ppocrv5-latin",
+        "ZAKIRA_REPLAY_AUTH_DIRECTORY": "C:/secrets/zakira-replay-auth"
       }
     }
   }

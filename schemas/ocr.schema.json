@@ -13,6 +13,10 @@
     "timestampLabel": { "type": "string", "minLength": 1 },
     "text": { "type": "string" },
     "slideId": { "type": ["string", "null"] },
+    "provider": {
+      "description": "Identifier of the OCR provider that produced this result. One of 'copilot' (LLM vision-as-OCR) or 'local' (RapidOCR / PP-OCRv5 via ONNX). Absent on artifacts produced before schema 0.8.",
+      "type": ["string", "null"]
+    },
     "structured": {
       "anyOf": [
         { "type": "null" },

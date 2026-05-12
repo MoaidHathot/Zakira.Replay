@@ -108,6 +108,37 @@ Authenticated video arguments:
 
 Use `cookies` when the user provides a cookies file path. Use `browserAuth` or `cookiesFromBrowser` only when the local browser session is expected to have legitimate access.
 
+For SSO-gated sources (Microsoft 365 / Azure AD / Okta / SharePoint / Microsoft Stream / Medius portals) where yt-dlp cookie passthrough is insufficient, use a persistent **auth profile**. Auth profiles are created interactively on the user's machine via the CLI command `zakira-replay auth login <profile-name>` (this is the only Playwright code path that opens a visible browser; MCP cannot do interactive logins because there is no terminal/UI). Once the profile exists, pass `authProfile` and `captureMode: "browser"` (or `"auto"`):
+
+```json
+{
+  "source": "https://medius.studios.ms/Embed/video-12345",
+  "visionInstruction": "Extract evidence from this Microsoft Ignite session.",
+  "frames": 10,
+  "captureMode": "browser",
+  "authProfile": "ignite-2026",
+  "ocr": true,
+  "ocrProvider": "local",
+  "smartCrop": true,
+  "cache": true
+}
+```
+
+Browser capture for sources yt-dlp cannot reach:
+
+```json
+{
+  "source": "https://corporate.example.com/portal/watch/abc",
+  "visionInstruction": "Extract evidence from a custom enterprise video portal.",
+  "frames": 7,
+  "captureMode": "browser",
+  "authProfile": "corp-sso",
+  "cache": true
+}
+```
+
+`captureMode: "auto"` tries yt-dlp + ffmpeg first and falls back to Playwright on failure (emits `CAPTURE_BROWSER_FALLBACK`). Use `auto` when you are unsure which path will work for a given URL; use `browser` when you already know yt-dlp cannot reach the source.
+
 ## Option Selection
 
 Use these defaults unless the user says otherwise:
@@ -125,35 +156,41 @@ Use these defaults unless the user says otherwise:
 - `captionLanguages: ["fr", "en"]` (or `"fr,en"`): override subtitle/caption language preferences. Defaults to `["auto"]`, which unions the source's primary language, the languages with **manually uploaded** subtitles (per `info.subtitles`), English (`en`, `en.*`), and YouTube live-chat. YouTube auto-translation languages (those that appear only under `info.automatic_captions`) are intentionally **not** expanded by `auto` because they are inferences from the source, not facts about what was spoken. To opt into a specific auto-translation, pass that language explicitly (e.g. `captionLanguages: ["es"]`). Read `metadata.json -> availableSubtitleLanguages` first to learn which languages exist for the source and whether each has manual (`hasManual`) or auto-only (`hasAuto`) coverage. Frames carry stable `id` values referenced from `ocr[*].frameId` and `vision[*].frameId`.
 - `visionInstruction` and `ocrInstruction`: optional focus signals appended to the vision and OCR prompts. Both default to empty; the model already extracts every visible piece of content (vision: slide titles, bullets, code blocks, chart axes, UI controls; OCR: every readable character). Use these only to bias enumeration toward what matters for your question (e.g. `visionInstruction: "Bias toward chart axes and code"`, `ocrInstruction: "Preserve indentation in code-like text"`). Both are persisted into `evidence.json::visionInstruction` and `evidence.json::ocrInstruction` for audit. They never relax the "do not invent" guardrails.
 - `framesPerMinute`: optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is `max(framesPerMinute * durationMinutes, frames)`. Ignored for `scene` and `every-frame`. Use this instead of cranking `frames` when sampling a long video.
-- `sceneSafetyCap`: per-run override of `frames.sceneSafetyCap` (default 2000). The scene strategy returns up to this many frames; slide grouping deduplicates. The run carries a `FRAMES_SCENE_CAP_REACHED` warning when the cap is hit, and `FRAMES_LIKELY_UNDERSAMPLED` when interval sampling without `framesPerMinute` produces fewer than 1 frame per 5 minutes.
+- `sceneSafetyCap`: per-run override of `frames.sceneSafetyCap` (default 5000). The scene strategy returns up to this many frames; slide grouping deduplicates. The run carries a `FRAMES_SCENE_CAP_REACHED` warning when the cap is hit, and `FRAMES_LIKELY_UNDERSAMPLED` when interval sampling without `framesPerMinute` (and with `frames.perMinute=0` in config) produces fewer than 1 frame per 5 minutes.
+- `ocrProvider`: choose the OCR backend. `"local"` (default) runs RapidOCR (PP-OCRv5 latin) entirely on-device via ONNX — no LLM, no network at run-time after the one-time model download, no per-frame agent loop. `"copilot"` routes the image through the configured LLM (GitHub Copilot / OpenAI / Azure OpenAI) using vision-capable chat models — prefer this for complex layouts, mixed scripts, or when `tables[]` reconstruction matters (the local provider leaves `tables[]` empty in this release). The first local-OCR run auto-downloads ~30 MB of models (`ocr.local.autoDownload=true` by default; set false to disable, or pre-install with `zakira-replay deps install ocr`). The chosen provider is recorded on every `OcrFrameResult.provider`.
+- `smartCrop` + `smartCropProfile`: enable smart-crop preprocessing that removes meeting-platform UI chrome (Teams/Zoom/WebEx controls bar, participant gallery sidebar, black letterbox bars, bottom navigation) before perceptual hashing, OCR, and vision. Profiles: `"auto"` (default), `"teams"`, `"zoom"`, `"webex"`, `"generic"` (all share the same algorithm in this release; the value is recorded on each `FrameCropBox.source` for audit), or `"off"` to disable. Use this when the source is a meeting recording — it dramatically improves slide-grouping stability (the persistent gallery sidebar otherwise dilutes the dHash) and removes meeting-app vocabulary from OCR text. Cropped frames are written to `frames/<frameId>-cropped.jpg`; the `FrameArtifact` records `width`, `height`, `crop` (the box), and `originalPath` (the pre-crop frame).
+- `captureMode`: choose the frame-capture backend. `"ytdlp"` (default) uses yt-dlp + ffmpeg — works for ~1000 sites yt-dlp supports plus local files. `"browser"` drives a Playwright-controlled Chromium pinned to Edge to navigate, click play, JS-seek `video.currentTime`, and screenshot the `<video>` element — required for SharePoint/Medius/Teams recordings and any source yt-dlp can't reach. `"auto"` tries yt-dlp first and falls back to `"browser"` on failure, emitting `CAPTURE_BROWSER_FALLBACK` so orchestrators can branch on which path was used. **Side benefit:** when browser capture runs, a network listener watches for any `.vtt`/`.srt` responses the page fetches, persists them under `captions/browser-NNNN.vtt`, indexes them in `captions/discovered.json` (schema: `captions-discovered.schema.json`), and — if no transcript was found by yt-dlp / sidecar / STT — picks the best-language match (using `captionLanguages` and the source's primary language as hints) and uses it to populate `transcript.md`. This is the easiest way to get transcripts for Medius/Ignite/MVP-Summit sessions and any custom player whose page-side JS fetches a caption file.
+- `authProfile`: name of a persistent Playwright storage-state profile to load into the browser context before navigating. Only consulted in `browser` and `auto` capture modes. Created on the user's machine via the CLI `zakira-replay auth login <name>` (interactive — MCP cannot perform the initial login). Required for SSO-gated sources. The pipeline emits `AUTH_PROFILE_NOT_FOUND` (severity error) when the named profile does not exist on disk and `AUTH_PROFILE_STALE` (severity info) when the profile's file mtime is older than `auth.staleThresholdMinutes` (default 60). Staleness is informational — capture proceeds; if downstream extraction looks like it landed on a login page rather than the intended content, suggest the user re-runs `auth login <name>` with the same name.
 
 Synthesis is your job, not Zakira.Replay's. Do not look for a `summary` flag; it does not exist. Read the evidence artifacts and produce the synthesis the user asked for.
 
 Provider notes:
 
-- `github-copilot` is the default provider for STT/OCR/vision.
+- `github-copilot` is the default LLM provider for STT/OCR/vision when `ocrProvider: "copilot"`.
 - `openai` supports chat/image and audio transcription.
 - `azure-openai` supports chat/image for OCR/vision, but Zakira.Replay STT is not implemented yet.
+- `ocrProvider: "local"` bypasses LLM providers entirely — useful when GitHub Copilot is rate-limited or behind an agent-loop session that times out, when the user is offline, or when per-frame OCR cost matters.
 
 ## Artifact Reading Order
 
 After `get_job_result`, read artifacts from `artifactDirectory` in this order:
 
-1. `manifest.json`: confirms produced artifacts, structured warnings, frame list, and paths.
+1. `manifest.json`: confirms produced artifacts, structured warnings, frame list, and paths. Each `FrameArtifact` may carry optional `width`, `height`, `crop` (`{x, y, width, height, source}`), and `originalPath` when smart-crop fired — the `path` field then points to the cropped variant and the perceptual hash was computed on the crop, not the original.
 2. `evidence.json`: structured transcript segments, frames, slides, OCR, vision, per-speaker registry (`speakers[]`), structured warnings.
-3. `slides/slides.json` (also embedded in `evidence.json`): slide grouping facts (`firstSeenSeconds`, `lastSeenSeconds`, `frameIds`, `primaryFrameId`). OCR/vision run once per slide; each `OcrFrameResult` and `VisionFrameResult` carries the corresponding `slideId`.
-4. `transcript.md`: readable timestamped transcript with `[Speaker Name]` prefixes when captions carried speaker tags.
+3. `slides/slides.json` (also embedded in `evidence.json`): slide grouping facts (`firstSeenSeconds`, `lastSeenSeconds`, `frameIds`, `primaryFrameId`). OCR/vision run once per slide; each `OcrFrameResult` and `VisionFrameResult` carries the corresponding `slideId`. `OcrFrameResult.provider` records whether the result came from `"copilot"` (LLM vision-as-OCR) or `"local"` (RapidOCR via ONNX).
+4. `transcript.md`: readable timestamped transcript with `[Speaker Name]` prefixes when captions carried speaker tags. The `TranscriptArtifact.kind` field on the underlying record identifies the source: `"yt-dlp-subtitle"`, `"sidecar"`, `"<provider>-audio-transcription"` (STT), or `"browser-network"` (browser-discovered VTT/SRT picked up by the network interceptor and used to retroactively populate the transcript).
 5. `transcript/normalization.json` and `transcript/raw.*`: audit exact quotes when normalization matters. Speaker changes are hard boundaries.
 6. `audio/chunks/chunks.json`: present only when long-audio STT was silence-chunked. Useful for branching on chunk failures (warning code `STT_CHUNK_FAILED`).
-7. `ocr/{frameId}.json` and `ocr/combined.md`: structured OCR (`freeText`, `lines[]`, `tables[]`); branch on `OCR_PARSE_FALLBACK` warnings to detect prose responses.
+7. `ocr/{frameId}.json` and `ocr/combined.md`: structured OCR (`freeText`, `lines[]`, `tables[]`); branch on `OCR_PARSE_FALLBACK` warnings to detect prose responses, on `OCR_LOCAL_MODELS_MISSING` to know `deps install ocr` is needed, and on `OCR_LOCAL_INFERENCE_FAILED` for per-frame local-OCR failures (the run continues with remaining frames).
 8. `vision/{frameId}.json` and `vision/combined.md`: structured vision (`kind`, `title`, `bullets[]`, `codeBlocks[]`, `charts[]`, `uiElements[]`, `freeText`); branch on `VISION_PARSE_FALLBACK` warnings.
-9. `frames/`: inspect image artifacts when visual details matter.
-10. `metadata.json`: title, URL, duration, uploader metadata, `availableSubtitleLanguages`.
-11. `evidence.md`: concise human-readable index of artifact paths.
+9. `frames/`: inspect image artifacts when visual details matter. When smart-crop ran, `frames/scene-NNNN.jpg` is the cropped variant and `frames/scene-NNNN-cropped.jpg` is its alias on disk; the original pre-crop frame is preserved at the path recorded in `originalPath`.
+10. `captions/discovered.json` (schema: `captions-discovered.schema.json`): present only when browser capture ran and observed at least one `.vtt`/`.srt` response on the wire. Each entry carries the original network URL, the persisted `relativePath` (e.g. `captions/browser-0001.vtt`), an inferred BCP-47 `language` and the heuristic that produced it (`languageSource`: `url-Caption_<lang>` for Medius, `url-filename`, `url-path-segment`, `url-query-lang`/`hl`/`language`/`l`/`tlang`), byte count, content type, and SHA-256 hash. The top-level `originalLanguage` field is the source's primary language as reported by yt-dlp metadata, which serves as the "main"/"original" language hint for orchestrators picking among multiple captured tracks.
+11. `metadata.json`: title, URL, duration, uploader metadata, `availableSubtitleLanguages`.
+12. `evidence.md`: concise human-readable index of artifact paths.
 
 Speakers in `evidence.speakers[]` carry `id` (slug, stable), optional `displayName`, `segmentCount`, `totalSeconds`, `firstSeenSeconds`, `lastSeenSeconds`. Each `transcript[*]` segment has `id` (`segment-NNNN`) and may have `speakerId` and `speakerDisplayName`. STT-derived transcripts do not carry speakers in this release.
 
-Warnings in `manifest.json` and `evidence.json` are structured records: `{ code, message, source, severity }`. Branch on `code` (for example `TRANSCRIPT_NOT_FOUND`, `STT_NO_LLM_PROVIDER`, `STT_CHUNK_FAILED`, `OCR_PARSE_FALLBACK`, `VISION_PARSE_FALLBACK`, `PERCEPTUAL_HASH_FAILED`, `FRAMES_REMOTE_FALLBACK`) rather than fuzzy-matching the message.
+Warnings in `manifest.json` and `evidence.json` are structured records: `{ code, message, source, severity }`. Branch on `code` (for example `TRANSCRIPT_NOT_FOUND`, `STT_NO_LLM_PROVIDER`, `STT_CHUNK_FAILED`, `OCR_PARSE_FALLBACK`, `OCR_LOCAL_MODELS_MISSING`, `OCR_LOCAL_INIT_FAILED`, `OCR_LOCAL_INFERENCE_FAILED`, `OCR_UNKNOWN_PROVIDER`, `VISION_PARSE_FALLBACK`, `PERCEPTUAL_HASH_FAILED`, `FRAMES_REMOTE_FALLBACK`, `FRAMES_LIKELY_UNDERSAMPLED`, `FRAMES_SCENE_CAP_REACHED`, `CROP_BAIL_OUT`, `CROP_PROFILE_UNKNOWN`, `CROP_IMAGE_DECODE_FAILED`, `CROP_OUTPUT_FAILED`, `CAPTURE_BROWSER_FALLBACK`, `CAPTURE_BROWSER_UNAVAILABLE`, `CAPTURE_PLAY_BUTTON_NOT_FOUND`, `CAPTURE_DURATION_UNRESOLVED`, `CAPTURE_SEEK_FAILED`, `CAPTURE_SCREENSHOT_FAILED`, `CAPTURE_UNKNOWN_MODE`, `CAPTIONS_BROWSER_NETWORK_NONE`, `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED`, `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED`, `AUTH_PROFILE_NOT_FOUND`, `AUTH_PROFILE_STALE`, `AUTH_PROFILE_LOAD_FAILED`) rather than fuzzy-matching the message.
 
 ## Search Workflow
 
@@ -265,13 +302,16 @@ Do not invent owners or due dates. Use `unspecified` when unclear. Deduplicate r
 If a job fails:
 
 - Read returned `error` and `logs`.
-- For dependency failures, call `doctor` and report missing `yt-dlp`, `ffmpeg`, `ffprobe`, or ONNX model files.
-- If CLI access is available and the user permits local downloads, suggest `zakira-replay deps install media` or `zakira-replay deps install onnx`.
+- For dependency failures, call `doctor` and report missing `yt-dlp`, `ffmpeg`, `ffprobe`, ONNX search model files, or RapidOCR model files.
+- If CLI access is available and the user permits local downloads, suggest `zakira-replay deps install media`, `zakira-replay deps install onnx`, or `zakira-replay deps install ocr` (the last for RapidOCR PP-OCRv5 latin models used by `ocrProvider: "local"`).
 - For provider auth failures, inspect config keys for environment variable names; never ask users to store secret values in JSON config.
-- For access failures, retry only with legitimate `cookies`, `cookiesFromBrowser`, or `browserAuth`.
-- If transcript is missing, rerun with `stt: true` and ensure the provider supports STT.
+- For LLM-side OCR/vision failures (timeouts, rate limits, agent-loop hangs on `github-copilot`), suggest re-running with `ocrProvider: "local"` to bypass LLM providers entirely. The local provider needs no LLM session, no network at run-time, and no per-frame agent loop. Tradeoff: lower OCR fidelity on complex layouts and no `tables[]` reconstruction.
+- For access failures, retry only with legitimate `cookies`, `cookiesFromBrowser`, or `browserAuth`. For sites yt-dlp cannot reach at all (custom enterprise portals, Medius/Teams playback URLs), retry with `captureMode: "browser"`.
+- For SSO-gated sources, suggest the user runs `zakira-replay auth login <profile-name>` on their machine (this requires CLI + interactive terminal; MCP cannot do interactive logins) and then retry with `authProfile: "<profile-name>"`. If the run already used an auth profile and emitted `AUTH_PROFILE_STALE`, suggest re-running `auth login <name>` to refresh the saved cookies.
+- If transcript is missing, the pipeline tries (in order) yt-dlp captions / sidecar `.vtt`/`.srt` / STT (when `stt: true`) / browser-discovered captions (when `captureMode` was `"browser"` or `"auto"` and the page fetched a `.vtt`/`.srt`). When all four return nothing, you'll see `TRANSCRIPT_NOT_FOUND` (or `TRANSCRIPT_NOT_FOUND_NO_STT` if `stt` was not set). Suggest enabling `stt: true` if the audio is good, or `captureMode: "browser"` if the page-side player exposes captions yt-dlp doesn't see.
 - If visual evidence is insufficient, rerun with more `frames`, `frameStrategy: "scene"`, `ocr: true`, or `vision: true`.
 - If a previous MCP job was interrupted by server restart, create a new job with the same arguments and `cache: true`.
+- For meeting-recording sources (Teams/Zoom/WebEx exports) where slide grouping looks unstable or OCR is polluted with meeting-app vocabulary ("Take control", "Raise", "Mute all", etc.), rerun with `smartCrop: true`. The pipeline crops UI chrome before perceptual hashing so slide grouping stabilises and OCR sees only the slide area.
 
 ## Evidence Discipline
 

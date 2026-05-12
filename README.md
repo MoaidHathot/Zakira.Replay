@@ -29,7 +29,7 @@ Dependencies are not installed automatically unless explicitly configured. Missi
 zakira-replay doctor [--json]
 zakira-replay info [--json]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
 zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
@@ -42,11 +42,35 @@ zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
 zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
 zakira-replay queue status [--queue-id <id>] [--json]
-zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|media|all] [--force]
+zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|media|all] [--force]
 zakira-replay deps path
+zakira-replay auth login <profile-name> [--url <start-url>]
+zakira-replay auth list
+zakira-replay auth show <profile-name>
+zakira-replay auth clear <profile-name>
+zakira-replay auth path [profile-name]
 zakira-replay config <path|list|get|set> ...
 zakira-replay mcp serve
 ```
+
+## Defaults
+
+Out of the box, `zakira-replay analyze <url>` produces:
+
+| Knob | Default | Override |
+|---|---|---|
+| Frame strategy | **`scene`** (ffmpeg scene-change boundaries) | `--frame-strategy interval\|every-frame` |
+| Frame count (interval/every-frame only) | **`500`** | `--frames <n>` |
+| Frames per minute (interval-strategy floor) | **`12`** (`frames.perMinute` config) | `--frames-per-minute <n>`; pass `0` to disable scaling |
+| Scene safety cap | **`5000`** scene frames | `--scene-safety-cap <n>` or `frames.sceneSafetyCap` config |
+| Max AI frames (OCR/vision per slide cap) | **`50`** | `--max-ai-frames <n>` |
+| OCR provider | **`local`** (RapidOCR via ONNX, no LLM, no network) | `--ocr-provider copilot` to route through an LLM |
+| OCR model auto-download | **on** (`ocr.local.autoDownload=true`) — first OCR run silently fetches ~30 MB of PP-OCRv5 latin models from ModelScope | `zakira-replay config set ocr.local.autoDownload false`, or pre-install with `deps install ocr` |
+| Run ID (when `--run-id` omitted) | **deterministic**: `<source-slug>-<sha8>` (e.g. `https-www-youtube-com-watch-v-abc-a3f9c2e1`). Same source URL always lands in the same run folder, so `--cache` reuse works without an explicit run-id | `--run-id <name>` to pin |
+| Smart-crop | off | `--smart-crop` |
+| Capture mode | `ytdlp` (yt-dlp + ffmpeg) | `--capture-mode browser\|auto` |
+
+The cache key (`runs/.cache/<sha256>.json`) is computed from the full request shape — `OcrProvider`, `SmartCrop`, `SmartCropProfile`, `CaptureMode`, and `AuthProfile` are part of it, so flipping any of these correctly invalidates prior cached runs.
 
 ## Dependency Configuration
 
@@ -57,7 +81,7 @@ Zakira.Replay resolves dependency paths in this order:
 - Portable dependency directory.
 - `PATH` or known install locations.
 
-Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, or run `zakira-replay deps install onnx` to download the ONNX search model files. `zakira-replay deps install` defaults to `media`; use `all` to install media tools and ONNX model files.
+Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, or `zakira-replay deps install ocr` to download the RapidOCR PP-OCRv5 latin models used by the local (non-LLM) OCR provider. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, and the OCR models.
 
 To allow on-demand downloads when a dependency is first required, set `dependencies.autoDownload=true`. To allow ONNX model download when `sqlite-onnx` search needs model files, set `search.onnx.autoDownload=true`. Both are `false` by default.
 
@@ -82,6 +106,13 @@ Environment variables:
 - `ZAKIRA_REPLAY_ONNX_MODEL_FILE`
 - `ZAKIRA_REPLAY_ONNX_MAX_SEQUENCE_LENGTH`
 - `ZAKIRA_REPLAY_ONNX_EMBEDDING_DIMENSIONS`
+- `ZAKIRA_REPLAY_OCR_PROVIDER`
+- `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY`
+- `ZAKIRA_REPLAY_OCR_DETECTION_MODEL_PATH`
+- `ZAKIRA_REPLAY_OCR_CLASSIFICATION_MODEL_PATH`
+- `ZAKIRA_REPLAY_OCR_RECOGNITION_MODEL_PATH`
+- `ZAKIRA_REPLAY_OCR_DICTIONARY_PATH`
+- `ZAKIRA_REPLAY_AUTH_DIRECTORY`
 - `ZAKIRA_REPLAY_LLM_PROVIDER`
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
@@ -117,6 +148,17 @@ zakira-replay config set llm.azureOpenAi.deployment video-analysis
 zakira-replay config set llm.azureOpenAi.apiKeyEnvVars AZURE_OPENAI_API_KEY,WORK_AZURE_OPENAI_API_KEY
 zakira-replay config set captions.languages auto
 zakira-replay config set captions.languages fr,en,live_chat
+zakira-replay config set ocr.provider local
+zakira-replay config set ocr.local.modelDirectory C:\models\rapidocr
+zakira-replay config set ocr.local.autoDownload true
+zakira-replay config set frames.sceneSafetyCap 5000
+zakira-replay config set frames.perMinute 12
+zakira-replay config set crop.enabled true
+zakira-replay config set crop.profile auto
+zakira-replay config set capture.mode auto
+zakira-replay config set capture.browser.seekWaitSeconds 3
+zakira-replay config set auth.directory C:\secrets\zakira-auth
+zakira-replay config set auth.staleThresholdMinutes 120
 zakira-replay config get yt-dlp.path
 ```
 
@@ -168,15 +210,15 @@ Tunables:
 | Strategy | What `--frames N` produces |
 |---|---|
 | `interval` (default) | exactly N frames spaced evenly across the duration |
-| `scene` | up to `frames.sceneSafetyCap` (default 2000) scene-cut frames; `--frames` is ignored. Slide grouping deduplicates the unbounded stream so OCR/vision cost still scales with unique slides only |
+| `scene` | up to `frames.sceneSafetyCap` (default 5000) scene-cut frames; `--frames` is ignored. Slide grouping deduplicates the unbounded stream so OCR/vision cost still scales with unique slides only |
 | `every-frame` | the first N decoded frames of the video (a debug/inspection tool) |
 
 For long videos, `--frames 30` with the `interval` strategy means a frame every `duration/30` seconds — likely too sparse for a 40-minute video. Two ways to densify:
 
 - `--frames-per-minute <n>` (CLI), `framesPerMinute` (MCP/batch). Scales the count by duration; `--frames` becomes the floor: `effective = max(framesPerMinute * durationMinutes, --frames)`. Ignored for `scene` and `every-frame`.
-- `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 2000 is generous for typical talks.
+- `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 5000 is generous for typical talks and slide-heavy demos.
 
-If a run looks undersampled (fewer than 1 frame per 5 minutes for the `interval` strategy without `--frames-per-minute`), Zakira.Replay emits a `FRAMES_LIKELY_UNDERSAMPLED` warning naming the actual ratio. When the scene safety cap is reached, it emits `FRAMES_SCENE_CAP_REACHED`. Both are facts; orchestrators can branch on the codes.
+If a run looks undersampled (fewer than 1 frame per 5 minutes for the `interval` strategy without `--frames-per-minute` and with `frames.perMinute=0` in config), Zakira.Replay emits a `FRAMES_LIKELY_UNDERSAMPLED` warning naming the actual ratio. When the scene safety cap is reached, it emits `FRAMES_SCENE_CAP_REACHED`. Both are facts; orchestrators can branch on the codes.
 
 ## Structured OCR/Vision
 
@@ -186,6 +228,204 @@ Per-frame artifacts are also written for direct loading without parsing `evidenc
 
 - `ocr/{frameId}.json` — `ocr.schema.json`
 - `vision/{frameId}.json` — `vision.schema.json`
+
+## OCR Providers
+
+OCR can run through one of two providers, selectable per-run with `--ocr-provider`:
+
+- `copilot` (default) — routes the image through the configured LLM (GitHub Copilot, OpenAI, or Azure OpenAI) using vision-capable chat models. Produces high-quality structured OCR including the `lines[]` and `tables[]` fields when the model returns strict JSON.
+- `local` — runs entirely on the local machine via [RapidOcrNet](https://github.com/BobLd/RapidOcrNet) (PP-OCRv5 latin) over `Microsoft.ML.OnnxRuntime`. No LLM call, no network at run-time, no per-frame latency cost beyond decoding and ONNX inference. Lower-fidelity than a frontier vision model (no `tables[]` reconstruction in this release) but offline and reliable.
+
+Both providers return the same JSON shape; `OcrFrameResult.Provider` records which one produced each result. The pipeline writes the same `ocr/{frameId}.json` and `ocr/combined.md` artifacts regardless of provider.
+
+Set the default provider once:
+
+```bash
+zakira-replay config set ocr.provider local
+```
+
+Or override per run:
+
+```bash
+zakira-replay analyze "<url>" --frames 7 --frame-strategy scene --ocr --ocr-provider local --cache
+```
+
+Install the local models (~30 MB, four files: detection ONNX, classification ONNX, recognition ONNX, character dictionary):
+
+```bash
+zakira-replay deps install ocr
+zakira-replay deps path     # prints the resolved OCR model paths
+```
+
+Models are stored under `<portable-dir>/models/rapidocr-ppocrv5-latin/` by default. Override with `ocr.local.modelDirectory` in config or `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY`. Individual file paths can be overridden with `ocr.local.detectionModelPath`, `ocr.local.classificationModelPath`, `ocr.local.recognitionModelPath`, and `ocr.local.dictionaryPath` (or the corresponding `ZAKIRA_REPLAY_OCR_*` env vars).
+
+Warning codes emitted by the local provider:
+
+- `OCR_LOCAL_MODELS_MISSING` — one or more of the four model files were not found at resolution time. Run `deps install ocr`.
+- `OCR_LOCAL_INIT_FAILED` — ONNX session construction or RapidOCR initialisation failed.
+- `OCR_LOCAL_INFERENCE_FAILED` — a single frame failed to OCR; the run continues with the remaining frames.
+- `OCR_UNKNOWN_PROVIDER` — the requested provider name normalised to a value that is neither `copilot` nor `local`.
+
+`--ocr-instruction` is ignored by the local provider (the engine extracts every visible character regardless), but the instruction is still persisted to `evidence.json` and `manifest.json` for audit.
+
+## Smart Crop (Teams/Zoom/WebEx)
+
+Meeting-platform recordings (Teams, Zoom, WebEx, etc.) wrap slide content with UI chrome: a controls bar at the top, a participant gallery on the right, black letterbox bars, and a slide-navigation strip at the bottom. That chrome wastes 30-50% of every frame, dilutes the perceptual-hash signal used for slide grouping, and pollutes OCR output with meeting-app vocabulary. Enable smart-crop to strip it before downstream stages run:
+
+```bash
+zakira-replay analyze "C:\meetings\team-sync.mp4" --frames 12 --frame-strategy scene --ocr --vision --smart-crop
+```
+
+Or set the default once:
+
+```bash
+zakira-replay config set crop.enabled true
+zakira-replay config set crop.profile auto
+```
+
+The reference algorithm (ported from the `conference-book-of-news` SKILL) runs four passes on each frame in order:
+
+1. **Top/bottom letterbox**: trim solid black bars from the top and bottom.
+2. **Controls bar**: find a fully-bright row in the first 80 px of remaining content (the meeting-app control strip) and trim past it.
+3. **Participant gallery sidebar**: scan from 90 % &rarr; 60 % of the width for a thin bright strip with darker content to its left. Crop at the strip.
+4. **Bottom navigation**: unconditional 25 px trim.
+
+The cropped frame is written to `frames/<frameId>-cropped.jpg`. The `FrameArtifact` records the source dimensions, the resulting `Width`/`Height`, the `Crop` rectangle, and `OriginalPath` pointing back at the source. Downstream stages (perceptual hash, slide grouping, OCR, vision) read `Path` opaquely and automatically see the cropped frame.
+
+Profiles (`--smart-crop-profile`):
+
+- `auto` (default), `generic`, `teams`, `zoom`, `webex` — share the same algorithm in this release; the value is recorded on each `FrameCropBox.Source` (`smart-crop-teams`, `smart-crop-auto`, etc.) for audit and so future platform-specific tunings can branch on it.
+- `off` — disable smart-crop regardless of `--smart-crop` or `crop.enabled`.
+
+Safety: if the candidate crop would remove more than 50 % of the width or leave less than 30 % of the height, the original frame is retained and a `CROP_BAIL_OUT` (severity `info`) is emitted. This prevents the algorithm from over-cropping non-meeting content (slide-only recordings, screen captures without UI chrome, etc.).
+
+Warning codes emitted by smart-crop:
+
+- `CROP_IMAGE_DECODE_FAILED` — could not decode a frame (e.g. missing file).
+- `CROP_BAIL_OUT` — safety threshold tripped; original frame retained.
+- `CROP_PROFILE_UNKNOWN` — the requested profile name is not recognised; falls back to `auto`.
+- `CROP_OUTPUT_FAILED` — failed to write the cropped JPG to disk.
+
+## Frame Capture Modes
+
+`--capture-mode` (or `capture.mode` in config) selects how frames are pulled out of the source:
+
+- `ytdlp` (default) — resolve a direct media URL with `yt-dlp` and extract frames with `ffmpeg`. Works for the ~1000 sites yt-dlp supports plus local media files; cheap, fast, no browser required.
+- `browser` — drive a Playwright-controlled Chromium pinned to the user's Edge install (`edge.path`) to navigate the page, click play, poll `video.duration`, seek with `video.currentTime`, and screenshot the `<video>` element at evenly-spaced timestamps. Use for sites yt-dlp can't reach: custom enterprise portals, Medius/Teams recordings, dynamic players whose URL only serves a fully-rendered SPA.
+- `auto` — try yt-dlp first; if it can't resolve a direct media URL, fall back to `browser` and emit a `CAPTURE_BROWSER_FALLBACK` info-level warning so orchestrators can audit which path was used.
+
+```bash
+# Force browser capture for an authenticated SharePoint portal
+zakira-replay analyze "https://corp.sharepoint.com/sites/.../watch/abc" --capture-mode browser --frames 7 --ocr --vision
+
+# Let Zakira.Replay decide; safe to use as a default
+zakira-replay analyze "https://example.com/some-video" --capture-mode auto --frames 7 --cache
+```
+
+Browser-mode tunables (config keys; CLI access is limited to `--capture-mode` for now):
+
+- `capture.browser.playButtonSelector` — CSS or Playwright locator for the play button. When null, the client tries `video.play()` on the element matching `videoElementSelector`, then falls back to the first `button[aria-label*='play' i]`.
+- `capture.browser.videoElementSelector` — CSS selector for the `<video>` element. Defaults to `video`.
+- `capture.browser.seekWaitSeconds` — wait after `video.currentTime = ...` before screenshotting. The reference SKILL uses 2.5s (1.0 too fast, 2.0 mostly works, 2.5 reliable). Raise to 3.0-4.0 for HD videos or slower machines.
+- `capture.browser.durationProbeTimeoutSeconds` — max wait for `video.duration` to become a finite number (defaults to 20s).
+- `capture.browser.jpegQuality` — JPEG quality for screenshots written to `frames/scene-NNNN.jpg` (defaults to 90).
+- `capture.browser.captureCaptions` — when true (default), attach a network listener while the page is loaded and the video is played, capturing every `.vtt` / `.srt` response into `captions/browser-NNNN.vtt` and recording an inventory at `captions/discovered.json`. When the run had no transcript otherwise (no yt-dlp captions, no sidecar, no STT), the best-language match is used to populate `transcript.md` retroactively.
+- `capture.browser.maxCaptionBytes` — safety cap on the size of any single captured caption file (default 5 MiB). Larger responses are skipped with `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED`.
+
+### Browser-discovered captions
+
+When `--capture-mode browser` (or `auto` and the browser path was used), the Playwright network interceptor watches every response that comes off the wire while the page loads and the video plays. Anything whose URL ends in `.vtt` or `.srt` (case-insensitive, after stripping query strings) is captured: the body is downloaded, deduplicated by SHA-256, and written to `captions/browser-NNNN.vtt`.
+
+Each capture is recorded with:
+
+- The original network URL with all query-string parameters intact (so SAS tokens and language selectors stay auditable).
+- An inferred BCP-47 language code, when one can be guessed from the URL. The heuristics, tried in order, are: Microsoft Medius `Caption_<lang>.vtt` paths, generic `<sep>xx[-XX].vtt` filenames (2-letter primary), `/captions/<lang>/`-style path segments, and `?lang=` / `?hl=` / `?language=` / `?l=` / `?tlang=` query strings.
+- The heuristic that produced the language tag (`url-Caption_<lang>`, `url-filename`, `url-path-segment`, `url-query-lang`, …), so false positives are easy to triage.
+- Byte count, content-type, SHA-256 hash for cross-run dedupe.
+
+The full inventory is written to `captions/discovered.json` (schema: `captions-discovered.schema.json`). When the pipeline reaches the transcript step with `transcript == null` (no yt-dlp captions, no sidecar, STT was either not requested or also failed), the best-language match is selected using the same `--caption-languages` resolution that yt-dlp uses (so `info.Language` from the source's metadata is the "main"/"original" hint), parsed via the same `SubtitleConverter`, and persisted to `transcript.md`. The `TranscriptArtifact.Kind` for these is `browser-network`.
+
+If no captions were observed during browser playback, a `CAPTIONS_BROWSER_NETWORK_NONE` (severity `info`) is emitted so orchestrators can branch.
+
+Warning codes specific to browser caption capture:
+
+- `CAPTIONS_BROWSER_NETWORK_NONE` — browser capture ran but no caption response was observed.
+- `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED` — a single caption response failed to download (timeout, oversize body, transient Playwright error). Other captures continue.
+- `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED` — a captured caption file could not be parsed as VTT/SRT or parsed to zero segments. Pipeline continues with no transcript fill.
+
+## Auth Profiles (SSO-Gated Sources)
+
+Browser-based capture (`--capture-mode browser` or `--capture-mode auto` with a yt-dlp fallback) defaults to a fresh, anonymous browser context — fine for public sources but useless for SharePoint Stream, Microsoft Stream, internal corporate portals, or anything else gated behind SSO/cookies. Auth profiles are persisted Playwright `BrowserContext.StorageStateAsync` snapshots that the capture client loads before navigating.
+
+### Creating a profile
+
+```bash
+zakira-replay auth login ignite-2026 --url https://medius.studios.ms/
+```
+
+This launches Edge in **non-headless** mode (you can see the window), optionally navigates to a starting URL, and waits. Sign in normally; when the page shows you are signed in, return to the terminal and press Enter. Zakira.Replay calls `BrowserContext.StorageStateAsync` to persist cookies + localStorage + sessionStorage to:
+
+```
+<config-dir>/auth/ignite-2026.json
+```
+
+The profile name is slugified before it touches the filesystem, so `"Microsoft Ignite 2026"` and `"microsoft ignite 2026"` both map to `microsoft-ignite-2026.json`.
+
+If a profile by that slug already exists, it is loaded into the new context first (top-up login) so existing cookies for unrelated sites are preserved.
+
+### Using a profile
+
+```bash
+zakira-replay analyze "https://medius.studios.ms/Embed/video-12345" --capture-mode browser --auth-profile ignite-2026 --frames 10 --ocr --ocr-provider local --cache
+```
+
+The pipeline resolves `--auth-profile <name>` to a path via the `AuthProfileStore`, passes it as `BrowserNewContextOptions.StorageStatePath`, and the page loads with the cookies you saved during `auth login`. Browser-discovered captions, smart-crop, OCR, and everything else downstream work normally.
+
+### Inspecting and managing profiles
+
+```bash
+zakira-replay auth list                   # list profiles + ages + staleness
+zakira-replay auth show <profile-name>    # full metadata for one profile
+zakira-replay auth clear <profile-name>   # delete a profile
+zakira-replay auth path                   # print the auth directory
+zakira-replay auth path <profile-name>    # print the absolute path of one profile file
+```
+
+### Configuration
+
+```bash
+zakira-replay config set auth.directory C:\secrets\zakira-auth      # default: <config-dir>/auth
+zakira-replay config set auth.staleThresholdMinutes 120             # default: 60
+```
+
+Or override at runtime via `ZAKIRA_REPLAY_AUTH_DIRECTORY`.
+
+### Staleness
+
+SSO sessions, OAuth refresh tokens, and CDN cookies all expire — typically within 1-2 hours for Microsoft properties. When the resolved profile file is older than `auth.staleThresholdMinutes`, the pipeline emits an `AUTH_PROFILE_STALE` (severity `info`) warning that names the profile and tells the user how to refresh it. **The warning does not block analysis** — capture proceeds with the (possibly expired) cookies. If the cookies have already expired the page itself will redirect to the login screen, and downstream stages will see the login HTML instead of the video; in that case re-run `auth login` and try again.
+
+### Warning codes
+
+- `AUTH_PROFILE_NOT_FOUND` (severity `error`) — `--auth-profile` named a profile with no on-disk file. Browser capture proceeds without storage state.
+- `AUTH_PROFILE_STALE` (severity `info`) — profile is older than `auth.staleThresholdMinutes`. Capture proceeds; the orchestrator should suggest `auth login` if downstream extraction looks empty/wrong.
+- `AUTH_PROFILE_LOAD_FAILED` (severity `error`) — the profile file existed but could not be inspected (file lock, permissions, etc.). Browser capture proceeds without storage state.
+
+### Security notes
+
+- Profile files contain raw session cookies and tokens. They are equivalent to the user being logged in. **Treat them like passwords**: keep them out of source control, network shares, and shared workstations.
+- The default location (`<config-dir>/auth/`) is per-user; on Windows that resolves under `%APPDATA%\Zakira.Replay\auth\` by default. Override `auth.directory` to put profiles on encrypted storage (BitLocker volume, encrypted home directory).
+- `zakira-replay auth login` is the **only** Zakira.Replay code path that ever launches Playwright with `Headless = false`. The analysis pipeline always reuses a previously-saved profile in headless mode; it never opens a visible browser.
+- Profiles are not encrypted at rest. If you need at-rest encryption, store the auth directory on encrypted storage and restrict file permissions to your user.
+
+Warning codes emitted by browser capture:
+
+- `CAPTURE_BROWSER_UNAVAILABLE` — Edge / Playwright could not launch.
+- `CAPTURE_BROWSER_FALLBACK` — `auto` mode escalated from yt-dlp to browser capture.
+- `CAPTURE_PLAY_BUTTON_NOT_FOUND` — the configured selector did not match; the client fell back to `video.play()` / aria-label heuristics.
+- `CAPTURE_DURATION_UNRESOLVED` — `video.duration` did not become a finite number within `durationProbeTimeoutSeconds`; the video may not have started playing.
+- `CAPTURE_SEEK_FAILED` — at least one `video.currentTime` assignment threw.
+- `CAPTURE_SCREENSHOT_FAILED` — at least one screenshot threw; the run continues with remaining frames.
+- `CAPTURE_UNKNOWN_MODE` — the requested mode name is not `auto`/`ytdlp`/`browser`; falls back to `ytdlp`.
 
 ## Evidence Alignment
 
@@ -264,7 +504,7 @@ If `--run-id` is provided and a completed `manifest.json` already exists, Zakira
 
 If `--cache` is provided without `--run-id`, Zakira.Replay computes a deterministic cache key from the source and analysis options and reuses a matching prior run. Cache entries are stored under `runs/.cache/`.
 
-Frame extraction defaults to interval sampling. Use `--frame-strategy scene` to ask `ffmpeg` for scene-change frames; if no scene frames are found, Zakira.Replay falls back to interval sampling. Use `--frame-strategy every-frame` or `--every-frame` for capped sequential frame extraction, where `--frames`/`--count` is the safety cap.
+Frame extraction defaults to **`scene`** sampling: ffmpeg returns frames at scene-change boundaries (filter `select=gt(scene,0.35)`), bounded by `frames.sceneSafetyCap` (default 5000). Slide grouping deduplicates near-identical scenes. Use `--frame-strategy interval` to sample N evenly-spaced frames (`--frames`, default 500, optionally scaled by `--frames-per-minute`, default `frames.perMinute=12` from config). Use `--frame-strategy every-frame` or `--every-frame` for capped sequential frame extraction, where `--frames`/`--count` is the safety cap.
 
 Clip extraction writes timestamped clips under `clips/`:
 

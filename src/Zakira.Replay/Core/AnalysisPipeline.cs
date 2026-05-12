@@ -7,22 +7,25 @@ public sealed class AnalysisPipeline
     private readonly IFfmpegClient ffmpeg;
     private readonly Func<string?, ILlmProvider?> llmFactory;
     private readonly ILlmProvider? configuredLlm;
+    private readonly IBrowserVideoCaptureClient? browserCaptureClient;
 
-    public AnalysisPipeline(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg, ILlmProvider? llm = null)
+    public AnalysisPipeline(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg, ILlmProvider? llm = null, IBrowserVideoCaptureClient? browserCaptureClient = null)
     {
         this.artifactStore = artifactStore;
         this.ytDlp = ytDlp;
         this.ffmpeg = ffmpeg;
         configuredLlm = llm;
         llmFactory = _ => llm;
+        this.browserCaptureClient = browserCaptureClient;
     }
 
-    public AnalysisPipeline(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg, Func<string?, ILlmProvider?> llmFactory)
+    public AnalysisPipeline(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg, Func<string?, ILlmProvider?> llmFactory, IBrowserVideoCaptureClient? browserCaptureClient = null)
     {
         this.artifactStore = artifactStore;
         this.ytDlp = ytDlp;
         this.ffmpeg = ffmpeg;
         this.llmFactory = llmFactory;
+        this.browserCaptureClient = browserCaptureClient;
     }
 
     public async Task<AnalyzeResult> AnalyzeAsync(AnalyzeRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -221,17 +224,42 @@ public sealed class AnalysisPipeline
 
         IReadOnlyList<FrameArtifact> frames = [];
         var sceneSafetyCap = ResolveSceneSafetyCap(request);
-        var requestedFrameCount = ResolveEffectiveFrameCount(request, info.DurationSeconds);
+        var requestedFrameCount = ResolveEffectiveFrameCount(request, info.DurationSeconds, new ConfigStore().Load().Frames.PerMinute);
         var isSceneStrategy = request.FrameStrategy.Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase);
+        var captureMode = ResolveCaptureMode(request, warnings);
+        var browserCaptureAttempted = false;
+        var browserDiscoveredCaptions = new List<BrowserCapturedCaption>();
         if (requestedFrameCount > 0 || isSceneStrategy)
         {
-            if (mediaSource is null)
+            if (captureMode == CaptureModes.Browser && !isLocalFile)
             {
-                warnings.Add(new ReplayWarning(
-                    ReplayWarningCodes.FramesNoMedia,
-                    "Could not resolve media for frame extraction.",
-                    Source: "ffmpeg",
-                    Severity: ReplayWarningSeverities.Error));
+                browserCaptureAttempted = true;
+                var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                frames = browserFrames;
+                browserDiscoveredCaptions.AddRange(browserCaptions);
+            }
+            else if (mediaSource is null)
+            {
+                if (captureMode == CaptureModes.Auto && !isLocalFile)
+                {
+                    browserCaptureAttempted = true;
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.CaptureBrowserFallback,
+                        "yt-dlp could not resolve a direct media URL; falling back to browser-based capture.",
+                        Source: "playwright",
+                        Severity: ReplayWarningSeverities.Info));
+                    var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                    frames = browserFrames;
+                    browserDiscoveredCaptions.AddRange(browserCaptions);
+                }
+                else
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.FramesNoMedia,
+                        "Could not resolve media for frame extraction.",
+                        Source: "ffmpeg",
+                        Severity: ReplayWarningSeverities.Error));
+                }
             }
             else
             {
@@ -252,11 +280,26 @@ public sealed class AnalysisPipeline
                     var fallbackMedia = await GetDownloadedMediaSourceAsync().ConfigureAwait(false);
                     if (fallbackMedia is null)
                     {
-                        warnings.Add(new ReplayWarning(
-                            ReplayWarningCodes.FramesDownloadFailed,
-                            "Could not download media for frame extraction fallback.",
-                            Source: "yt-dlp",
-                            Severity: ReplayWarningSeverities.Error));
+                        if (captureMode == CaptureModes.Auto)
+                        {
+                            browserCaptureAttempted = true;
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.CaptureBrowserFallback,
+                                "Falling back to browser-based capture after ffmpeg and yt-dlp download both failed.",
+                                Source: "playwright",
+                                Severity: ReplayWarningSeverities.Info));
+                            var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                            frames = browserFrames;
+                            browserDiscoveredCaptions.AddRange(browserCaptions);
+                        }
+                        else
+                        {
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.FramesDownloadFailed,
+                                "Could not download media for frame extraction fallback.",
+                                Source: "yt-dlp",
+                                Severity: ReplayWarningSeverities.Error));
+                        }
                     }
                     else
                     {
@@ -273,7 +316,7 @@ public sealed class AnalysisPipeline
                         Severity: ReplayWarningSeverities.Warning));
                 }
 
-                if (!isSceneStrategy && request.FramesPerMinute is null && frames.Count > 0 && info.DurationSeconds is { } durationSecs && durationSecs > 0)
+                if (!isSceneStrategy && (request.FramesPerMinute is null || request.FramesPerMinute <= 0) && frames.Count > 0 && info.DurationSeconds is { } durationSecs && durationSecs > 0)
                 {
                     var durationMinutes = durationSecs / 60.0;
                     var minutesPerFrame = durationMinutes / frames.Count;
@@ -287,6 +330,41 @@ public sealed class AnalysisPipeline
                     }
                 }
             }
+        }
+        // Suppress unused-variable warning when browserCaptureAttempted is purely diagnostic.
+        _ = browserCaptureAttempted;
+
+        if (browserDiscoveredCaptions.Count > 0)
+        {
+            var captionsManifest = new BrowserCapturedCaptionsManifest(
+                SchemaVersion: "0.8",
+                DiscoveredAt: DateTimeOffset.UtcNow,
+                OriginalLanguage: string.IsNullOrWhiteSpace(info.Language) ? null : info.Language,
+                Captions: browserDiscoveredCaptions);
+            await artifactStore.WriteJsonAsync(run, "captions/discovered.json", captionsManifest, cancellationToken).ConfigureAwait(false);
+
+            if (request.IncludeTranscript && transcript is null)
+            {
+                transcript = await TryFillTranscriptFromBrowserCaptionsAsync(request, run, info, browserDiscoveredCaptions, warnings, progress, cancellationToken).ConfigureAwait(false);
+                if (transcript is not null && missingTranscriptWarning is not null)
+                {
+                    warnings.Remove(missingTranscriptWarning);
+                    missingTranscriptWarning = null;
+                }
+            }
+        }
+        else if (browserCaptureAttempted && request.IncludeTranscript && transcript is null)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptionsBrowserNetworkNone,
+                "Browser capture ran but no caption (.vtt/.srt) responses were observed during playback.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Info));
+        }
+
+        if (frames.Count > 0)
+        {
+            frames = ApplySmartCrop(frames, run, request, warnings, progress);
         }
 
         if (frames.Count > 0)
@@ -320,47 +398,66 @@ public sealed class AnalysisPipeline
         var ocrResults = new List<OcrFrameResult>();
         if (request.UseOcr && primarySlides.Length > 0)
         {
-            llm ??= TryResolveLlm(request);
-            if (llm is null)
+            var ocrProviderName = OcrProviderFactory.Normalize(request.OcrProvider);
+            IOcrProvider? ocrProvider = null;
+            try
             {
-                warnings.Add(new ReplayWarning(
-                    ReplayWarningCodes.OcrNoLlmProvider,
-                    "OCR was requested but no LLM provider is configured.",
-                    Source: "llm",
-                    Severity: ReplayWarningSeverities.Error));
-            }
-            else
-            {
-                var ocrProvider = new CopilotOcrProvider(llm, request.Model);
-                foreach (var slide in primarySlides)
+                (ocrProvider, llm) = await ResolveOcrProviderAsync(ocrProviderName, request, llm, warnings, progress, cancellationToken).ConfigureAwait(false);
+                if (ocrProvider is not null)
                 {
-                    var primaryFrame = frames.First(frame => frame.Id == slide.PrimaryFrameId);
-                    progress?.Report($"Running OCR on {primaryFrame.Path} (slide {slide.Id})...");
-                    var raw = await ocrProvider.ExtractTextAsync(run.GetPath(primaryFrame.Path), request.OcrInstruction, cancellationToken).ConfigureAwait(false);
-                    var structured = StructuredResponseParser.ParseOcr(raw);
-                    if (StructuredResponseParser.IsTolerantFallback(structured))
+                    foreach (var slide in primarySlides)
                     {
-                        warnings.Add(new ReplayWarning(
-                            ReplayWarningCodes.OcrParseFallback,
-                            $"OCR response for {slide.Id} was not strict JSON; stored as freeText only.",
-                            Source: "ocr",
-                            Severity: ReplayWarningSeverities.Warning));
+                        var primaryFrame = frames.First(frame => frame.Id == slide.PrimaryFrameId);
+                        progress?.Report($"Running OCR ({ocrProviderName}) on {primaryFrame.Path} (slide {slide.Id})...");
+                        string raw;
+                        try
+                        {
+                            raw = await ocrProvider.ExtractTextAsync(run.GetPath(primaryFrame.Path), request.OcrInstruction, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (ReplayException ex) when (ocrProviderName == OcrProviders.Local)
+                        {
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.OcrLocalInferenceFailed,
+                                $"Local OCR failed on {slide.Id}: {ex.Message}",
+                                Source: "ocr",
+                                Severity: ReplayWarningSeverities.Warning));
+                            continue;
+                        }
+
+                        var parseResult = StructuredResponseParser.ParseOcrWithMode(raw);
+                        var structured = parseResult.Structured;
+                        if (parseResult.IsFallback)
+                        {
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.OcrParseFallback,
+                                $"OCR response for {slide.Id} was not strict JSON; stored as freeText only.",
+                                Source: "ocr",
+                                Severity: ReplayWarningSeverities.Warning));
+                        }
+
+                        var result = new OcrFrameResult(
+                            FrameId: primaryFrame.Id,
+                            FramePath: primaryFrame.Path,
+                            TimestampSeconds: primaryFrame.TimestampSeconds,
+                            TimestampLabel: primaryFrame.TimestampLabel,
+                            Text: structured.FreeText,
+                            SlideId: slide.Id,
+                            Structured: structured,
+                            Provider: ocrProviderName);
+                        ocrResults.Add(result);
+                        await artifactStore.WriteJsonAsync(run, $"ocr/{primaryFrame.Id}.json", result, cancellationToken).ConfigureAwait(false);
                     }
 
-                    var result = new OcrFrameResult(
-                        FrameId: primaryFrame.Id,
-                        FramePath: primaryFrame.Path,
-                        TimestampSeconds: primaryFrame.TimestampSeconds,
-                        TimestampLabel: primaryFrame.TimestampLabel,
-                        Text: structured.FreeText,
-                        SlideId: slide.Id,
-                        Structured: structured);
-                    ocrResults.Add(result);
-                    await artifactStore.WriteJsonAsync(run, $"ocr/{primaryFrame.Id}.json", result, cancellationToken).ConfigureAwait(false);
+                    if (ocrResults.Count > 0)
+                    {
+                        ocrPath = "ocr/combined.md";
+                        await artifactStore.WriteTextAsync(run, ocrPath, FormatOcr(ocrResults), cancellationToken).ConfigureAwait(false);
+                    }
                 }
-
-                ocrPath = "ocr/combined.md";
-                await artifactStore.WriteTextAsync(run, ocrPath, FormatOcr(ocrResults), cancellationToken).ConfigureAwait(false);
+            }
+            finally
+            {
+                (ocrProvider as IDisposable)?.Dispose();
             }
         }
 
@@ -384,8 +481,9 @@ public sealed class AnalysisPipeline
                     var primaryFrame = frames.First(frame => frame.Id == slide.PrimaryFrameId);
                     progress?.Report($"Analyzing slide {slide.Id} ({primaryFrame.Path})...");
                     var raw = await visionProvider.DescribeAsync(run.GetPath(primaryFrame.Path), request.VisionInstruction, cancellationToken).ConfigureAwait(false);
-                    var structured = StructuredResponseParser.ParseVision(raw);
-                    if (StructuredResponseParser.IsTolerantFallback(structured))
+                    var visionParseResult = StructuredResponseParser.ParseVisionWithMode(raw);
+                    var structured = visionParseResult.Structured;
+                    if (visionParseResult.IsFallback)
                     {
                         warnings.Add(new ReplayWarning(
                             ReplayWarningCodes.VisionParseFallback,
@@ -412,7 +510,7 @@ public sealed class AnalysisPipeline
         }
 
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: request.Source,
             VisionInstruction: request.VisionInstruction,
             OcrInstruction: request.OcrInstruction,
@@ -439,7 +537,7 @@ public sealed class AnalysisPipeline
         }
 
         var manifest = new ArtifactManifest(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: request.Source,
             VisionInstruction: request.VisionInstruction,
             OcrInstruction: request.OcrInstruction,
@@ -473,6 +571,123 @@ public sealed class AnalysisPipeline
         }
 
         return llmFactory(request.LlmProvider);
+    }
+
+    private static bool IsOcrLocalAutoDownloadEnabled(ReplayConfig config)
+    {
+        // Env-var override gives test harnesses (and users in air-gapped or
+        // bandwidth-constrained environments) a way to disable on-demand model downloads
+        // without rewriting their persistent config. Accepted values: "false"/"0"/"no" disable;
+        // anything else (or unset) falls through to the config value.
+        var fromEnv = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_LOCAL_AUTODOWNLOAD");
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+        {
+            var normalized = fromEnv.Trim().ToLowerInvariant();
+            if (normalized is "false" or "0" or "no")
+            {
+                return false;
+            }
+            if (normalized is "true" or "1" or "yes")
+            {
+                return true;
+            }
+        }
+
+        return config.Ocr.Local.AutoDownload;
+    }
+
+    private async Task<(IOcrProvider? Provider, ILlmProvider? UpdatedLlm)> ResolveOcrProviderAsync(string ocrProviderName, AnalyzeRequest request, ILlmProvider? llm, List<ReplayWarning> warnings, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        switch (ocrProviderName)
+        {
+            case OcrProviders.Local:
+            {
+                var config = new ConfigStore().Load();
+                LocalOcrModelPaths paths;
+                try
+                {
+                    paths = LocalOcrModelPaths.Resolve(config);
+                }
+                catch (Exception ex) when (ex is not ReplayException)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.OcrLocalInitFailed,
+                        $"Failed to resolve local OCR model paths: {ex.Message}",
+                        Source: "ocr",
+                        Severity: ReplayWarningSeverities.Error));
+                    return (null, llm);
+                }
+
+                var missing = paths.MissingFiles();
+                if (missing.Count > 0 && IsOcrLocalAutoDownloadEnabled(config))
+                {
+                    progress?.Report("Local OCR models missing; auto-downloading RapidOCR PP-OCRv5 (~30 MB)...");
+                    try
+                    {
+                        var installer = new PortableDependencyInstaller(config);
+                        await installer.InstallAsync(["ocr"], force: false, progress, cancellationToken).ConfigureAwait(false);
+                        // Re-resolve in case the download succeeded.
+                        paths = LocalOcrModelPaths.Resolve(config);
+                        missing = paths.MissingFiles();
+                    }
+                    catch (Exception ex)
+                    {
+                        warnings.Add(new ReplayWarning(
+                            ReplayWarningCodes.OcrLocalModelsMissing,
+                            $"Local OCR auto-download failed: {ex.Message}. Run `zakira-replay deps install ocr` manually.",
+                            Source: "ocr",
+                            Severity: ReplayWarningSeverities.Error));
+                        return (null, llm);
+                    }
+                }
+
+                if (missing.Count > 0)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.OcrLocalModelsMissing,
+                        $"Local OCR models not found. Run `zakira-replay deps install ocr` (or set `ocr.local.autoDownload=true`). Missing: {string.Join(", ", missing)}.",
+                        Source: "ocr",
+                        Severity: ReplayWarningSeverities.Error));
+                    return (null, llm);
+                }
+
+                try
+                {
+                    return (new LocalOnnxOcrProvider(paths), llm);
+                }
+                catch (Exception ex)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.OcrLocalInitFailed,
+                        $"Failed to initialise local OCR engine: {ex.Message}",
+                        Source: "ocr",
+                        Severity: ReplayWarningSeverities.Error));
+                    return (null, llm);
+                }
+            }
+            case OcrProviders.Copilot:
+            {
+                llm ??= TryResolveLlm(request);
+                if (llm is null)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.OcrNoLlmProvider,
+                        "OCR was requested but no LLM provider is configured.",
+                        Source: "llm",
+                        Severity: ReplayWarningSeverities.Error));
+                    return (null, null);
+                }
+
+                return (new CopilotOcrProvider(llm, request.Model), llm);
+            }
+            default:
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.OcrUnknownProvider,
+                    $"Unknown OCR provider '{ocrProviderName}'. Supported: copilot, local.",
+                    Source: "ocr",
+                    Severity: ReplayWarningSeverities.Error));
+                return (null, llm);
+        }
     }
 
     private async Task<IReadOnlyList<FrameArtifact>> ComputeFrameHashesAsync(
@@ -525,16 +740,259 @@ public sealed class AnalysisPipeline
         return new SlideGroupingOptions(enabled, hashDistance);
     }
 
+    private static string ResolveCaptureMode(AnalyzeRequest request, List<ReplayWarning> warnings)
+    {
+        var config = new ConfigStore().Load();
+        var raw = CaptureModes.Normalize(request.CaptureMode ?? config.Capture.Mode);
+        if (CaptureModes.IsKnown(raw))
+        {
+            return raw;
+        }
+
+        warnings.Add(new ReplayWarning(
+            ReplayWarningCodes.CaptureUnknownMode,
+            $"Unknown capture mode '{raw}'. Falling back to '{CaptureModes.YtDlp}'.",
+            Source: "playwright",
+            Severity: ReplayWarningSeverities.Warning));
+        return CaptureModes.YtDlp;
+    }
+
+    private async Task<IReadOnlyList<FrameArtifact>> CaptureFramesWithBrowserAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        int frameCount,
+        YtDlpInfo info,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var (frames, _) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, frameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+        return frames;
+    }
+
+    private async Task<(IReadOnlyList<FrameArtifact> Frames, IReadOnlyList<BrowserCapturedCaption> Captions)> CaptureFramesAndCaptionsWithBrowserAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        int frameCount,
+        YtDlpInfo info,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (browserCaptureClient is null)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptureBrowserUnavailable,
+                "Browser-capture mode was requested but no IBrowserVideoCaptureClient was provided. The CLI auto-wires PlaywrightVideoCaptureClient; tests must inject one explicitly.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Error));
+            return ([], []);
+        }
+
+        var config = new ConfigStore().Load();
+        var authStoragePath = ResolveAuthProfilePath(request, config, warnings);
+        var browserCaptureRequest = new BrowserCaptureRequest(
+            Url: request.Source,
+            Run: run,
+            FrameCount: frameCount > 0 ? frameCount : 7,
+            PlayButtonSelector: config.Capture.Browser.PlayButtonSelector,
+            VideoElementSelector: string.IsNullOrWhiteSpace(config.Capture.Browser.VideoElementSelector) ? "video" : config.Capture.Browser.VideoElementSelector,
+            SeekWaitSeconds: config.Capture.Browser.SeekWaitSeconds,
+            DurationProbeTimeoutSeconds: config.Capture.Browser.DurationProbeTimeoutSeconds,
+            JpegQuality: config.Capture.Browser.JpegQuality,
+            CaptureCaptions: config.Capture.Browser.CaptureCaptions,
+            MaxCaptionBytes: config.Capture.Browser.MaxCaptionBytes,
+            AuthStorageStatePath: authStoragePath);
+
+        var result = await browserCaptureClient.CaptureAsync(browserCaptureRequest, progress, cancellationToken).ConfigureAwait(false);
+        foreach (var warning in result.Warnings)
+        {
+            warnings.Add(warning);
+        }
+
+        if (result.DurationSeconds is { } duration && info.DurationSeconds is null)
+        {
+            info.DurationSeconds = duration;
+        }
+
+        return (result.Frames, result.Captions);
+    }
+
+    private static string? ResolveAuthProfilePath(AnalyzeRequest request, ReplayConfig config, List<ReplayWarning> warnings)
+    {
+        if (string.IsNullOrWhiteSpace(request.AuthProfile))
+        {
+            return null;
+        }
+
+        AuthProfile? profile;
+        try
+        {
+            var store = new AuthProfileStore(config);
+            profile = store.TryRead(request.AuthProfile);
+        }
+        catch (Exception ex) when (ex is not ReplayException)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.AuthProfileLoadFailed,
+                $"Failed to resolve auth profile '{request.AuthProfile}': {ex.Message}",
+                Source: "auth",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+
+        if (profile is null)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.AuthProfileNotFound,
+                $"Auth profile '{request.AuthProfile}' not found. Run `zakira-replay auth login {request.AuthProfile}` to create one.",
+                Source: "auth",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+
+        if (profile.IsStale)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.AuthProfileStale,
+                $"Auth profile '{request.AuthProfile}' is {profile.FormatAge()} old (threshold {config.Auth.StaleThresholdMinutes} min); SSO sessions and CDN cookies may have expired. Run `zakira-replay auth login {request.AuthProfile}` to refresh.",
+                Source: "auth",
+                Severity: ReplayWarningSeverities.Info));
+        }
+
+        return profile.Path;
+    }
+
+    private async Task<TranscriptArtifact?> TryFillTranscriptFromBrowserCaptionsAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        YtDlpInfo info,
+        IReadOnlyList<BrowserCapturedCaption> captions,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (captions.Count == 0)
+        {
+            return null;
+        }
+
+        var preferences = ResolveSubtitleLanguages(request.CaptionLanguages, info);
+        var pick = BrowserCaptionInterceptor.PickBest(captions, preferences);
+        if (pick is null)
+        {
+            return null;
+        }
+
+        var captionPath = run.GetPath(pick.RelativePath);
+        if (!File.Exists(captionPath))
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptionsBrowserNetworkParseFailed,
+                $"Browser-discovered caption {pick.RelativePath} was selected but is missing on disk.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Warning));
+            return null;
+        }
+
+        IReadOnlyList<TranscriptSegment> segments;
+        try
+        {
+            segments = await SubtitleConverter.ParseSegmentsAsync(captionPath, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptionsBrowserNetworkParseFailed,
+                $"Failed to parse browser-discovered caption {pick.RelativePath}: {ex.Message}",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Warning));
+            return null;
+        }
+
+        if (segments.Count == 0)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptionsBrowserNetworkParseFailed,
+                $"Browser-discovered caption {pick.RelativePath} parsed to zero segments.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Warning));
+            return null;
+        }
+
+        var languageLabel = string.IsNullOrWhiteSpace(pick.InferredLanguage) ? "unknown" : pick.InferredLanguage;
+        progress?.Report($"Using browser-discovered captions for transcript ({languageLabel}, {pick.RelativePath}).");
+
+        var markdownPath = run.GetPath("transcript.md");
+        await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
+
+        return new TranscriptArtifact(captionPath, markdownPath, "browser-network", segments);
+    }
+
+    private static IReadOnlyList<FrameArtifact> ApplySmartCrop(
+        IReadOnlyList<FrameArtifact> frames,
+        VideoRun run,
+        AnalyzeRequest request,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress)
+    {
+        var config = new ConfigStore().Load();
+        var enabled = request.SmartCrop ?? config.Crop.Enabled;
+        if (!enabled)
+        {
+            return frames;
+        }
+
+        var requestedProfile = SmartCropProfiles.Normalize(request.SmartCropProfile ?? config.Crop.Profile);
+        if (requestedProfile == SmartCropProfiles.Off)
+        {
+            return frames;
+        }
+
+        if (!SmartCropProfiles.IsKnown(requestedProfile))
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CropProfileUnknown,
+                $"Unknown smart-crop profile '{requestedProfile}'. Falling back to '{SmartCropProfiles.Auto}'.",
+                Source: "crop",
+                Severity: ReplayWarningSeverities.Warning));
+            requestedProfile = SmartCropProfiles.Auto;
+        }
+
+        progress?.Report($"Smart-cropping {frames.Count} frame(s) for UI chrome (profile: {requestedProfile})...");
+        var service = new SmartCropService();
+        var processed = new List<FrameArtifact>(frames.Count);
+        var seenWarnings = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var frame in frames)
+        {
+            var outcome = service.Process(frame, run, requestedProfile);
+            processed.Add(outcome.Frame);
+            if (outcome.Warning is not null && seenWarnings.Add(outcome.Warning.Code))
+            {
+                warnings.Add(outcome.Warning);
+            }
+        }
+
+        return processed;
+    }
+
     /// <summary>
     /// Resolves the effective number of frames to extract for interval / every-frame strategies.
-    /// When <see cref="AnalyzeRequest.FramesPerMinute"/> is set, scales by duration with
+    /// When <see cref="AnalyzeRequest.FramesPerMinute"/> is set (or
+    /// <paramref name="defaultFramesPerMinute"/> is non-zero), scales by duration with
     /// <see cref="AnalyzeRequest.FrameCount"/> as a floor. Returns <see cref="AnalyzeRequest.FrameCount"/>
     /// verbatim otherwise. The scene strategy ignores this value entirely (it is bounded by the
     /// scene safety cap).
     /// </summary>
-    internal static int ResolveEffectiveFrameCount(AnalyzeRequest request, double? durationSeconds)
+    internal static int ResolveEffectiveFrameCount(AnalyzeRequest request, double? durationSeconds, int defaultFramesPerMinute = 0)
     {
-        if (request.FramesPerMinute is not { } framesPerMinute || framesPerMinute <= 0 || durationSeconds is not { } durationSecs || durationSecs <= 0)
+        var configuredFramesPerMinute = request.FramesPerMinute;
+        if (configuredFramesPerMinute is null && defaultFramesPerMinute > 0)
+        {
+            configuredFramesPerMinute = defaultFramesPerMinute;
+        }
+
+        if (configuredFramesPerMinute is not { } framesPerMinute || framesPerMinute <= 0 || durationSeconds is not { } durationSecs || durationSecs <= 0)
         {
             return request.FrameCount;
         }
@@ -871,19 +1329,24 @@ public sealed record AnalyzeRequest(
     bool UseSpeechToText = false,
     bool UseOcr = false,
     bool UseVision = false,
-    int MaxAiFrames = 5,
+    int MaxAiFrames = 50,
     string Model = GitHubCopilotLlmProvider.DefaultModel,
     string LlmProvider = LlmProviders.GitHubCopilot,
     bool Force = false,
     bool UseCache = false,
-    string FrameStrategy = FrameSelectionStrategies.Interval,
+    string FrameStrategy = FrameSelectionStrategies.Scene,
     string? CookiesPath = null,
     string? CookiesFromBrowser = null,
     IReadOnlyList<string>? CaptionLanguages = null,
     bool? SlideGrouping = null,
     int? SlideHashDistance = null,
     int? FramesPerMinute = null,
-    int? SceneSafetyCap = null);
+    int? SceneSafetyCap = null,
+    string OcrProvider = OcrProviders.Local,
+    bool? SmartCrop = null,
+    string? SmartCropProfile = null,
+    string? CaptureMode = null,
+    string? AuthProfile = null);
 
 public static class FrameSelectionStrategies
 {

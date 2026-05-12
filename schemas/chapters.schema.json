@@ -6,7 +6,7 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "runId", "createdAt", "method", "chapters"],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.7" },
+    "schemaVersion": { "type": "string", "const": "0.8" },
     "runId": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string", "format": "date-time" },
     "method": { "type": "string", "minLength": 1 },

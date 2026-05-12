@@ -9,8 +9,15 @@ public sealed class PortableDependencyInstaller
     public const string Ffmpeg = "ffmpeg";
     public const string Ffprobe = "ffprobe";
     public const string Onnx = "onnx";
+    public const string Ocr = "ocr";
     public const string All = "all";
     public const string DefaultOnnxModelFile = "model_quantized.onnx";
+
+    // RapidOCR PP-OCRv5 latin model files (matches RapidOcrNet defaults; see https://github.com/BobLd/RapidOcrNet).
+    public const string OcrDetectionModelFile = "ch_PP-OCRv5_det_mobile.onnx";
+    public const string OcrClassificationModelFile = "ch_ppocr_mobile_v2.0_cls_mobile.onnx";
+    public const string OcrRecognitionModelFile = "latin_PP-OCRv5_rec_mobile.onnx";
+    public const string OcrDictionaryFile = "ppocrv5_latin_dict.txt";
 
     private const string YtDlpWindowsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
     private const string YtDlpLinuxX64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
@@ -18,6 +25,9 @@ public sealed class PortableDependencyInstaller
     private const string YtDlpMacOsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
     private const string FfmpegWindowsX64Url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
     private const string OnnxRepositoryBaseUrl = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main";
+
+    // RapidAI's RapidOCR model store on ModelScope; same SHA-pinned tag the upstream Python package uses.
+    private const string RapidOcrModelBaseUrl = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0";
 
     private readonly ReplayConfig config;
     private readonly HttpClient httpClient;
@@ -32,7 +42,7 @@ public sealed class PortableDependencyInstaller
         }
     }
 
-    public PortableDependencyLayout Layout => new(GetPortableDirectory(config), GetOnnxModelDirectory(config));
+    public PortableDependencyLayout Layout => new(GetPortableDirectory(config), GetOnnxModelDirectory(config), GetOcrModelDirectory(config));
 
     public string GetPortableExecutablePath(string executableName)
     {
@@ -49,6 +59,14 @@ public sealed class PortableDependencyInstaller
         return Path.Combine(Layout.OnnxModelDirectory, "vocab.txt");
     }
 
+    public string GetOcrDetectionModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrDetectionModelFile);
+
+    public string GetOcrClassificationModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrClassificationModelFile);
+
+    public string GetOcrRecognitionModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrRecognitionModelFile);
+
+    public string GetOcrDictionaryPath() => Path.Combine(Layout.OcrModelDirectory, OcrDictionaryFile);
+
     public static string GetDefaultPortableDirectory()
     {
         return Path.Combine(GetDefaultDataDirectory(), "portable");
@@ -57,6 +75,11 @@ public sealed class PortableDependencyInstaller
     public static string GetDefaultOnnxModelDirectory()
     {
         return Path.Combine(GetDefaultPortableDirectory(), "models", "all-MiniLM-L6-v2");
+    }
+
+    public static string GetDefaultOcrModelDirectory()
+    {
+        return Path.Combine(GetDefaultPortableDirectory(), "models", "rapidocr-ppocrv5-latin");
     }
 
     public static IReadOnlyList<string> NormalizeTargets(IEnumerable<string>? targets)
@@ -78,6 +101,7 @@ public sealed class PortableDependencyInstaller
                     AddUnique(normalized, YtDlp);
                     AddUnique(normalized, Ffmpeg);
                     AddUnique(normalized, Onnx);
+                    AddUnique(normalized, Ocr);
                     break;
                 case "media":
                     AddUnique(normalized, YtDlp);
@@ -96,8 +120,14 @@ public sealed class PortableDependencyInstaller
                 case "models":
                     AddUnique(normalized, Onnx);
                     break;
+                case Ocr:
+                case "rapidocr":
+                case "ocr-onnx":
+                case "ocr-models":
+                    AddUnique(normalized, Ocr);
+                    break;
                 default:
-                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, media, or all.");
+                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, media, or all.");
             }
         }
 
@@ -128,10 +158,13 @@ public sealed class PortableDependencyInstaller
                 case Onnx:
                     items.Add(await InstallOnnxAsync(force, progress, cancellationToken).ConfigureAwait(false));
                     break;
+                case Ocr:
+                    items.AddRange(await InstallOcrModelsAsync(force, progress, cancellationToken).ConfigureAwait(false));
+                    break;
             }
         }
 
-        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory);
+        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory);
     }
 
     private async Task<PortableDependencyInstallItem> InstallYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -196,6 +229,29 @@ public sealed class PortableDependencyInstaller
         }
 
         return new PortableDependencyInstallItem(Onnx, modelDirectory, installed, OnnxRepositoryBaseUrl, installed ? "downloaded" : "already exists");
+    }
+
+    private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallOcrModelsAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        var modelDirectory = Layout.OcrModelDirectory;
+        Directory.CreateDirectory(modelDirectory);
+        var files = new[]
+        {
+            new OnnxDownloadFile(OcrDetectionModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv5/det/{OcrDetectionModelFile}"),
+            new OnnxDownloadFile(OcrClassificationModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv4/cls/{OcrClassificationModelFile}"),
+            new OnnxDownloadFile(OcrRecognitionModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv5/rec/{OcrRecognitionModelFile}"),
+            new OnnxDownloadFile(OcrDictionaryFile, $"{RapidOcrModelBaseUrl}/paddle/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile/{OcrDictionaryFile}")
+        };
+
+        var items = new List<PortableDependencyInstallItem>(files.Length);
+        foreach (var file in files)
+        {
+            var destination = Path.Combine(modelDirectory, file.Name);
+            var installed = await DownloadFileAsync(file.Url, destination, force, progress, cancellationToken).ConfigureAwait(false);
+            items.Add(new PortableDependencyInstallItem(Ocr, destination, installed, file.Url, installed ? "downloaded" : "already exists"));
+        }
+
+        return items;
     }
 
     private async Task<bool> DownloadFileAsync(string url, string destinationPath, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -270,6 +326,14 @@ public sealed class PortableDependencyInstaller
             GetDefaultOnnxModelDirectory())!));
     }
 
+    private static string GetOcrModelDirectory(ReplayConfig config)
+    {
+        return Path.GetFullPath(Environment.ExpandEnvironmentVariables(FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY"),
+            config.Ocr.Local.ModelDirectory,
+            GetDefaultOcrModelDirectory())!));
+    }
+
     private static string GetOnnxModelFile(ReplayConfig config)
     {
         return FirstNonEmpty(
@@ -339,12 +403,13 @@ public sealed class PortableDependencyInstaller
     private sealed record OnnxDownloadFile(string Name, string Url);
 }
 
-public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory);
+public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory);
 
 public sealed record PortableDependencyInstallResult(
     IReadOnlyList<PortableDependencyInstallItem> Items,
     string PortableDirectory,
-    string OnnxModelDirectory);
+    string OnnxModelDirectory,
+    string OcrModelDirectory);
 
 public sealed record PortableDependencyInstallItem(
     string Name,

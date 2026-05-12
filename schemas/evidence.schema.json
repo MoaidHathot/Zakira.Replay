@@ -19,7 +19,7 @@
     "warnings"
   ],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.7" },
+    "schemaVersion": { "type": "string", "const": "0.8" },
     "source": { "type": "string", "minLength": 1 },
     "visionInstruction": { "type": "string" },
     "ocrInstruction": { "type": "string" },
@@ -81,7 +81,28 @@
         "path": { "type": "string", "minLength": 1 },
         "timestampSeconds": { "type": "number", "minimum": 0 },
         "timestampLabel": { "type": "string", "minLength": 1 },
-        "perceptualHash": { "type": ["string", "null"] }
+        "perceptualHash": { "type": ["string", "null"] },
+        "width": { "type": ["integer", "null"], "minimum": 0 },
+        "height": { "type": ["integer", "null"], "minimum": 0 },
+        "originalPath": { "type": ["string", "null"] },
+        "crop": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/frameCropBox" }
+          ]
+        }
+      }
+    },
+    "frameCropBox": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["x", "y", "width", "height", "source"],
+      "properties": {
+        "x": { "type": "integer", "minimum": 0 },
+        "y": { "type": "integer", "minimum": 0 },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "source": { "type": "string", "minLength": 1 }
       }
     },
     "slideArtifact": {
@@ -114,6 +135,7 @@
         "timestampLabel": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
         "slideId": { "type": ["string", "null"] },
+        "provider": { "type": ["string", "null"] },
         "structured": {
           "anyOf": [
             { "type": "null" },

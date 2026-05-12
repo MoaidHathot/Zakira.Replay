@@ -182,7 +182,9 @@ public sealed class AnalysisPipelineTests
             RunId: "llm-provider",
             UseOcr: true,
             Model: "gpt-4o-mini",
-            LlmProvider: "openai"), progress: null, CancellationToken.None);
+            LlmProvider: "openai",
+            OcrProvider: OcrProviders.Copilot,
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
 
         var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
         Assert.NotNull(evidence);
@@ -561,7 +563,9 @@ public sealed class AnalysisPipelineTests
             UseOcr: true,
             UseVision: true,
             Model: "gpt-4o-mini",
-            LlmProvider: "openai"), progress: null, CancellationToken.None);
+            LlmProvider: "openai",
+            OcrProvider: OcrProviders.Copilot,
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
 
         var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
         Assert.NotNull(evidence);
@@ -605,13 +609,149 @@ public sealed class AnalysisPipelineTests
             RunId: "parse-fallback",
             UseOcr: true,
             Model: "gpt-4o-mini",
-            LlmProvider: "openai"), progress: null, CancellationToken.None);
+            LlmProvider: "openai",
+            OcrProvider: OcrProviders.Copilot,
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
 
         var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
         Assert.NotNull(evidence);
         Assert.Single(evidence.Ocr);
         Assert.Equal("This is a free-form description, not JSON.", evidence.Ocr[0].Text);
         Assert.Contains(evidence.Warnings, warning => warning.Code == ReplayWarningCodes.OcrParseFallback);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncTagsOcrResultsWithCopilotProviderWhenExplicitlyRequested()
+    {
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var llm = new FakeLlmProvider("openai");
+        var pipeline = new AnalysisPipeline(store, new FakeYtDlpClient(), new FakeFfmpegClient(), provider => provider == "openai" ? llm : null);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: sourcePath,
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "ocr-provider-copilot",
+            UseOcr: true,
+            Model: "gpt-4o-mini",
+            LlmProvider: "openai",
+            OcrProvider: OcrProviders.Copilot,
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
+
+        var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
+        Assert.NotNull(evidence);
+        var ocr = Assert.Single(evidence.Ocr);
+        Assert.Equal(OcrProviders.Copilot, ocr.Provider);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncEmitsLocalModelsMissingWarningWhenLocalOcrLacksModels()
+    {
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var emptyModelDir = temp.GetPath("rapidocr-models");
+        Directory.CreateDirectory(emptyModelDir);
+
+        // Point ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY at an empty directory so resolution succeeds
+        // but the four model files are absent — the pipeline should emit OCR_LOCAL_MODELS_MISSING
+        // instead of trying to call any LLM. Disable autodownload so the pipeline doesn't
+        // silently fetch the models from the network and invalidate the test premise.
+        var previousDir = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY");
+        var previousAuto = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_LOCAL_AUTODOWNLOAD");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY", emptyModelDir);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_OCR_LOCAL_AUTODOWNLOAD", "false");
+            var pipeline = new AnalysisPipeline(store, new FakeYtDlpClient(), new FakeFfmpegClient(), _ => null);
+
+            var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: sourcePath,
+                VisionInstruction: string.Empty,
+                IncludeTranscript: false,
+                FrameCount: 1,
+                RunId: "local-ocr-missing-models",
+                UseOcr: true,
+                OcrProvider: OcrProviders.Local,
+                FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
+
+            var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
+            Assert.NotNull(evidence);
+            Assert.Empty(evidence.Ocr);
+            Assert.Contains(evidence.Warnings, warning => warning.Code == ReplayWarningCodes.OcrLocalModelsMissing);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY", previousDir);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_OCR_LOCAL_AUTODOWNLOAD", previousAuto);
+        }
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncEmitsUnknownProviderWarningWhenOcrProviderIsUnknown()
+    {
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var pipeline = new AnalysisPipeline(store, new FakeYtDlpClient(), new FakeFfmpegClient(), _ => null);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: sourcePath,
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "ocr-unknown-provider",
+            UseOcr: true,
+            // Pass a value Normalize() returns verbatim so we hit the OCR_UNKNOWN_PROVIDER branch.
+            OcrProvider: "tesseract"), progress: null, CancellationToken.None);
+
+        var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
+        Assert.NotNull(evidence);
+        Assert.Empty(evidence.Ocr);
+        Assert.Contains(evidence.Warnings, warning => warning.Code == ReplayWarningCodes.OcrUnknownProvider);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncDoesNotEmitParseFallbackForGenuinelyEmptyOcrResult()
+    {
+        // Reproduces the bug where local-OCR (RapidOCR) producing a valid empty JSON for a
+        // text-free frame was incorrectly flagged as OCR_PARSE_FALLBACK. We exercise the same
+        // failure shape via the Copilot path with a fake LLM returning the empty JSON shape.
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var llm = new FakeLlmProvider("openai")
+        {
+            Response = """{"freeText": "", "lines": [], "tables": []}"""
+        };
+        var pipeline = new AnalysisPipeline(store, new FakeYtDlpClient(), new FakeFfmpegClient(), provider => provider == "openai" ? llm : null);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: sourcePath,
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "ocr-empty-valid",
+            UseOcr: true,
+            Model: "gpt-4o-mini",
+            LlmProvider: "openai",
+            OcrProvider: OcrProviders.Copilot,
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
+
+        var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
+        Assert.NotNull(evidence);
+        var ocr = Assert.Single(evidence.Ocr);
+        Assert.Equal(string.Empty, ocr.Structured!.FreeText);
+        Assert.Empty(ocr.Structured.Lines);
+        // Critical: a successful empty parse must NOT trigger OCR_PARSE_FALLBACK.
+        Assert.DoesNotContain(evidence.Warnings, w => w.Code == ReplayWarningCodes.OcrParseFallback);
     }
 
     [Fact]
@@ -738,7 +878,9 @@ public sealed class AnalysisPipelineTests
             VisionInstruction: string.Empty,
             IncludeTranscript: false,
             FrameCount: 1,
-            RunId: "undersampled"), progress: null, CancellationToken.None);
+            RunId: "undersampled",
+            FrameStrategy: FrameSelectionStrategies.Interval,
+            FramesPerMinute: 0), progress: null, CancellationToken.None);
 
         Assert.Contains(result.Manifest.Warnings, warning => warning.Code == ReplayWarningCodes.FramesLikelyUndersampled);
     }
@@ -854,13 +996,14 @@ public sealed class AnalysisPipelineTests
             ExtractAudio: false,
             UseSpeechToText: false,
             UseOcr: false,
-            UseVision: false);
+            UseVision: false,
+            FrameStrategy: FrameSelectionStrategies.Interval);
     }
 
     internal static ArtifactManifest CreateManifest(string source, string runId, DateTimeOffset createdAt)
     {
         return new ArtifactManifest(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: source,
             VisionInstruction: "Test instruction",
 

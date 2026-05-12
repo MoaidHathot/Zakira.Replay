@@ -42,9 +42,10 @@ If dependencies are missing and the user permits local downloads:
 ```powershell
 zakira-replay deps install media
 zakira-replay deps install onnx
+zakira-replay deps install ocr
 ```
 
-`media` installs portable `yt-dlp`, `ffmpeg`, and `ffprobe` where supported. `onnx` installs the default semantic-search model files. Automatic downloads only happen when configured with `dependencies.autoDownload=true` or `search.onnx.autoDownload=true`.
+`media` installs portable `yt-dlp`, `ffmpeg`, and `ffprobe` where supported. `onnx` installs the default semantic-search model files. `ocr` installs the RapidOCR PP-OCRv5 latin models that the local (non-LLM) OCR provider needs (~30 MB across four files). Automatic downloads only happen when configured with `dependencies.autoDownload=true`, `search.onnx.autoDownload=true`, or `ocr.local.autoDownload=true`.
 
 Dependency path overrides, if needed:
 
@@ -53,41 +54,41 @@ Dependency path overrides, if needed:
 - `ZAKIRA_REPLAY_FFPROBE_PATH`
 - `ZAKIRA_REPLAY_ONNX_MODEL_PATH`
 - `ZAKIRA_REPLAY_ONNX_VOCAB_PATH`
-- Config keys: `yt-dlp.path`, `ffmpeg.path`, `ffprobe.path`, `search.onnx.*`
+- `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY` (plus per-file `*_DETECTION_MODEL_PATH`, `*_CLASSIFICATION_MODEL_PATH`, `*_RECOGNITION_MODEL_PATH`, `*_DICTIONARY_PATH`)
+- Config keys: `yt-dlp.path`, `ffmpeg.path`, `ffprobe.path`, `search.onnx.*`, `ocr.local.*`
 
 Do not put secret values in JSON config. Config stores environment variable names for provider secrets.
 
 ## Recommended Analysis Commands
 
-General evidence extraction:
+General evidence extraction (relies on the new defaults: `--frame-strategy scene`, `--ocr-provider local`, `--max-ai-frames 50`, `--scene-safety-cap 5000`, deterministic run-id):
 
 ```powershell
-zakira-replay analyze "<url-or-file>" `
-  --run-id <run-id> `
-  --frames 7 `
-  --frame-strategy scene `
-  --ocr `
-  --vision `
-  --cache
+zakira-replay analyze "<url-or-file>" --ocr --vision --cache
 ```
 
-Transcript-first analysis:
+Pin a run-id explicitly when you need a stable folder name beyond the auto-generated `<source-slug>-<sha8>`:
 
 ```powershell
-zakira-replay analyze "<url-or-file>" --run-id <run-id> --frames 0 --cache
+zakira-replay analyze "<url-or-file>" --run-id <run-id> --ocr --vision --cache
 ```
 
-Slide, UI, code, or demo-heavy analysis:
+Transcript-first analysis (no frames extracted):
 
 ```powershell
-zakira-replay analyze "<url-or-file>" `
-  --run-id <run-id> `
-  --frames 30 `
-  --frame-strategy scene `
-  --ocr `
-  --vision `
-  --stt `
-  --cache
+zakira-replay analyze "<url-or-file>" --frames 0 --frame-strategy interval --cache
+```
+
+Force LLM-backed OCR/vision (when the local OCR provider's accuracy isn't sufficient — typically for slides with tables, complex code blocks, or non-Latin scripts):
+
+```powershell
+zakira-replay analyze "<url-or-file>" --ocr --ocr-provider copilot --vision --cache
+```
+
+Audio fallback when no captions exist (still opt-in even with the new defaults):
+
+```powershell
+zakira-replay analyze "<url-or-file>" --ocr --vision --stt --cache
 ```
 
 Authenticated videos:
@@ -101,31 +102,38 @@ Always quote URLs in PowerShell, especially YouTube URLs containing `&`.
 
 ## Option Selection
 
+Defaults that ship out-of-the-box: `--frame-strategy scene` (no `--frames` cap, bounded by `frames.sceneSafetyCap=5000`), `--ocr-provider local` (offline RapidOCR; first OCR run auto-downloads ~30 MB models from ModelScope unless `ocr.local.autoDownload=false`), `--max-ai-frames 50` (per-slide OCR/vision cap), `--frames 500` (only used when `--frame-strategy interval`), `frames.perMinute=12` (duration-aware floor for interval strategy). The auto-generated run-id is deterministic per source URL: `<slug>-<sha8>` so re-running the same source reuses the same run folder and `--cache` short-circuits cleanly.
+
 Use these defaults unless the user says otherwise:
 
 - `--cache`: include by default for LLM-backed work; use `--force` only when intentionally recomputing.
-- `--frames 7`: general analysis.
-- `--frames 0`: transcript-only tasks.
-- `--frames 12` or more: visually dense videos.
-- `--frames 30 --frame-strategy scene`: slide/demo-heavy videos.
-- `--frame-strategy scene`: presentations, demos, UI walkthroughs, slide videos, or visually rich content.
+- `--frames 500` is the new general-analysis default for the `interval` strategy. Override down for cheap exploration (`--frames 30`) or up for very dense sampling (`--frames 5000` paired with `--frame-strategy interval`). When `--frame-strategy scene` is in effect (the default), `--frames` is ignored.
+- `--frames 0 --frame-strategy interval`: transcript-only (no frames extracted).
+- `--frame-strategy scene` (default): presentations, demos, UI walkthroughs, slide videos, conference talks, anything with discrete visual changes. Returns one frame per detected scene change, slide-grouping deduplicates. Total frame count scales with content, capped at `frames.sceneSafetyCap` (default 5000).
+- `--frame-strategy interval`: dense uniform sampling, useful when you need a predictable count or when scene-detection produces too few frames (rare with the new default cap).
 - `--frame-strategy every-frame`: only when the user explicitly needs capped frame-by-frame inspection.
 - `--ocr`: enable when slides, code, dashboards, diagrams, documents, or burned-in captions may be visible.
+- `--ocr-provider <name>`: choose the OCR backend. `local` (default) runs RapidOCR (PP-OCRv5 latin) entirely on-device via ONNX — no LLM, no network at run-time after the one-time model download. `copilot` routes the image through the configured LLM (GitHub Copilot, OpenAI, or Azure OpenAI) using vision-capable chat models — prefer this for complex layouts, mixed scripts, or when `tables[]` reconstruction matters (the local provider leaves `tables[]` empty in this release). The first local-OCR run auto-downloads ~30 MB of models (set `ocr.local.autoDownload=false` to disable; pre-install with `zakira-replay deps install ocr`).
 - `--vision`: enable when visual content matters.
+- `--smart-crop` / `--smart-crop-profile <profile>`: enable smart-crop preprocessing that removes meeting-platform UI chrome (Teams/Zoom/WebEx controls bar, participant gallery sidebar, black letterbox bars, bottom navigation) before perceptual hashing, OCR, and vision. Profiles: `auto` (default), `teams`, `zoom`, `webex`, `generic` (all share the same algorithm in this release), or `off` to disable. Use this when the source is a meeting recording — it dramatically improves slide-grouping stability (the persistent gallery sidebar otherwise dilutes the dHash) and removes meeting-app vocabulary from OCR text. Set `crop.enabled=true` in config to make it the default for all runs.
+- `--capture-mode {auto|ytdlp|browser}`: choose the frame-capture backend. `ytdlp` (default) uses yt-dlp + ffmpeg — works for ~1000 sites yt-dlp supports plus local files. `browser` drives Playwright-controlled Chromium (pinned to Edge) to navigate, click play, JS-seek, and screenshot — required for SharePoint/Medius/Teams recordings and any source yt-dlp can't reach. `auto` tries yt-dlp first and falls back to `browser` on failure, emitting `CAPTURE_BROWSER_FALLBACK` so orchestrators can branch on which path was used. For authenticated sources, combine with `--cookies-from-browser edge` (yt-dlp-side) or rely on Edge's existing session in browser mode. **Side benefit:** when browser capture runs, a network listener watches for any `.vtt`/`.srt` responses the page fetches, persists them under `captions/browser-NNNN.vtt`, indexes them in `captions/discovered.json`, and — if no transcript was found by yt-dlp/sidecar/STT — picks the best-language match (using `--caption-languages` and the source's primary language as hints) and uses it to populate `transcript.md`. This is the easiest way to get transcripts for Medius/Ignite/MVP-Summit sessions and any custom player whose page-side JS fetches a caption file.
+- `--auth-profile <name>`: load a previously-saved Playwright storage-state profile into the browser context. Required for SSO-gated sources (SharePoint Stream, Microsoft Stream, internal corporate portals, Microsoft event playbacks behind Microsoft accounts). Only consulted in `browser` and `auto` capture modes. Create the profile interactively with `zakira-replay auth login <name>`. The pipeline emits `AUTH_PROFILE_NOT_FOUND` (error) when the named profile does not exist on disk and `AUTH_PROFILE_STALE` (info) when the profile's file mtime is older than `auth.staleThresholdMinutes` (default 60). Staleness is informational — capture proceeds; orchestrators should suggest re-running `auth login` when downstream extraction looks like it landed on a login page instead of the intended content.
 - `--stt`: enable when captions may be absent or poor. Captions/sidecars are tried first; STT only runs if transcript extraction fails.
 - `--caption-languages`: comma-separated language preferences for yt-dlp subtitles (e.g. `--caption-languages fr,en`). Defaults to `auto`, which unions the source's primary language, the languages with **manually uploaded** subtitles (per `info.subtitles`), English (`en`, `en.*`), and YouTube live-chat. YouTube auto-translation languages (those that appear only under `info.automatic_captions`) are intentionally **not** expanded by `auto` because they are inferences from the source, not facts about what was spoken. To opt into a specific auto-translation, pass that language explicitly (`--caption-languages es`); read `metadata.json -> availableSubtitleLanguages` first to see which languages exist (`hasManual` / `hasAuto`) for the source. Stable IDs for any frames that get extracted are written to both `frames[*].id` and `ocr[*].frameId` / `vision[*].frameId` for cross-reference.
 - `--vision-instruction`: optional focus signal appended to the vision prompt. The default is empty; the model already extracts every visible piece of content (slide titles, bullets, code blocks, chart axes, UI controls). Use this only to bias enumeration order toward what matters for the orchestrator's question (e.g. `"Bias toward chart axes and code"`).
-- `--ocr-instruction`: optional focus signal appended to the OCR prompt. The default is empty; the model already extracts every readable character. Use this for hints like `"Preserve indentation in code-like text"`. Both instructions are persisted into `evidence.json::visionInstruction` and `evidence.json::ocrInstruction` for audit. They never relax the "do not invent" guardrails.
-- `--frames-per-minute <n>`: optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is `max(framesPerMinute * durationMinutes, --frames)`. Ignored for `scene` and `every-frame`. Use it instead of cranking `--frames` when sampling a long video.
-- `--scene-safety-cap <n>`: per-run override of `frames.sceneSafetyCap` (default 2000). The scene strategy returns up to this many frames; slide grouping deduplicates. When the cap is hit the run carries a `FRAMES_SCENE_CAP_REACHED` warning. The pipeline also emits `FRAMES_LIKELY_UNDERSAMPLED` if interval sampling without `--frames-per-minute` produces fewer than 1 frame per 5 minutes.
+- `--ocr-instruction`: optional focus signal appended to the OCR prompt. The default is empty; the model already extracts every readable character. Use this for hints like `"Preserve indentation in code-like text"`. Both instructions are persisted into `evidence.json::visionInstruction` and `evidence.json::ocrInstruction` for audit. They never relax the "do not invent" guardrails. The local OCR provider ignores `--ocr-instruction` entirely (it always extracts every visible character) but still persists the value for audit.
+- `--frames-per-minute <n>`: per-request override of the duration-aware sampling rate for the interval strategy. The config default is `frames.perMinute=12` (one frame every 5 seconds). When set (or non-zero in config), the effective frame count is `max(framesPerMinute * durationMinutes, --frames)`. Pass `--frames-per-minute 0` to disable duration-aware scaling for one run. Ignored for `scene` and `every-frame`.
+- `--max-ai-frames <n>`: cap on the number of unique slides sent to OCR/vision. Default `50`. Slide grouping deduplicates extracted frames first; this then bounds the AI cost. Lower for cheap runs, higher when slide-deck content is dense.
+- `--scene-safety-cap <n>`: per-run override of `frames.sceneSafetyCap` (default 5000). The scene strategy returns up to this many frames; slide grouping deduplicates. When the cap is hit the run carries a `FRAMES_SCENE_CAP_REACHED` warning. The pipeline also emits `FRAMES_LIKELY_UNDERSAMPLED` if interval sampling without `--frames-per-minute` (and with `frames.perMinute=0` in config) produces fewer than 1 frame per 5 minutes.
 
 There is no `--summary` flag. Synthesis is your job, not Zakira.Replay's.
 
 Provider notes:
 
-- `github-copilot` is the default provider for STT/OCR/vision.
+- `github-copilot` is the default LLM provider for STT (and for OCR/vision when `--ocr-provider copilot`).
 - `openai` supports chat/image and audio transcription via `/audio/transcriptions`.
 - `azure-openai` supports chat/image for OCR/vision, but Zakira.Replay STT is not implemented yet.
+- The default OCR provider is `local` (RapidOCR via ONNX) which needs no LLM at all.
 
 ## Read Command Output
 
@@ -156,7 +164,7 @@ Read artifacts in this order:
 
 Speakers in `evidence.speakers[]` carry `id` (slug, stable), optional `displayName`, plus `segmentCount`, `totalSeconds`, `firstSeenSeconds`, `lastSeenSeconds`. Each `transcript[*]` segment has `id` (`segment-NNNN`) and may have `speakerId`/`speakerDisplayName`. STT-derived transcripts do not carry speakers in this release.
 
-Warnings in `manifest.json` and `evidence.json` are structured records: `{ code, message, source, severity }`. Branch on `code` (for example `TRANSCRIPT_NOT_FOUND`, `STT_NO_LLM_PROVIDER`, `STT_CHUNK_FAILED`, `OCR_PARSE_FALLBACK`, `VISION_PARSE_FALLBACK`, `PERCEPTUAL_HASH_FAILED`, `FRAMES_REMOTE_FALLBACK`) rather than fuzzy-matching the message.
+Warnings in `manifest.json` and `evidence.json` are structured records: `{ code, message, source, severity }`. Branch on `code` (for example `TRANSCRIPT_NOT_FOUND`, `STT_NO_LLM_PROVIDER`, `STT_CHUNK_FAILED`, `OCR_PARSE_FALLBACK`, `OCR_LOCAL_MODELS_MISSING`, `OCR_LOCAL_INFERENCE_FAILED`, `OCR_UNKNOWN_PROVIDER`, `VISION_PARSE_FALLBACK`, `PERCEPTUAL_HASH_FAILED`, `FRAMES_REMOTE_FALLBACK`, `CROP_BAIL_OUT`, `CROP_PROFILE_UNKNOWN`, `CROP_IMAGE_DECODE_FAILED`, `CROP_OUTPUT_FAILED`, `CAPTURE_BROWSER_FALLBACK`, `CAPTURE_BROWSER_UNAVAILABLE`, `CAPTURE_PLAY_BUTTON_NOT_FOUND`, `CAPTURE_DURATION_UNRESOLVED`, `CAPTURE_SEEK_FAILED`, `CAPTURE_SCREENSHOT_FAILED`, `CAPTURE_UNKNOWN_MODE`, `CAPTIONS_BROWSER_NETWORK_NONE`, `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED`, `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED`, `AUTH_PROFILE_NOT_FOUND`, `AUTH_PROFILE_STALE`, `AUTH_PROFILE_LOAD_FAILED`) rather than fuzzy-matching the message.
 
 ## Chapters And Search
 
@@ -247,6 +255,8 @@ If dependency-related:
 If access-related:
 
 - Use `--cookies <file>`, `--cookies-from-browser <browser>`, or `--browser-auth <browser>` only when the user has legitimate access.
+- For sites yt-dlp cannot reach at all (authenticated SharePoint portals, Medius/Teams playback URLs, custom corporate players), use `--capture-mode browser` so frames are captured by Playwright directly. Combine with `--cookies-from-browser edge` if the page also needs session cookies for the initial load.
+- For SSO-gated sources (Microsoft 365 / Azure AD / Okta), create a persistent auth profile interactively with `zakira-replay auth login <profile-name>`, then pass `--auth-profile <profile-name>` on every subsequent `analyze` invocation. List existing profiles with `zakira-replay auth list`. Profiles older than `auth.staleThresholdMinutes` (default 60) emit `AUTH_PROFILE_STALE`; refresh by re-running `auth login` with the same name.
 
 If transcript is missing:
 
@@ -263,6 +273,7 @@ If AI provider calls fail:
 - Preserve warnings in the final answer. Branch on warning `code`.
 - Rerun with `--force` only if recomputation is worth the cost.
 - For repeated OCR/vision failures, reduce `--frames` or switch provider/model if configured.
+- If the LLM-backed OCR is unreliable or unavailable, fall back to `--ocr-provider local` (after `zakira-replay deps install ocr`). The local provider doesn't need any LLM and is unaffected by Copilot/OpenAI/Azure outages. Tradeoff: lower OCR fidelity on complex layouts and no `tables[]` reconstruction.
 
 ## Evidence Discipline
 

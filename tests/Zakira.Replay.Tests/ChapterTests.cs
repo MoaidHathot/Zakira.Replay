@@ -42,7 +42,7 @@ public sealed class ChapterTests
         var runDirectory = temp.GetPath("runs", "chapter-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 

@@ -142,6 +142,7 @@ public sealed class McpTests
                 queueId = "mcp-queue",
                 jobId = "mcp-job",
                 frames = 0,
+                frameStrategy = "interval",
                 noTranscript = true
             });
             var run = SerializeToolCall(2, "run_analysis_queue", new
@@ -304,7 +305,7 @@ public sealed class McpTests
         var runDirectory = temp.GetPath("runs", "search-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 
@@ -334,7 +335,7 @@ public sealed class McpTests
         var runDirectory = temp.GetPath("runs", "chapter-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 

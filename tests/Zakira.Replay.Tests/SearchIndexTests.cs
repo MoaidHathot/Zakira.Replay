@@ -72,7 +72,7 @@ public sealed class SearchIndexTests
         var runDirectory = temp.GetPath("runs", "search-run");
         Directory.CreateDirectory(runDirectory);
         var evidence = new EvidenceDocument(
-            SchemaVersion: "0.7",
+            SchemaVersion: "0.8",
             Source: "source.mp4",
             VisionInstruction: "test",
 

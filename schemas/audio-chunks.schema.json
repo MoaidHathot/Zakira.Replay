@@ -7,7 +7,7 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "sourceAudioPath", "totalDurationSeconds", "chunks", "silenceWindows"],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.7" },
+    "schemaVersion": { "type": "string", "const": "0.8" },
     "sourceAudioPath": { "type": "string", "minLength": 1 },
     "totalDurationSeconds": { "type": "number", "minimum": 0 },
     "chunks": {

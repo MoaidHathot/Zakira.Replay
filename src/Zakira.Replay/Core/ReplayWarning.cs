@@ -45,11 +45,53 @@ public static class ReplayWarningCodes
 
     public const string OcrParseFallback = "OCR_PARSE_FALLBACK";
 
+    public const string OcrLocalModelsMissing = "OCR_LOCAL_MODELS_MISSING";
+
+    public const string OcrLocalInitFailed = "OCR_LOCAL_INIT_FAILED";
+
+    public const string OcrLocalInferenceFailed = "OCR_LOCAL_INFERENCE_FAILED";
+
+    public const string OcrUnknownProvider = "OCR_UNKNOWN_PROVIDER";
+
     public const string VisionNoLlmProvider = "VISION_NO_LLM_PROVIDER";
 
     public const string VisionParseFallback = "VISION_PARSE_FALLBACK";
 
     public const string PerceptualHashFailed = "PERCEPTUAL_HASH_FAILED";
+
+    public const string CropImageDecodeFailed = "CROP_IMAGE_DECODE_FAILED";
+
+    public const string CropBailOut = "CROP_BAIL_OUT";
+
+    public const string CropProfileUnknown = "CROP_PROFILE_UNKNOWN";
+
+    public const string CropOutputFailed = "CROP_OUTPUT_FAILED";
+
+    public const string CaptureBrowserUnavailable = "CAPTURE_BROWSER_UNAVAILABLE";
+
+    public const string CaptureBrowserFallback = "CAPTURE_BROWSER_FALLBACK";
+
+    public const string CapturePlayButtonNotFound = "CAPTURE_PLAY_BUTTON_NOT_FOUND";
+
+    public const string CaptureDurationUnresolved = "CAPTURE_DURATION_UNRESOLVED";
+
+    public const string CaptureSeekFailed = "CAPTURE_SEEK_FAILED";
+
+    public const string CaptureScreenshotFailed = "CAPTURE_SCREENSHOT_FAILED";
+
+    public const string CaptureUnknownMode = "CAPTURE_UNKNOWN_MODE";
+
+    public const string CaptionsBrowserNetworkNone = "CAPTIONS_BROWSER_NETWORK_NONE";
+
+    public const string CaptionsBrowserNetworkDownloadFailed = "CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED";
+
+    public const string CaptionsBrowserNetworkParseFailed = "CAPTIONS_BROWSER_NETWORK_PARSE_FAILED";
+
+    public const string AuthProfileNotFound = "AUTH_PROFILE_NOT_FOUND";
+
+    public const string AuthProfileStale = "AUTH_PROFILE_STALE";
+
+    public const string AuthProfileLoadFailed = "AUTH_PROFILE_LOAD_FAILED";
 
     public const string ClipMediaUrlUnresolved = "CLIP_MEDIA_URL_UNRESOLVED";
 }

@@ -43,6 +43,7 @@
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageReference Include="Microsoft.Playwright" Version="1.59.0" />
     <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
+    <PackageReference Include="RapidOcrNet" Version="1.0.2" />
     <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203" PrivateAssets="all" />
   </ItemGroup>
 

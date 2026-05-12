@@ -411,24 +411,34 @@ public sealed class McpServer
 
         var stt = GetBool(args, "stt");
         var llmProvider = LlmProviderFactory.Normalize(GetString(args, "llmProvider") ?? GetString(args, "provider") ?? GetString(args, "llm-provider"));
+        var ocrProvider = OcrProviderFactory.Normalize(GetString(args, "ocrProvider") ?? GetString(args, "ocr-provider"));
         bool? slideGrouping = null;
         if (args.TryGetPropertyValue("slideGrouping", out var slideGroupingNode) && slideGroupingNode is not null)
         {
             slideGrouping = slideGroupingNode.GetValue<bool>();
         }
 
+        bool? smartCrop = null;
+        if (args.TryGetPropertyValue("smartCrop", out var smartCropNode) && smartCropNode is not null)
+        {
+            smartCrop = smartCropNode.GetValue<bool>();
+        }
+        var smartCropProfile = GetString(args, "smartCropProfile") ?? GetString(args, "smart-crop-profile") ?? GetString(args, "cropProfile");
+        var captureMode = GetString(args, "captureMode") ?? GetString(args, "capture-mode") ?? GetString(args, "capture");
+        var authProfile = GetString(args, "authProfile") ?? GetString(args, "auth-profile") ?? GetString(args, "auth");
+
         return new AnalyzeRequest(
             Source: sourceNode.GetValue<string>(),
             VisionInstruction: GetString(args, "visionInstruction") ?? string.Empty,
             OcrInstruction: GetString(args, "ocrInstruction") ?? string.Empty,
             IncludeTranscript: !GetBool(args, "noTranscript"),
-            FrameCount: GetInt(args, "frames", 7),
+            FrameCount: GetInt(args, "frames", 500),
             RunId: GetString(args, "runId"),
             ExtractAudio: GetBool(args, "audio") || stt,
             UseSpeechToText: stt,
             UseOcr: GetBool(args, "ocr"),
             UseVision: GetBool(args, "vision"),
-            MaxAiFrames: GetInt(args, "maxAiFrames", 5),
+            MaxAiFrames: GetInt(args, "maxAiFrames", 50),
             Model: GetString(args, "model") ?? LlmProviderFactory.GetDefaultModel(llmProvider),
             LlmProvider: llmProvider,
             Force: GetBool(args, "force"),
@@ -440,7 +450,12 @@ public sealed class McpServer
             SlideGrouping: slideGrouping,
             SlideHashDistance: GetOptionalInt(args, "slideHashDistance"),
             FramesPerMinute: GetOptionalInt(args, "framesPerMinute"),
-            SceneSafetyCap: GetOptionalInt(args, "sceneSafetyCap"));
+            SceneSafetyCap: GetOptionalInt(args, "sceneSafetyCap"),
+            OcrProvider: ocrProvider,
+            SmartCrop: smartCrop,
+            SmartCropProfile: smartCropProfile,
+            CaptureMode: captureMode,
+            AuthProfile: authProfile);
     }
 
     private static IReadOnlyList<string>? GetCaptionLanguages(JsonObject args)
@@ -481,7 +496,7 @@ public sealed class McpServer
             return FrameSelectionStrategies.EveryFrame;
         }
 
-        return GetString(args, "frameStrategy") ?? FrameSelectionStrategies.Interval;
+        return GetString(args, "frameStrategy") ?? FrameSelectionStrategies.Scene;
     }
 
     private static ClipExtractionRequest ParseClipRequest(JsonObject? args)
@@ -615,6 +630,11 @@ public sealed class McpServer
                 slideHashDistance = new { type = "integer", description = "Maximum Hamming distance (0-64) between adjacent perceptual hashes still considered the same slide. Defaults to config (6)." },
                 framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is max(framesPerMinute * durationMinutes, frames). Ignored for scene and every-frame strategies." },
                 sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000). Bounds the maximum number of scene-cut frames extracted. When the cap is reached, the run carries a FRAMES_SCENE_CAP_REACHED warning." },
+                ocrProvider = new { type = "string", description = "OCR provider: 'copilot' (LLM vision-as-OCR, default) or 'local' (RapidOCR / PP-OCRv5 via ONNX). Install local models with `deps install ocr`." },
+                smartCrop = new { type = "boolean", description = "Run smart-crop preprocessing on each frame before perceptual hashing, OCR, and vision. Removes Teams/Zoom/WebEx UI chrome (controls bar, participant gallery, black letterbox bars). Defaults to false." },
+                smartCropProfile = new { type = "string", description = "Smart-crop profile: 'auto' (default), 'teams', 'zoom', 'webex', 'generic', or 'off'. All non-off profiles share the same algorithm in this release; the value is recorded on each FrameCropBox for audit." },
+                captureMode = new { type = "string", description = "Frame-capture mode: 'ytdlp' (default; yt-dlp + ffmpeg), 'browser' (Playwright-driven Chromium for sites yt-dlp can't reach), or 'auto' (try yt-dlp, fall back to browser on failure with CAPTURE_BROWSER_FALLBACK)." },
+                authProfile = new { type = "string", description = "Name of a Playwright storage-state profile (created by `zakira-replay auth login <name>`) to load into the browser context before navigating. Only used in browser/auto capture mode. Emits AUTH_PROFILE_NOT_FOUND when missing and AUTH_PROFILE_STALE when older than auth.staleThresholdMinutes (default 60)." },
                 force = new { type = "boolean", description = "Recompute even if the run ID already has a completed manifest." }
             },
             required = new[] { "source" }
@@ -673,6 +693,11 @@ public sealed class McpServer
                 slideHashDistance = new { type = "integer", description = "Maximum Hamming distance (0-64) between adjacent perceptual hashes still considered the same slide. Defaults to config (6)." },
                 framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy." },
                 sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000)." },
+                ocrProvider = new { type = "string", description = "OCR provider: 'copilot' (LLM vision-as-OCR, default) or 'local' (RapidOCR via ONNX, requires `deps install ocr`)." },
+                smartCrop = new { type = "boolean", description = "Run smart-crop preprocessing on every frame before perceptual hashing, OCR, and vision (Teams/Zoom/WebEx UI chrome removal)." },
+                smartCropProfile = new { type = "string", description = "Smart-crop profile: auto|teams|zoom|webex|generic|off." },
+                captureMode = new { type = "string", description = "Frame-capture mode: ytdlp|browser|auto." },
+                authProfile = new { type = "string", description = "Playwright storage-state profile name (created by `auth login`). Only consulted in browser/auto capture mode." },
                 force = new { type = "boolean", description = "Recompute existing run id." }
             },
             required = new[] { "source" }

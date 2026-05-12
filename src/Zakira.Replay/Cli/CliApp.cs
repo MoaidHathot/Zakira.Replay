@@ -33,6 +33,7 @@ public static class CliApp
             "queue" => await RunQueueAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "llm" => await RunLlmAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "deps" or "dependencies" => await RunDepsAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
+            "auth" => await RunAuthAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "config" => await RunConfigAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "mcp" => await RunMcpAsync(rest, stdout, stderr, cancellationToken).ConfigureAwait(false),
             _ => UnknownCommand(command, stderr)
@@ -75,7 +76,8 @@ public static class CliApp
                 "slides.schema.json",
                 "ocr.schema.json",
                 "vision.schema.json",
-                "evidence-aligned.schema.json"
+                "evidence-aligned.schema.json",
+                "captions-discovered.schema.json"
             ]);
 
         if (parsed.GetBool("json", defaultValue: false))
@@ -164,7 +166,7 @@ public static class CliApp
     {
         var parsed = CommandOptions.Parse(args);
         var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--run-id <id>]");
-        var frames = parsed.GetInt("frames", 7);
+        var frames = parsed.GetInt("frames", 500);
         var runId = parsed.Get("run-id");
         var request = CreateAnalyzeRequest(parsed, source, includeTranscript: true, frameCount: frames, runId);
 
@@ -189,7 +191,7 @@ public static class CliApp
     {
         var parsed = CommandOptions.Parse(args);
         var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay frames <url-or-file> [--count <count>] [--run-id <id>]");
-        var count = parsed.GetInt("count", parsed.GetInt("frames", 7));
+        var count = parsed.GetInt("count", parsed.GetInt("frames", 500));
         var runId = parsed.Get("run-id");
         var request = CreateAnalyzeRequest(parsed, source, includeTranscript: false, frameCount: count, runId);
 
@@ -371,7 +373,7 @@ public static class CliApp
         {
             case "enqueue":
                 var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]");
-                var frames = parsed.GetInt("frames", parsed.GetInt("count", 7));
+                var frames = parsed.GetInt("frames", parsed.GetInt("count", 500));
                 var request = CreateAnalyzeRequest(parsed, source, includeTranscript: !parsed.GetBool("no-transcript", defaultValue: false), frameCount: frames, parsed.Get("run-id"));
                 var enqueueResult = await queue.EnqueueAsync(parsed.Get("queue-id"), request, parsed.Get("job-id"), parsed.GetInt("retries", 0), cancellationToken).ConfigureAwait(false);
                 stdout.WriteLine($"Enqueued job: {enqueueResult.JobId}");
@@ -509,6 +511,7 @@ public static class CliApp
                 stdout.WriteLine("Dependency install complete.");
                 stdout.WriteLine($"Portable directory: {result.PortableDirectory}");
                 stdout.WriteLine($"ONNX model directory: {result.OnnxModelDirectory}");
+                stdout.WriteLine($"OCR model directory: {result.OcrModelDirectory}");
                 foreach (var item in result.Items)
                 {
                     stdout.WriteLine($"{item.Name}: {item.Message} ({item.Path})");
@@ -525,10 +528,139 @@ public static class CliApp
                 stdout.WriteLine($"ONNX model directory: {installer.Layout.OnnxModelDirectory}");
                 stdout.WriteLine($"ONNX model: {installer.GetOnnxModelPath()}");
                 stdout.WriteLine($"ONNX vocabulary: {installer.GetOnnxVocabularyPath()}");
+                stdout.WriteLine($"OCR model directory: {installer.Layout.OcrModelDirectory}");
+                stdout.WriteLine($"OCR detection: {installer.GetOcrDetectionModelPath()}");
+                stdout.WriteLine($"OCR classification: {installer.GetOcrClassificationModelPath()}");
+                stdout.WriteLine($"OCR recognition: {installer.GetOcrRecognitionModelPath()}");
+                stdout.WriteLine($"OCR dictionary: {installer.GetOcrDictionaryPath()}");
                 return 0;
 
             default:
                 throw new ReplayException("Usage: zakira-replay deps <install|path> ...");
+        }
+    }
+
+
+    private static async Task<int> RunAuthAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
+    {
+        if (args.Length == 0)
+        {
+            throw new ReplayException("Usage: zakira-replay auth <login|list|show|clear|path> [profile-name]");
+        }
+
+        var configStore = new ConfigStore();
+        var config = await configStore.EnsureExistsAsync(cancellationToken).ConfigureAwait(false);
+        var store = new AuthProfileStore(config, configStore.ConfigPath);
+        var subcommand = args[0].ToLowerInvariant();
+
+        switch (subcommand)
+        {
+            case "login":
+            {
+                if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]))
+                {
+                    throw new ReplayException("Usage: zakira-replay auth login <profile-name> [--url <start-url>]");
+                }
+
+                var parsed = CommandOptions.Parse(args.Skip(2).ToArray());
+                var profileName = args[1];
+                var startUrl = parsed.Get("url") ?? parsed.Get("start-url");
+                var loginService = new AuthProfileLoginService(new DependencyResolver(config), store);
+                var result = await loginService.RunAsync(
+                    new AuthLoginRequest(profileName, startUrl),
+                    Console.In,
+                    stdout,
+                    cancellationToken).ConfigureAwait(false);
+                if (!result.Saved)
+                {
+                    return 1;
+                }
+
+                stdout.WriteLine($"Profile slug: {AuthProfileStore.SlugifyProfileName(profileName)}");
+                return 0;
+            }
+
+            case "list":
+            case "ls":
+            {
+                var profiles = store.List();
+                if (profiles.Count == 0)
+                {
+                    stdout.WriteLine($"No auth profiles in {store.Directory}.");
+                    stdout.WriteLine("Create one with: zakira-replay auth login <profile-name>");
+                    return 0;
+                }
+
+                stdout.WriteLine($"Auth directory: {store.Directory}");
+                stdout.WriteLine("Profile (slug)              Age      Stale  Bytes  Path");
+                foreach (var profile in profiles)
+                {
+                    var stale = profile.IsStale ? "yes" : "no";
+                    stdout.WriteLine($"{profile.Slug,-26}  {profile.FormatAge(),-7}  {stale,-5}  {profile.ByteCount,-6}  {profile.Path}");
+                }
+                return 0;
+            }
+
+            case "show":
+            {
+                if (args.Length < 2)
+                {
+                    throw new ReplayException("Usage: zakira-replay auth show <profile-name>");
+                }
+
+                var profile = store.TryRead(args[1]);
+                if (profile is null)
+                {
+                    stdout.WriteLine($"Profile '{args[1]}' not found.");
+                    stdout.WriteLine($"Expected at: {store.GetProfilePath(args[1])}");
+                    return 1;
+                }
+
+                stdout.WriteLine($"Name (slug):          {profile.Slug}");
+                stdout.WriteLine($"Path:                 {profile.Path}");
+                stdout.WriteLine($"Bytes:                {profile.ByteCount}");
+                stdout.WriteLine($"Created (UTC):        {profile.CreatedAtUtc:O}");
+                stdout.WriteLine($"Last write (UTC):     {profile.LastWriteAtUtc:O}");
+                stdout.WriteLine($"Age:                  {profile.FormatAge()}");
+                stdout.WriteLine($"Stale (>{config.Auth.StaleThresholdMinutes} min): {profile.IsStale}");
+                return 0;
+            }
+
+            case "clear":
+            case "remove":
+            case "rm":
+            case "delete":
+            {
+                if (args.Length < 2)
+                {
+                    throw new ReplayException("Usage: zakira-replay auth clear <profile-name>");
+                }
+
+                var existed = store.Clear(args[1]);
+                if (existed)
+                {
+                    stdout.WriteLine($"Removed auth profile: {AuthProfileStore.SlugifyProfileName(args[1])}");
+                    return 0;
+                }
+
+                stdout.WriteLine($"Profile '{args[1]}' did not exist.");
+                return 1;
+            }
+
+            case "path":
+            {
+                if (args.Length < 2)
+                {
+                    stdout.WriteLine(store.Directory);
+                    return 0;
+                }
+
+                stdout.WriteLine(store.GetProfilePath(args[1]));
+                return 0;
+            }
+
+            default:
+                throw new ReplayException("Usage: zakira-replay auth <login|list|show|clear|path> [profile-name]");
         }
     }
 
@@ -577,7 +709,8 @@ public static class CliApp
         var artifactStore = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
         var ytDlp = new YtDlpClient(dependencies, processRunner);
         var ffmpeg = new FfmpegClient(dependencies, processRunner);
-        return new AnalysisPipeline(artifactStore, ytDlp, ffmpeg, provider => LlmProviderFactory.Create(provider));
+        var browserCapture = new PlaywrightVideoCaptureClient(dependencies);
+        return new AnalysisPipeline(artifactStore, ytDlp, ffmpeg, provider => LlmProviderFactory.Create(provider), browserCapture);
     }
 
     private static ClipExtractionService CreateClipService()
@@ -616,6 +749,20 @@ public static class CliApp
         var config = new ConfigStore().Load();
         var llmProvider = LlmProviderFactory.GetConfiguredProvider(config);
         llmProvider = LlmProviderFactory.Normalize(parsed.Get("llm-provider") ?? parsed.Get("provider") ?? llmProvider);
+        var ocrProvider = OcrProviderFactory.GetConfiguredProvider(config);
+        ocrProvider = OcrProviderFactory.Normalize(parsed.Get("ocr-provider") ?? ocrProvider);
+        bool? smartCrop = null;
+        if (parsed.GetBool("smart-crop", defaultValue: false))
+        {
+            smartCrop = true;
+        }
+        else if (parsed.GetBool("no-smart-crop", defaultValue: false))
+        {
+            smartCrop = false;
+        }
+        var smartCropProfile = parsed.Get("smart-crop-profile") ?? parsed.Get("crop-profile");
+        var captureMode = parsed.Get("capture-mode") ?? parsed.Get("capture");
+        var authProfile = parsed.Get("auth-profile") ?? parsed.Get("auth");
         var captionLanguages = ParseCaptionLanguagesOption(parsed);
         bool? slideGrouping = parsed.GetBool("no-slide-grouping", defaultValue: false) ? false : null;
         var slideHashDistance = parsed.GetOptionalInt("slide-hash-distance");
@@ -634,7 +781,7 @@ public static class CliApp
             UseSpeechToText: useStt,
             UseOcr: useOcr,
             UseVision: useVision,
-            MaxAiFrames: parsed.GetInt("max-ai-frames", 5),
+            MaxAiFrames: parsed.GetInt("max-ai-frames", 50),
             Model: parsed.Get("model") ?? LlmProviderFactory.GetDefaultModel(llmProvider, config),
             LlmProvider: llmProvider,
             Force: parsed.GetBool("force", defaultValue: false),
@@ -646,7 +793,12 @@ public static class CliApp
             SlideGrouping: slideGrouping,
             SlideHashDistance: slideHashDistance,
             FramesPerMinute: framesPerMinute,
-            SceneSafetyCap: sceneSafetyCap);
+            SceneSafetyCap: sceneSafetyCap,
+            OcrProvider: ocrProvider,
+            SmartCrop: smartCrop,
+            SmartCropProfile: smartCropProfile,
+            CaptureMode: captureMode,
+            AuthProfile: authProfile);
     }
 
     private static IReadOnlyList<string>? ParseCaptionLanguagesOption(CommandOptions parsed)
@@ -671,7 +823,7 @@ public static class CliApp
             return FrameSelectionStrategies.EveryFrame;
         }
 
-        return parsed.Get("frame-strategy") ?? FrameSelectionStrategies.Interval;
+        return parsed.Get("frame-strategy") ?? FrameSelectionStrategies.Scene;
     }
 
     private static int UnknownCommand(string command, TextWriter stderr)
@@ -696,7 +848,7 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay version");
         stdout.WriteLine("  zakira-replay info [--json]");
         stdout.WriteLine("  zakira-replay doctor [--json]");
-        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]");
+        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]    # Defaults: --frames 500, --frame-strategy scene, --ocr-provider local (auto-downloads models), --max-ai-frames 50, --scene-safety-cap 5000");
         stdout.WriteLine("  zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]");
         stdout.WriteLine("  zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]");
@@ -710,8 +862,13 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]");
         stdout.WriteLine("  zakira-replay queue status [--queue-id <id>] [--json]");
         stdout.WriteLine("  zakira-replay llm ask <prompt> [--llm-provider github-copilot|openai|azure-openai] [--model <model>] [--attach <path>]");
-        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|media|all] [--force]  # default: media");
+        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|media|all] [--force]  # default: media");
         stdout.WriteLine("  zakira-replay deps path");
+        stdout.WriteLine("  zakira-replay auth login <profile-name> [--url <start-url>]");
+        stdout.WriteLine("  zakira-replay auth list");
+        stdout.WriteLine("  zakira-replay auth show <profile-name>");
+        stdout.WriteLine("  zakira-replay auth clear <profile-name>");
+        stdout.WriteLine("  zakira-replay auth path [profile-name]");
         stdout.WriteLine("  zakira-replay config <path|list|get|set> ...");
         stdout.WriteLine("  zakira-replay mcp serve");
         stdout.WriteLine();

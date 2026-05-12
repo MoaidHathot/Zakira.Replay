@@ -12,11 +12,168 @@ public sealed class ReplayConfig
 
     public LlmConfig Llm { get; set; } = new();
 
+    public OcrConfig Ocr { get; set; } = new();
+
     public CaptionsConfig Captions { get; set; } = new();
 
     public SlidesConfig Slides { get; set; } = new();
 
     public FramesConfig Frames { get; set; } = new();
+
+    public CropConfig Crop { get; set; } = new();
+
+    public CaptureConfig Capture { get; set; } = new();
+
+    public AuthConfig Auth { get; set; } = new();
+}
+
+public sealed class AuthConfig
+{
+    /// <summary>
+    /// Directory storing Playwright storage-state JSON snapshots created by
+    /// <c>zakira-replay auth login &lt;profile&gt;</c>. Each profile is a single file named
+    /// <c>&lt;slug&gt;.json</c>. When null, the directory resolves to <c>auth/</c> next to the
+    /// configuration file. Override with <c>ZAKIRA_REPLAY_AUTH_DIRECTORY</c>.
+    /// </summary>
+    public string? Directory { get; set; }
+
+    /// <summary>
+    /// Auth profiles are wall-clock state — SSO sessions, OAuth refresh tokens, and CDN
+    /// cookies all expire. When the resolved profile file is older than this many minutes,
+    /// the pipeline emits an <c>AUTH_PROFILE_STALE</c> info-level warning so orchestrators
+    /// can decide whether to re-run <c>auth login</c>. Defaults to 60 minutes (matches the
+    /// 1-2 hour session-expiry observation from the squad-skills SKILL).
+    /// </summary>
+    public int StaleThresholdMinutes { get; set; } = 60;
+}
+
+public sealed class CaptureConfig
+{
+    /// <summary>
+    /// Frame-capture mode. <c>ytdlp</c> (default) uses yt-dlp to resolve a direct stream URL and
+    /// ffmpeg to extract frames — works for ~1000 sites yt-dlp supports. <c>browser</c> drives a
+    /// Playwright-controlled Chromium (Edge) instance to click play, seek via JavaScript, and
+    /// screenshot the &lt;video&gt; element at the chosen timestamps — works for sites yt-dlp can't
+    /// reach (custom enterprise portals, Medius/Teams recordings, sites that need a fully-rendered
+    /// page to expose the video). <c>auto</c> tries yt-dlp first and falls back to <c>browser</c>
+    /// on failure, emitting <c>CAPTURE_BROWSER_FALLBACK</c>.
+    /// </summary>
+    public string Mode { get; set; } = CaptureModes.YtDlp;
+
+    public BrowserCaptureConfig Browser { get; set; } = new();
+}
+
+public sealed class BrowserCaptureConfig
+{
+    /// <summary>
+    /// Optional CSS / Playwright-locator selector for the play button. When null, the capture
+    /// client tries the &lt;video&gt; element itself (HTML5 <c>video.play()</c>) and falls back to
+    /// the first visible <c>button[aria-label*="play" i]</c>.
+    /// </summary>
+    public string? PlayButtonSelector { get; set; }
+
+    /// <summary>
+    /// CSS selector for the &lt;video&gt; element used for duration probing, seeking, and
+    /// screenshotting. Defaults to <c>video</c>.
+    /// </summary>
+    public string VideoElementSelector { get; set; } = "video";
+
+    /// <summary>
+    /// Seconds to wait after <c>video.currentTime = …</c> before screenshotting, so the browser
+    /// has time to decode and paint the new frame. The reference SKILL uses 2.5; 1.0 too fast,
+    /// 2.0 mostly works, 2.5 reliable, raise to 3.0-4.0 for high-res videos or slower machines.
+    /// </summary>
+    public double SeekWaitSeconds { get; set; } = 2.5;
+
+    /// <summary>
+    /// Max time to wait for <c>video.duration</c> to be a finite number (it returns NaN/Infinity
+    /// until the metadata loads). Default 20 seconds matches the reference SKILL.
+    /// </summary>
+    public double DurationProbeTimeoutSeconds { get; set; } = 20.0;
+
+    /// <summary>
+    /// JPEG quality (1-100) for screenshots written to <c>frames/scene-NNNN.jpg</c>. Defaults to
+    /// 90 to keep storage modest while preserving slide text legibility.
+    /// </summary>
+    public int JpegQuality { get; set; } = 90;
+
+    /// <summary>
+    /// When true (default), the browser-capture client attaches a network listener while the
+    /// page is loaded and the video is played, captures every <c>.vtt</c> / <c>.srt</c>
+    /// response, saves it to <c>captions/browser-NNNN.vtt</c>, and records an inventory at
+    /// <c>captions/discovered.json</c>. When the pipeline's transcript step did not find a
+    /// transcript, the best-language match is used to populate <c>transcript.md</c> retroactively.
+    /// Set false to skip caption interception entirely (for privacy or to reduce per-run noise).
+    /// </summary>
+    public bool CaptureCaptions { get; set; } = true;
+
+    /// <summary>
+    /// Maximum byte count for any single browser-captured caption file. Files larger than this
+    /// are skipped with a <c>CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED</c> warning so a runaway
+    /// stream URL (e.g. an HLS playlist mistakenly served with a <c>.vtt</c> path) cannot fill
+    /// the disk. Defaults to 5 MB.
+    /// </summary>
+    public int MaxCaptionBytes { get; set; } = 5 * 1024 * 1024;
+}
+
+public sealed class CropConfig
+{
+    /// <summary>
+    /// When true, run smart-crop preprocessing on every extracted frame before perceptual
+    /// hashing, OCR, and vision. Removes meeting-platform UI chrome (Teams/Zoom/WebEx controls
+    /// bars, participant galleries, black letterbox bars) so downstream stages see only the
+    /// shared slide/screen area. Defaults to false; opt-in per-run with <c>--smart-crop</c>.
+    /// </summary>
+    public bool Enabled { get; set; }
+
+    /// <summary>
+    /// Crop profile name. <c>auto</c> uses generic brightness-based heuristics tuned for the
+    /// SKILL's <c>smart_crop()</c> reference. Reserved values: <c>teams</c>, <c>zoom</c>,
+    /// <c>webex</c>, <c>generic</c>, <c>off</c>. Future releases may add platform-specific
+    /// tunings; today <c>auto</c>/<c>generic</c>/<c>teams</c>/<c>zoom</c>/<c>webex</c> share
+    /// the same algorithm.
+    /// </summary>
+    public string Profile { get; set; } = SmartCropProfiles.Auto;
+}
+
+public sealed class OcrConfig
+{
+    /// <summary>
+    /// Preferred OCR provider when the pipeline runs with <c>--ocr</c>. Use one of the
+    /// <see cref="OcrProviders"/> constants. Default is <see cref="OcrProviders.Local"/>
+    /// (offline RapidOCR via ONNX); flip to <see cref="OcrProviders.Copilot"/> in config or
+    /// per request to route through an LLM vision model instead.
+    /// </summary>
+    public string? Provider { get; set; } = OcrProviders.Local;
+
+    public LocalOcrConfig Local { get; set; } = new();
+}
+
+public sealed class LocalOcrConfig
+{
+    /// <summary>
+    /// Directory containing the four RapidOCR (PP-OCRv5 latin) model files:
+    /// <c>ch_PP-OCRv5_det_mobile.onnx</c>, <c>ch_ppocr_mobile_v2.0_cls_mobile.onnx</c>,
+    /// <c>latin_PP-OCRv5_rec_mobile.onnx</c>, and <c>ppocrv5_latin_dict.txt</c>.
+    /// Resolved against the portable directory when null.
+    /// </summary>
+    public string? ModelDirectory { get; set; }
+
+    public string? DetectionModelPath { get; set; }
+
+    public string? ClassificationModelPath { get; set; }
+
+    public string? RecognitionModelPath { get; set; }
+
+    public string? DictionaryPath { get; set; }
+
+    /// <summary>
+    /// When true (default), <see cref="LocalOnnxOcrProvider"/> initialisation may invoke
+    /// <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the RapidOCR
+    /// models on first use. Install ahead-of-time with <c>deps install ocr</c> to skip the
+    /// network round-trip; set false to disable on-demand downloads entirely.
+    /// </summary>
+    public bool AutoDownload { get; set; } = true;
 }
 
 public sealed class FramesConfig
@@ -24,9 +181,17 @@ public sealed class FramesConfig
     /// <summary>
     /// Upper bound on the number of frames the scene-strategy ffmpeg pipeline will return for a
     /// single run, so a pathological video with thousands of scene changes cannot fill the disk.
-    /// Slide grouping deduplicates within this cap. Defaults to 2000.
+    /// Slide grouping deduplicates within this cap. Defaults to 5000.
     /// </summary>
-    public int SceneSafetyCap { get; set; } = 2000;
+    public int SceneSafetyCap { get; set; } = 5000;
+
+    /// <summary>
+    /// Default duration-aware sampling rate for the <c>interval</c> frame strategy. When the
+    /// request leaves <c>FramesPerMinute</c> null, the pipeline falls back to this value. Set
+    /// to <c>0</c> to disable duration-aware scaling and rely on <c>--frames</c> alone. Defaults
+    /// to 12 (one frame every five seconds).
+    /// </summary>
+    public int PerMinute { get; set; } = 12;
 }
 
 public sealed class SlidesConfig
@@ -218,6 +383,15 @@ public sealed class ConfigStore
                     ApiVersionEnvironmentVariables = ["AZURE_OPENAI_API_VERSION"]
                 }
             },
+            Ocr = new OcrConfig
+            {
+                Provider = OcrProviders.Local,
+                Local = new LocalOcrConfig
+                {
+                    AutoDownload = true,
+                    ModelDirectory = PortableDependencyInstaller.GetDefaultOcrModelDirectory()
+                }
+            },
             Captions = new CaptionsConfig
             {
                 Languages = ["auto"]
@@ -229,7 +403,30 @@ public sealed class ConfigStore
             },
             Frames = new FramesConfig
             {
-                SceneSafetyCap = 2000
+                SceneSafetyCap = 5000,
+                PerMinute = 12
+            },
+            Crop = new CropConfig
+            {
+                Enabled = false,
+                Profile = SmartCropProfiles.Auto
+            },
+            Capture = new CaptureConfig
+            {
+                Mode = CaptureModes.YtDlp,
+                Browser = new BrowserCaptureConfig
+                {
+                    VideoElementSelector = "video",
+                    SeekWaitSeconds = 2.5,
+                    DurationProbeTimeoutSeconds = 20.0,
+                    JpegQuality = 90,
+                    CaptureCaptions = true,
+                    MaxCaptionBytes = 5 * 1024 * 1024
+                }
+            },
+            Auth = new AuthConfig
+            {
+                StaleThresholdMinutes = 60
             }
         };
     }
@@ -507,6 +704,93 @@ public sealed class ConfigStore
             case "frames.scene-safety-cap":
                 config.Frames.SceneSafetyCap = ParseSceneSafetyCap(value, key);
                 break;
+            case "frames.perminute":
+            case "frames.per-minute":
+                config.Frames.PerMinute = ParseFramesPerMinute(value, key);
+                break;
+            case "ocr.provider":
+                config.Ocr.Provider = OcrProviderFactory.Normalize(value);
+                break;
+            case "ocr.local.modeldirectory":
+            case "ocr.local.model-directory":
+                config.Ocr.Local.ModelDirectory = NormalizeDirectoryPath(value);
+                break;
+            case "ocr.local.detectionmodelpath":
+            case "ocr.local.detection-model-path":
+            case "ocr.local.detmodelpath":
+            case "ocr.local.det-model-path":
+                config.Ocr.Local.DetectionModelPath = NormalizeFilePath(value);
+                break;
+            case "ocr.local.classificationmodelpath":
+            case "ocr.local.classification-model-path":
+            case "ocr.local.clsmodelpath":
+            case "ocr.local.cls-model-path":
+                config.Ocr.Local.ClassificationModelPath = NormalizeFilePath(value);
+                break;
+            case "ocr.local.recognitionmodelpath":
+            case "ocr.local.recognition-model-path":
+            case "ocr.local.recmodelpath":
+            case "ocr.local.rec-model-path":
+                config.Ocr.Local.RecognitionModelPath = NormalizeFilePath(value);
+                break;
+            case "ocr.local.dictionarypath":
+            case "ocr.local.dictionary-path":
+            case "ocr.local.keyspath":
+            case "ocr.local.keys-path":
+                config.Ocr.Local.DictionaryPath = NormalizeFilePath(value);
+                break;
+            case "ocr.local.autodownload":
+            case "ocr.local.auto-download":
+                config.Ocr.Local.AutoDownload = ParseBool(value, key);
+                break;
+            case "crop.enabled":
+            case "smartcrop.enabled":
+            case "smart-crop.enabled":
+                config.Crop.Enabled = ParseBool(value, key);
+                break;
+            case "crop.profile":
+            case "smartcrop.profile":
+            case "smart-crop.profile":
+                config.Crop.Profile = SmartCropProfiles.Normalize(value);
+                break;
+            case "capture.mode":
+                config.Capture.Mode = CaptureModes.Normalize(value);
+                break;
+            case "capture.browser.playbuttonselector":
+            case "capture.browser.play-button-selector":
+                config.Capture.Browser.PlayButtonSelector = NormalizeNonEmpty(value, key);
+                break;
+            case "capture.browser.videoelementselector":
+            case "capture.browser.video-element-selector":
+                config.Capture.Browser.VideoElementSelector = NormalizeNonEmpty(value, key);
+                break;
+            case "capture.browser.seekwaitseconds":
+            case "capture.browser.seek-wait-seconds":
+                config.Capture.Browser.SeekWaitSeconds = ParsePositiveDouble(value, key);
+                break;
+            case "capture.browser.durationprobetimeoutseconds":
+            case "capture.browser.duration-probe-timeout-seconds":
+                config.Capture.Browser.DurationProbeTimeoutSeconds = ParsePositiveDouble(value, key);
+                break;
+            case "capture.browser.jpegquality":
+            case "capture.browser.jpeg-quality":
+                config.Capture.Browser.JpegQuality = ParseJpegQuality(value, key);
+                break;
+            case "capture.browser.capturecaptions":
+            case "capture.browser.capture-captions":
+                config.Capture.Browser.CaptureCaptions = ParseBool(value, key);
+                break;
+            case "capture.browser.maxcaptionbytes":
+            case "capture.browser.max-caption-bytes":
+                config.Capture.Browser.MaxCaptionBytes = ParsePositiveInt(value, key);
+                break;
+            case "auth.directory":
+                config.Auth.Directory = NormalizeDirectoryPath(value);
+                break;
+            case "auth.stalethresholdminutes":
+            case "auth.stale-threshold-minutes":
+                config.Auth.StaleThresholdMinutes = ParsePositiveInt(value, key);
+                break;
             default:
                 throw new ReplayException($"Unknown config key: {key}");
         }
@@ -553,6 +837,26 @@ public sealed class ConfigStore
             "slides.enabled" => config.Slides.Enabled.ToString(),
             "slides.hashdistance" or "slides.hash-distance" => config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
             "frames.scenesafetycap" or "frames.scene-safety-cap" => config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture),
+            "frames.perminute" or "frames.per-minute" => config.Frames.PerMinute.ToString(CultureInfo.InvariantCulture),
+            "ocr.provider" => config.Ocr.Provider,
+            "ocr.local.modeldirectory" or "ocr.local.model-directory" => config.Ocr.Local.ModelDirectory,
+            "ocr.local.detectionmodelpath" or "ocr.local.detection-model-path" or "ocr.local.detmodelpath" or "ocr.local.det-model-path" => config.Ocr.Local.DetectionModelPath,
+            "ocr.local.classificationmodelpath" or "ocr.local.classification-model-path" or "ocr.local.clsmodelpath" or "ocr.local.cls-model-path" => config.Ocr.Local.ClassificationModelPath,
+            "ocr.local.recognitionmodelpath" or "ocr.local.recognition-model-path" or "ocr.local.recmodelpath" or "ocr.local.rec-model-path" => config.Ocr.Local.RecognitionModelPath,
+            "ocr.local.dictionarypath" or "ocr.local.dictionary-path" or "ocr.local.keyspath" or "ocr.local.keys-path" => config.Ocr.Local.DictionaryPath,
+            "ocr.local.autodownload" or "ocr.local.auto-download" => config.Ocr.Local.AutoDownload.ToString(),
+            "crop.enabled" or "smartcrop.enabled" or "smart-crop.enabled" => config.Crop.Enabled.ToString(),
+            "crop.profile" or "smartcrop.profile" or "smart-crop.profile" => config.Crop.Profile,
+            "capture.mode" => config.Capture.Mode,
+            "capture.browser.playbuttonselector" or "capture.browser.play-button-selector" => config.Capture.Browser.PlayButtonSelector,
+            "capture.browser.videoelementselector" or "capture.browser.video-element-selector" => config.Capture.Browser.VideoElementSelector,
+            "capture.browser.seekwaitseconds" or "capture.browser.seek-wait-seconds" => config.Capture.Browser.SeekWaitSeconds.ToString(CultureInfo.InvariantCulture),
+            "capture.browser.durationprobetimeoutseconds" or "capture.browser.duration-probe-timeout-seconds" => config.Capture.Browser.DurationProbeTimeoutSeconds.ToString(CultureInfo.InvariantCulture),
+            "capture.browser.jpegquality" or "capture.browser.jpeg-quality" => config.Capture.Browser.JpegQuality.ToString(CultureInfo.InvariantCulture),
+            "capture.browser.capturecaptions" or "capture.browser.capture-captions" => config.Capture.Browser.CaptureCaptions.ToString(),
+            "capture.browser.maxcaptionbytes" or "capture.browser.max-caption-bytes" => config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
+            "auth.directory" => config.Auth.Directory,
+            "auth.stalethresholdminutes" or "auth.stale-threshold-minutes" => config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
             _ => throw new ReplayException($"Unknown config key: {key}")
         };
     }
@@ -594,7 +898,27 @@ public sealed class ConfigStore
             ["captions.languages"] = FormatCaptionLanguages(config.Captions.Languages),
             ["slides.enabled"] = config.Slides.Enabled.ToString(),
             ["slides.hashDistance"] = config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
-            ["frames.sceneSafetyCap"] = config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture)
+            ["frames.sceneSafetyCap"] = config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture),
+            ["frames.perMinute"] = config.Frames.PerMinute.ToString(CultureInfo.InvariantCulture),
+            ["ocr.provider"] = config.Ocr.Provider,
+            ["ocr.local.modelDirectory"] = config.Ocr.Local.ModelDirectory,
+            ["ocr.local.detectionModelPath"] = config.Ocr.Local.DetectionModelPath,
+            ["ocr.local.classificationModelPath"] = config.Ocr.Local.ClassificationModelPath,
+            ["ocr.local.recognitionModelPath"] = config.Ocr.Local.RecognitionModelPath,
+            ["ocr.local.dictionaryPath"] = config.Ocr.Local.DictionaryPath,
+            ["ocr.local.autoDownload"] = config.Ocr.Local.AutoDownload.ToString(),
+            ["crop.enabled"] = config.Crop.Enabled.ToString(),
+            ["crop.profile"] = config.Crop.Profile,
+            ["capture.mode"] = config.Capture.Mode,
+            ["capture.browser.playButtonSelector"] = config.Capture.Browser.PlayButtonSelector,
+            ["capture.browser.videoElementSelector"] = config.Capture.Browser.VideoElementSelector,
+            ["capture.browser.seekWaitSeconds"] = config.Capture.Browser.SeekWaitSeconds.ToString(CultureInfo.InvariantCulture),
+            ["capture.browser.durationProbeTimeoutSeconds"] = config.Capture.Browser.DurationProbeTimeoutSeconds.ToString(CultureInfo.InvariantCulture),
+            ["capture.browser.jpegQuality"] = config.Capture.Browser.JpegQuality.ToString(CultureInfo.InvariantCulture),
+            ["capture.browser.captureCaptions"] = config.Capture.Browser.CaptureCaptions.ToString(),
+            ["capture.browser.maxCaptionBytes"] = config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
+            ["auth.directory"] = config.Auth.Directory,
+            ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture)
         };
     }
 
@@ -709,6 +1033,36 @@ public sealed class ConfigStore
         if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) || parsed < 1)
         {
             throw new ReplayException($"Config key {key} requires a positive integer (maximum number of scene frames extracted per run).");
+        }
+
+        return parsed;
+    }
+
+    private static int ParseFramesPerMinute(string value, string key)
+    {
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) || parsed < 0)
+        {
+            throw new ReplayException($"Config key {key} requires a non-negative integer (use 0 to disable duration-aware frame sampling).");
+        }
+
+        return parsed;
+    }
+
+    private static double ParsePositiveDouble(string value, string key)
+    {
+        if (!double.TryParse(value.Trim(), NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) || parsed <= 0 || double.IsNaN(parsed) || double.IsInfinity(parsed))
+        {
+            throw new ReplayException($"Config key {key} requires a positive finite number.");
+        }
+
+        return parsed;
+    }
+
+    private static int ParseJpegQuality(string value, string key)
+    {
+        if (!int.TryParse(value.Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) || parsed < 1 || parsed > 100)
+        {
+            throw new ReplayException($"Config key {key} requires an integer between 1 and 100 (JPEG quality).");
         }
 
         return parsed;

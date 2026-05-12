@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://zakira.local/replay/schemas/captions-discovered.schema.json",
+  "title": "Zakira.Replay Browser-Discovered Captions",
+  "description": "Inventory of caption files (.vtt / .srt) the Playwright browser-capture network interceptor saw the page download during playback. Written to captions/discovered.json when at least one caption response was captured. Each entry's RelativePath points at the persisted file under the run's captions/ directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "discoveredAt", "captions"],
+  "properties": {
+    "schemaVersion": { "type": "string", "const": "0.8" },
+    "discoveredAt": { "type": "string", "format": "date-time" },
+    "originalLanguage": {
+      "description": "Source language of the video as reported by yt-dlp metadata when available; useful for orchestrators picking among captured caption languages. Null when not known.",
+      "type": ["string", "null"]
+    },
+    "captions": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/browserCapturedCaption" }
+    }
+  },
+  "$defs": {
+    "browserCapturedCaption": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ordinal", "url", "relativePath", "byteCount", "contentSha256"],
+      "properties": {
+        "ordinal": { "type": "integer", "minimum": 1 },
+        "url": {
+          "description": "Original network URL the page fetched, with all query string parameters intact (so SAS tokens and language selectors are preserved for audit).",
+          "type": "string",
+          "minLength": 1
+        },
+        "relativePath": {
+          "description": "Path of the persisted caption file relative to the run directory (e.g. `captions/browser-0001.vtt`).",
+          "type": "string",
+          "minLength": 1
+        },
+        "inferredLanguage": {
+          "description": "Best-effort BCP-47 language code inferred from the URL (e.g. `en-US`, `fr`, `zh-Hans`). Null when no signal is present.",
+          "type": ["string", "null"]
+        },
+        "languageSource": {
+          "description": "Identifier of the heuristic that produced the inferredLanguage (e.g. `url-Caption_<lang>`, `url-filename`, `url-path-segment`, `url-query-lang`). Useful for triaging false positives.",
+          "type": ["string", "null"]
+        },
+        "byteCount": { "type": "integer", "minimum": 0 },
+        "contentSha256": {
+          "description": "Hex-encoded SHA-256 of the caption file body. Used to dedupe within and across runs.",
+          "type": "string",
+          "minLength": 1
+        },
+        "contentType": { "type": ["string", "null"] }
+      }
+    }
+  }
+}

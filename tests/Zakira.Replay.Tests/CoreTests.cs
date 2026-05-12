@@ -1161,6 +1161,105 @@ public sealed class CoreTests
         Assert.Equal("other", parsed.Kind);
     }
 
+    // --- Empty-but-valid OCR results -----------------------------------------------------------
+    // RapidOCR (and any local provider) produces a perfectly valid empty result when a frame
+    // contains no readable text: `{"freeText": "", "lines": [], "tables": []}`. The parser
+    // should NOT flag this as a fallback, and the new precise-mode entrypoint must report
+    // IsFallback=false even when the structured value is fully empty.
+
+    [Fact]
+    public void ParseOcrWithModeReportsNotFallbackForGenuinelyEmptyValidJson()
+    {
+        const string raw = """{"freeText": "", "lines": [], "tables": []}""";
+
+        var result = StructuredResponseParser.ParseOcrWithMode(raw);
+
+        Assert.False(result.IsFallback, "an empty-but-parsed JSON result must not be flagged as a fallback");
+        Assert.Equal(string.Empty, result.Structured.FreeText);
+        Assert.Empty(result.Structured.Lines);
+        Assert.Empty(result.Structured.Tables);
+    }
+
+    [Fact]
+    public void IsTolerantFallbackHeuristicAlsoTreatsGenuinelyEmptyResultAsNotFallback()
+    {
+        // Disk-readers without access to the raw response use IsTolerantFallback as their
+        // heuristic. The fix tightens the heuristic so an empty FreeText + empty arrays is
+        // recognised as "successfully empty" rather than "fell back".
+        var emptyValid = new OcrFrameStructured(string.Empty, [], []);
+        var proseFallback = new OcrFrameStructured("Some prose the LLM emitted", [], []);
+
+        Assert.False(StructuredResponseParser.IsTolerantFallback(emptyValid));
+        Assert.True(StructuredResponseParser.IsTolerantFallback(proseFallback));
+    }
+
+    [Fact]
+    public void ParseOcrWithModeReportsFallbackForProseResponse()
+    {
+        const string raw = "Just a sentence with no JSON object.";
+
+        var result = StructuredResponseParser.ParseOcrWithMode(raw);
+
+        Assert.True(result.IsFallback);
+        Assert.Equal(raw, result.Structured.FreeText);
+        Assert.Empty(result.Structured.Lines);
+    }
+
+    [Fact]
+    public void ParseOcrWithModeReportsFallbackForMalformedJson()
+    {
+        const string raw = "{not actually json}";
+
+        var result = StructuredResponseParser.ParseOcrWithMode(raw);
+
+        Assert.True(result.IsFallback);
+    }
+
+    [Fact]
+    public void ParseOcrWithModeReportsNotFallbackForLinesOnlyResult()
+    {
+        const string raw = """{"freeText": "Hello", "lines": ["Hello"], "tables": []}""";
+
+        var result = StructuredResponseParser.ParseOcrWithMode(raw);
+
+        Assert.False(result.IsFallback);
+        Assert.Equal(["Hello"], result.Structured.Lines);
+    }
+
+    [Fact]
+    public void ParseVisionWithModeReportsNotFallbackForGenuinelyEmptyValidJson()
+    {
+        const string raw = """{"kind": "slide", "title": null, "bullets": [], "codeBlocks": [], "charts": [], "uiElements": [], "freeText": ""}""";
+
+        var result = StructuredResponseParser.ParseVisionWithMode(raw);
+
+        Assert.False(result.IsFallback, "an empty-but-parsed JSON result must not be flagged as a fallback");
+        Assert.Equal("slide", result.Structured.Kind);
+        Assert.Equal(string.Empty, result.Structured.FreeText);
+    }
+
+    [Fact]
+    public void ParseVisionWithModeReportsFallbackForProseResponse()
+    {
+        const string raw = "The slide describes throughput numbers.";
+
+        var result = StructuredResponseParser.ParseVisionWithMode(raw);
+
+        Assert.True(result.IsFallback);
+        Assert.Equal("other", result.Structured.Kind);
+    }
+
+    [Fact]
+    public void IsTolerantFallbackVisionAlsoTreatsGenuinelyEmptyResultAsNotFallback()
+    {
+        // Empty vision result with no FreeText is not a fallback; "other" + non-empty FreeText is.
+        var emptyValid = new VisionFrameStructured("other", null, [], [], [], [], string.Empty);
+        var proseFallback = new VisionFrameStructured("other", null, [], [], [], [], "Some LLM prose.");
+
+        Assert.False(StructuredResponseParser.IsTolerantFallback(emptyValid));
+        Assert.True(StructuredResponseParser.IsTolerantFallback(proseFallback));
+    }
+
     [Fact]
     public async Task ConfigStoreSupportsSlideSettings()
     {
@@ -1300,7 +1399,7 @@ public sealed class CoreTests
         var versionExitCode = await CliApp.RunAsync(["version"], stdout, stderr, CancellationToken.None);
 
         Assert.Equal(0, versionExitCode);
-        Assert.Contains("0.1.0", stdout.ToString(), StringComparison.Ordinal);
+        Assert.Contains(ReplayVersion.Current, stdout.ToString(), StringComparison.Ordinal);
 
         stdout.GetStringBuilder().Clear();
         var infoExitCode = await CliApp.RunAsync(["info", "--json"], stdout, stderr, CancellationToken.None);

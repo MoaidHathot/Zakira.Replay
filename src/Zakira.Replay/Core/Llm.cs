@@ -21,7 +21,7 @@ public sealed record LlmRequest(
 
 public sealed class GitHubCopilotLlmProvider : ILlmProvider
 {
-    public const string DefaultModel = "gpt-5.5";
+    public const string DefaultModel = "gpt-5.4";
 
     public string Name => LlmProviders.GitHubCopilot;
 

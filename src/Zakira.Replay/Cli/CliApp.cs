@@ -35,6 +35,7 @@ public static class CliApp
             "deps" or "dependencies" => await RunDepsAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "auth" => await RunAuthAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "config" => await RunConfigAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
+            "vision" => await RunVisionAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
             "mcp" => await RunMcpAsync(rest, stdout, stderr, cancellationToken).ConfigureAwait(false),
             _ => UnknownCommand(command, stderr)
         };
@@ -194,6 +195,9 @@ public static class CliApp
         var ocrReport = BuildOcrDoctorReport();
         reports.Add(ocrReport);
 
+        var visionReport = BuildVisionDoctorReport();
+        reports.Add(visionReport);
+
         if (parsed.GetBool("json", defaultValue: false))
         {
             stdout.WriteLine(JsonSerializer.Serialize(new DoctorReport(DateTimeOffset.UtcNow, reports), CliJson.Options));
@@ -286,6 +290,60 @@ public static class CliApp
         {
             return new DoctorDependencyReport(
                 Name: "ocr-models",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "config",
+                Message: ex.Message,
+                RunnableError: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Inspect the resolved local-vision model files and return a synthetic
+    /// <see cref="DoctorDependencyReport"/> so <c>doctor</c> exposes whether the
+    /// <c>--vision-provider local --local-vision-mode clip</c> path is wired up.
+    /// Heuristic mode always reports as ready; clip / clip-blip modes report missing
+    /// files explicitly so users see exactly what to fetch.
+    /// </summary>
+    private static DoctorDependencyReport BuildVisionDoctorReport()
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var options = LocalVisionOptions.Resolve(config);
+
+            if (options.Mode == LocalVisionMode.Heuristic)
+            {
+                return new DoctorDependencyReport(
+                    Name: "vision-models",
+                    IsFound: true,
+                    IsRunnable: true,
+                    Path: options.ModelDirectory,
+                    Source: "config",
+                    Message: "mode=heuristic (no models required)",
+                    RunnableError: null);
+            }
+
+            var missing = options.MissingFilesFor(options.Mode);
+            var ok = missing.Count == 0;
+            var modeLabel = VisionProviderFactory.FormatMode(options.Mode);
+            var message = ok
+                ? $"mode={modeLabel}, dir={options.ModelDirectory}"
+                : $"mode={modeLabel} (run `zakira-replay deps install vision --mode {modeLabel}` to download)";
+            return new DoctorDependencyReport(
+                Name: "vision-models",
+                IsFound: ok,
+                IsRunnable: ok,
+                Path: options.ClipImageEncoderPath,
+                Source: "config",
+                Message: message,
+                RunnableError: ok ? null : $"missing: {string.Join(", ", missing.Select(Path.GetFileName))}");
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "vision-models",
                 IsFound: false,
                 IsRunnable: false,
                 Path: null,
@@ -873,7 +931,8 @@ public static class CliApp
                 var progress = new Progress<string>(message => stdout.WriteLine(message));
                 var whisperModelSize = parsed.Get("whisper-model") ?? parsed.Get("model-size");
                 var ocrLanguagePack = parsed.Get("language") ?? parsed.Get("ocr-language") ?? parsed.Get("language-pack");
-                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken, whisperModelSize, ocrLanguagePack).ConfigureAwait(false);
+                var visionMode = parsed.Get("mode") ?? parsed.Get("vision-mode") ?? parsed.Get("local-vision-mode");
+                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken, whisperModelSize, ocrLanguagePack, visionMode).ConfigureAwait(false);
                 stdout.WriteLine();
                 stdout.WriteLine("Dependency install complete.");
                 stdout.WriteLine($"Portable directory: {result.PortableDirectory}");
@@ -881,6 +940,7 @@ public static class CliApp
                 stdout.WriteLine($"OCR model directory: {result.OcrModelDirectory}");
                 stdout.WriteLine($"Whisper model directory: {result.WhisperModelDirectory}");
                 stdout.WriteLine($"Diarization model directory: {result.DiarizationModelDirectory}");
+                stdout.WriteLine($"Vision model directory: {result.VisionModelDirectory}");
                 foreach (var item in result.Items)
                 {
                     stdout.WriteLine($"{item.Name}: {item.Message} ({item.Path})");
@@ -907,11 +967,34 @@ public static class CliApp
                 stdout.WriteLine($"Diarization model directory: {installer.Layout.DiarizationModelDirectory}");
                 stdout.WriteLine($"Diarization segmentation: {installer.GetDiarizationSegmentationPath()}");
                 stdout.WriteLine($"Diarization embedding: {installer.GetDiarizationEmbeddingPath()}");
+                stdout.WriteLine($"Vision model directory: {installer.Layout.VisionModelDirectory}");
+                stdout.WriteLine($"Vision CLIP image encoder: {installer.GetVisionClipImageEncoderPath()}");
+                stdout.WriteLine($"Vision CLIP text encoder: {installer.GetVisionClipTextEncoderPath()}");
+                stdout.WriteLine($"Vision CLIP kind embeddings: {installer.GetVisionClipKindEmbeddingsPath()}");
+                stdout.WriteLine($"Vision CLIP tokenizer vocab: {installer.GetVisionClipTokenizerVocabPath()}");
+                stdout.WriteLine($"Vision CLIP tokenizer merges: {installer.GetVisionClipTokenizerMergesPath()}");
                 return 0;
 
             default:
                 throw new ReplayException("Usage: zakira-replay deps <install|path> ...");
         }
+    }
+
+    private static async Task<int> RunVisionAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
+    {
+        if (args.Length == 0)
+        {
+            throw new ReplayException("Usage: zakira-replay vision <generate-clip-embeddings> ...");
+        }
+
+        var subcommand = args[0].ToLowerInvariant().Replace('_', '-');
+        var rest = args.Skip(1).ToArray();
+        return subcommand switch
+        {
+            "generate-clip-embeddings" or "generate-embeddings" or "clip-embeddings"
+                => await VisionGenerateClipEmbeddingsCommand.RunAsync(rest, stdout, cancellationToken).ConfigureAwait(false),
+            _ => throw new ReplayException($"Unknown vision subcommand: {args[0]}. Use `vision generate-clip-embeddings`.")
+        };
     }
 
 

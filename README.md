@@ -452,22 +452,36 @@ Three selectable sub-modes via `--local-vision-mode`:
 
 OCR is auto-enabled when `--vision-provider local` is passed without `--ocr` (the structured fields need it). The pipeline records `VISION_LOCAL_OCR_REQUIRED` (info) so orchestrators can see the implicit decision.
 
-### Bring your own ONNX models
+### Installing CLIP models for `clip` mode (one-time setup)
 
-This release does not ship curated CLIP/BLIP download URLs. To use `clip` or `clip-blip` modes, export the models yourself (or grab community ONNX exports) and point Zakira.Replay at them:
+For `clip` mode the toolchain auto-downloads the CLIP ViT-B/32 ONNX export from Hugging Face (`Xenova/clip-vit-base-patch32`, community-maintained) and generates a small kind-embeddings binary from the canonical prompts hard-coded in `LocalOnnxVisionProvider.ClipKindPrompts`:
 
 ```bash
-# CLIP ViT-B/32 (~150 MB total)
-zakira-replay config set vision.local.clipImageEncoderPath /path/to/clip-image-encoder.onnx
-zakira-replay config set vision.local.clipKindEmbeddingsPath /path/to/clip-kind-embeddings.bin
+# Download CLIP image + text encoder ONNX + tokenizer (~150 MB)
+zakira-replay deps install vision --mode clip
 
-# BLIP-base captioning (~400 MB additional)
+# Run the 7 kind prompts through the text encoder once; writes clip-kind-embeddings.bin (14336 bytes)
+zakira-replay vision generate-clip-embeddings
+
+# Confirm doctor reports vision-models: found
+zakira-replay doctor
+```
+
+The files land under `<portable-dir>/models/vision/` (defaults to `%LOCALAPPDATA%\Zakira.Replay\portable\models\vision` on Windows, `~/.local/share/Zakira.Replay/portable/models/vision` on Linux). Override per-file paths with `vision.local.clip*Path` config keys when you want to point at a custom export.
+
+Hugging Face downloads track the `main` branch of the Xenova repo. If upstream changes the export, downloads keep succeeding but inference might fail — the provider then surfaces `VISION_LOCAL_INIT_FAILED` with the exception so the orchestrator can branch.
+
+### Bringing your own BLIP (for `clip-blip` mode — deferred to a future release)
+
+`clip-blip` mode is structurally wired but **BLIP auto-download is not in this release**. The provider needs three files (image encoder ONNX, decoder ONNX, WordPiece vocab) which can be sourced from `Salesforce/blip-image-captioning-base` after exporting to ONNX via Optimum, or from a community ONNX export. Point Zakira.Replay at the files:
+
+```bash
 zakira-replay config set vision.local.blipImageEncoderPath /path/to/blip-image-encoder.onnx
 zakira-replay config set vision.local.blipDecoderPath /path/to/blip-decoder.onnx
 zakira-replay config set vision.local.blipVocabPath /path/to/blip-vocab.txt
 ```
 
-If model files are missing, the provider degrades gracefully (clip-blip → clip → heuristic) and records `VISION_LOCAL_MODE_DEGRADED` (warning) listing which files were not found so orchestrators can wire up the paths or pin to a different mode.
+If any file is missing, the provider degrades gracefully to `clip` mode and records `VISION_LOCAL_MODE_DEGRADED` (warning) so orchestrators can branch.
 
 ### Honest limitations
 

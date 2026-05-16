@@ -239,7 +239,7 @@ Agent behavior:
 - Combine four "local" surfaces: STT via `local-whisper`, OCR via `local`, vision via the new `local` provider, and (optionally) speaker diarization via local sherpa-onnx.
 - `--ocr-provider local` is already the default. Add `--vision-provider local` to keep vision off the LLM as well.
 - The local vision provider auto-enables OCR when omitted; emits `VISION_LOCAL_OCR_REQUIRED` (info) so the orchestrator can see the implicit decision. Pass `--ocr` explicitly to silence.
-- `--local-vision-mode heuristic` (zero models) works out of the box. `clip` and `clip-blip` require user-supplied ONNX files configured via `vision.local.clip*Path` / `vision.local.blip*Path`. Source: `openai/clip-vit-base-patch32` ONNX export + `Salesforce/blip-image-captioning-base` ONNX export. Missing files cause graceful degradation (`clip-blip` → `clip` → `heuristic`) with `VISION_LOCAL_MODE_DEGRADED` warnings.
+- `--local-vision-mode heuristic` (zero models) works out of the box. `--local-vision-mode clip` adds CLIP zero-shot kind classification — install with `zakira-replay deps install vision --mode clip` followed by `zakira-replay vision generate-clip-embeddings` (~150 MB one-time). `--local-vision-mode clip-blip` additionally captions frames with BLIP — **clip-blip auto-download is deferred to a future release**; if the user wants captions they currently need to bring their own BLIP ONNX and configure `vision.local.blip*Path`. Missing files cause graceful degradation (`clip-blip` → `clip` → `heuristic`) with `VISION_LOCAL_MODE_DEGRADED` warnings.
 
 ```json
 {

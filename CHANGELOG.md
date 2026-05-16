@@ -73,15 +73,24 @@ warning codes, env vars, config keys) so orchestrators can plan migrations.
 - `queue.schema.json`: same two fields on the embedded `analyzeRequest`.
 
 ### Notes for orchestrators
-- The `clip` and `clip-blip` modes require user-supplied ONNX files. There are no curated
-  download URLs in this release. Configure paths via `vision.local.clip*Path` /
-  `vision.local.blip*Path` (or the matching env vars). Recommended sources:
-  `openai/clip-vit-base-patch32` (ONNX export) and `Salesforce/blip-image-captioning-base`
-  (ONNX export). `heuristic` mode works out of the box with zero downloads.
+- `clip` mode now installs end-to-end via `zakira-replay deps install vision --mode clip` (downloads CLIP ViT-B/32 ONNX from `Xenova/clip-vit-base-patch32` on Hugging Face, ~150 MB) followed by `zakira-replay vision generate-clip-embeddings` (writes the 14336-byte `clip-kind-embeddings.bin`). `clip-blip` still requires user-supplied BLIP ONNX files (auto-download deferred to a future release pending a validated upstream export); see README "Bringing your own BLIP".
 - Vision quality with the local provider is structurally weaker than the LLM path on
   charts (always empty), diagrams without labels, icon enumeration, and free-form scene
   description. Use it where text-on-screen extraction matters more than free-form scene
   understanding (slide decks, code walkthroughs, dashboard captures).
+- **Demo C results vs heuristic baseline** (real run captured against the YouTube video
+  `Ws-Nc9S8i_Y`, a ThePrimeagen code-review screencast about the Shai-Hulud npm supply-chain
+  attack): heuristic mode classified 48/50 frames as `other` and 2/50 as `code`. Clip mode
+  classified 30/50 as `code`, 13/50 as `ui`, 7/50 as `slide`, and 0/50 as `other` — every
+  frame received a non-default kind. Some classifications were arguably imperfect (the
+  ChainPatrol headline frame at 00:59 classified as `code` because of its dark theme + dense
+  text, more accurately `slide`), but the upgrade over the heuristic-mode baseline is
+  unambiguous.
+
+### Tools
+- New `zakira-replay vision generate-clip-embeddings [--text-encoder <path>] [--vocab <path>] [--merges <path>] [--out <path>]` subcommand. Hand-rolled CLIP BPE tokenizer (`Cli/VisionGenerateClipEmbeddingsCommand.cs`) + ONNX Runtime text-encoder inference + L2-normalised 512-d output × 7 kind prompts → 14336-byte binary. No new NuGet dependency.
+- New `vision-models` row in `zakira-replay doctor` reporting which mode is ready.
+- `zakira-replay deps path` now also lists the vision model directory and the five CLIP file paths.
 
 ## [Unreleased] — Ad-hoc frame capture
 

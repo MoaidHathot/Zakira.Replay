@@ -12,6 +12,7 @@ public sealed class PortableDependencyInstaller
     public const string Ocr = "ocr";
     public const string WhisperModel = "whisper-model";
     public const string Diarization = "diarization";
+    public const string Vision = "vision";
     public const string All = "all";
     public const string DefaultOnnxModelFile = "model_quantized.onnx";
 
@@ -44,6 +45,16 @@ public sealed class PortableDependencyInstaller
     private const string DiarizationSegmentationUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx?download=true";
     private const string DiarizationEmbeddingUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
+    // Vision model sources. CLIP ViT-B/32 quantized ONNX from Xenova's community export (the same
+    // one transformers.js ships). Tracking the `main` branch to follow upstream fixes; the
+    // verification side is a load-time inference check in LocalOnnxVisionProvider rather than
+    // a content-hash comparison so silent upstream changes are detected by behaviour rather
+    // than by hash failures users can't act on.
+    private const string ClipVisionEncoderUrl = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/vision_model_quantized.onnx";
+    private const string ClipTextEncoderUrl = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/onnx/text_model_quantized.onnx";
+    private const string ClipTokenizerVocabUrl = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/vocab.json";
+    private const string ClipTokenizerMergesUrl = "https://huggingface.co/Xenova/clip-vit-base-patch32/resolve/main/merges.txt";
+
     private readonly ReplayConfig config;
     private readonly HttpClient httpClient;
 
@@ -62,7 +73,8 @@ public sealed class PortableDependencyInstaller
         GetOnnxModelDirectory(config),
         GetOcrModelDirectory(config),
         GetWhisperModelDirectory(config),
-        GetDiarizationModelDirectory(config));
+        GetDiarizationModelDirectory(config),
+        GetVisionModelDirectory(config));
 
     public string GetPortableExecutablePath(string executableName)
     {
@@ -97,6 +109,16 @@ public sealed class PortableDependencyInstaller
 
     public string GetDiarizationEmbeddingPath() => Path.Combine(Layout.DiarizationModelDirectory, DiarizationEmbeddingFile);
 
+    public string GetVisionClipImageEncoderPath() => Path.Combine(Layout.VisionModelDirectory, LocalVisionOptions.ClipImageEncoderFile);
+
+    public string GetVisionClipTextEncoderPath() => Path.Combine(Layout.VisionModelDirectory, LocalVisionOptions.ClipTextEncoderFile);
+
+    public string GetVisionClipKindEmbeddingsPath() => Path.Combine(Layout.VisionModelDirectory, LocalVisionOptions.ClipKindEmbeddingsFile);
+
+    public string GetVisionClipTokenizerVocabPath() => Path.Combine(Layout.VisionModelDirectory, "clip-vocab.json");
+
+    public string GetVisionClipTokenizerMergesPath() => Path.Combine(Layout.VisionModelDirectory, "clip-merges.txt");
+
     public static string GetDefaultWhisperModelDirectory()
     {
         return Path.Combine(GetDefaultPortableDirectory(), "models", "whisper");
@@ -105,6 +127,11 @@ public sealed class PortableDependencyInstaller
     public static string GetDefaultDiarizationModelDirectory()
     {
         return Path.Combine(GetDefaultPortableDirectory(), "models", "diarization");
+    }
+
+    public static string GetDefaultVisionModelDirectory()
+    {
+        return Path.Combine(GetDefaultPortableDirectory(), "models", "vision");
     }
 
     public static string GetDefaultPortableDirectory()
@@ -184,8 +211,15 @@ public sealed class PortableDependencyInstaller
                 case "sherpa":
                     AddUnique(normalized, Diarization);
                     break;
+                case Vision:
+                case "vision-models":
+                case "clip":
+                case "clip-blip":
+                case "local-vision":
+                    AddUnique(normalized, Vision);
+                    break;
                 default:
-                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, diarization, media, or all.");
+                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, diarization, vision, media, or all.");
             }
         }
 
@@ -198,7 +232,7 @@ public sealed class PortableDependencyInstaller
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize: null, ocrLanguagePack: null).ConfigureAwait(false);
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize: null, ocrLanguagePack: null, visionMode: null).ConfigureAwait(false);
     }
 
     public async Task<PortableDependencyInstallResult> InstallAsync(
@@ -208,7 +242,7 @@ public sealed class PortableDependencyInstaller
         CancellationToken cancellationToken,
         string? whisperModelSize)
     {
-        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize, ocrLanguagePack: null).ConfigureAwait(false);
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize, ocrLanguagePack: null, visionMode: null).ConfigureAwait(false);
     }
 
     public async Task<PortableDependencyInstallResult> InstallAsync(
@@ -218,6 +252,18 @@ public sealed class PortableDependencyInstaller
         CancellationToken cancellationToken,
         string? whisperModelSize,
         string? ocrLanguagePack)
+    {
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize, ocrLanguagePack, visionMode: null).ConfigureAwait(false);
+    }
+
+    public async Task<PortableDependencyInstallResult> InstallAsync(
+        IEnumerable<string>? targets,
+        bool force,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken,
+        string? whisperModelSize,
+        string? ocrLanguagePack,
+        string? visionMode)
     {
         var items = new List<PortableDependencyInstallItem>();
         var layout = Layout;
@@ -246,10 +292,13 @@ public sealed class PortableDependencyInstaller
                 case Diarization:
                     items.AddRange(await InstallDiarizationModelsAsync(force, progress, cancellationToken).ConfigureAwait(false));
                     break;
+                case Vision:
+                    items.AddRange(await InstallVisionModelsAsync(visionMode, force, progress, cancellationToken).ConfigureAwait(false));
+                    break;
             }
         }
 
-        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory, layout.WhisperModelDirectory, layout.DiarizationModelDirectory);
+        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory, layout.WhisperModelDirectory, layout.DiarizationModelDirectory, layout.VisionModelDirectory);
     }
 
     private async Task<PortableDependencyInstallItem> InstallYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -406,6 +455,67 @@ public sealed class PortableDependencyInstaller
         }
 
         return items;
+    }
+
+    /// <summary>
+    /// Installs ONNX model files for the local (no-LLM) vision provider. In v1 only the
+    /// <c>clip</c> mode is auto-downloadable: vision encoder, text encoder, and the CLIP BPE
+    /// tokenizer (vocab.json + merges.txt) sourced from the community-maintained
+    /// <c>Xenova/clip-vit-base-patch32</c> ONNX export on Hugging Face. The <c>clip-blip</c>
+    /// mode currently emits a friendly "configure paths manually" item — no public BLIP ONNX
+    /// has been validated against <see cref="LocalOnnxVisionProvider"/> in this release.
+    /// </summary>
+    private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallVisionModelsAsync(string? mode, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        var modelDirectory = Layout.VisionModelDirectory;
+        Directory.CreateDirectory(modelDirectory);
+
+        var resolvedMode = VisionProviderFactory.NormalizeMode(string.IsNullOrWhiteSpace(mode) ? "clip" : mode);
+        var items = new List<PortableDependencyInstallItem>();
+
+        if (resolvedMode == LocalVisionMode.Heuristic)
+        {
+            items.Add(new PortableDependencyInstallItem(Vision, modelDirectory, false, string.Empty, "heuristic mode requires no model files."));
+            return items;
+        }
+
+        // CLIP image encoder + text encoder + BPE tokenizer files. Same set for `clip` and
+        // `clip-blip` modes — the BLIP-specific files are emitted as a stub below.
+        var clipFiles = new (string Name, string Url)[]
+        {
+            (LocalVisionOptions.ClipImageEncoderFile, ClipVisionEncoderUrl),
+            (LocalVisionOptions.ClipTextEncoderFile, ClipTextEncoderUrl),
+            ("clip-vocab.json", ClipTokenizerVocabUrl),
+            ("clip-merges.txt", ClipTokenizerMergesUrl)
+        };
+
+        foreach (var file in clipFiles)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var destination = Path.Combine(modelDirectory, file.Name);
+            var installed = await DownloadFileAsync(file.Url, destination, force, progress, cancellationToken).ConfigureAwait(false);
+            items.Add(new PortableDependencyInstallItem(Vision, destination, installed, file.Url, installed ? "downloaded" : "already exists"));
+        }
+
+        if (resolvedMode == LocalVisionMode.ClipBlip)
+        {
+            items.Add(new PortableDependencyInstallItem(
+                Vision,
+                Path.Combine(modelDirectory, LocalVisionOptions.BlipImageEncoderFile),
+                false,
+                string.Empty,
+                "BLIP auto-download is not available in this release. Configure vision.local.blipImageEncoderPath / blipDecoderPath / blipVocabPath manually to point at an existing ONNX export, or stick with --local-vision-mode clip."));
+        }
+
+        return items;
+    }
+
+    private static string GetVisionModelDirectory(ReplayConfig config)
+    {
+        return Path.GetFullPath(Environment.ExpandEnvironmentVariables(FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_VISION_MODEL_DIRECTORY"),
+            config.Vision.Local.ModelDirectory,
+            GetDefaultVisionModelDirectory())!));
     }
 
     private async Task<bool> DownloadFileAsync(string url, string destinationPath, bool force, IProgress<string>? progress, CancellationToken cancellationToken, (string Name, string Value)? authorizationHeader = null)
@@ -581,7 +691,7 @@ public sealed class PortableDependencyInstaller
     private sealed record OnnxDownloadFile(string Name, string Url);
 }
 
-public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory, string WhisperModelDirectory, string DiarizationModelDirectory);
+public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory, string WhisperModelDirectory, string DiarizationModelDirectory, string VisionModelDirectory);
 
 public sealed record PortableDependencyInstallResult(
     IReadOnlyList<PortableDependencyInstallItem> Items,
@@ -589,7 +699,8 @@ public sealed record PortableDependencyInstallResult(
     string OnnxModelDirectory,
     string OcrModelDirectory,
     string WhisperModelDirectory,
-    string DiarizationModelDirectory);
+    string DiarizationModelDirectory,
+    string VisionModelDirectory);
 
 public sealed record PortableDependencyInstallItem(
     string Name,

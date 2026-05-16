@@ -37,6 +37,24 @@
     "warnings": {
       "type": "array",
       "items": { "$ref": "#/$defs/replayWarning" }
+    },
+    "timings": {
+      "description": "Wall-clock seconds per pipeline stage. Stages absent from the map did not run. Stage names are open (orchestrators must tolerate unknown keys); see RunTimingStages for the canonical set used by AnalysisPipeline.",
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["totalSeconds", "stages"],
+          "properties": {
+            "totalSeconds": { "type": "number", "minimum": 0 },
+            "stages": {
+              "type": "object",
+              "additionalProperties": { "type": "number", "minimum": 0 }
+            }
+          }
+        }
+      ]
     }
   },
   "$defs": {

@@ -34,7 +34,7 @@
     "useVision": { "type": "boolean" },
     "maxAiFrames": { "type": "integer", "minimum": 0 },
     "model": { "type": "string" },
-    "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai"] },
+    "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai", "ollama", "local-whisper"] },
     "force": { "type": "boolean" },
     "useCache": { "type": "boolean" },
     "frameStrategy": { "type": "string", "enum": ["interval", "scene", "every-frame"] },
@@ -79,6 +79,30 @@
     "authProfile": {
       "description": "Name of a Playwright storage-state profile (created by `zakira-replay auth login`) to load into the browser context for SSO/cookie-gated sources. Only consulted in browser or auto capture mode. Emits AUTH_PROFILE_NOT_FOUND or AUTH_PROFILE_STALE warnings.",
       "type": ["string", "null"]
+    },
+    "useDiarization": {
+      "description": "Run local sherpa-onnx speaker diarization (pyannote-segmentation-3.0 + 3D-Speaker embedding) over the audio after STT, attributing each transcript segment to a SPEAKER_NN cluster.",
+      "type": "boolean"
+    },
+    "numSpeakers": {
+      "description": "Hard cluster count for diarization when the orchestrator knows how many speakers are present. When null, `diarizationThreshold` controls the clustering cutoff.",
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
+    "diarizationThreshold": {
+      "description": "Cosine-distance cutoff for agglomerative clustering when `numSpeakers` is null. Lower values produce more clusters. Defaults to 0.5.",
+      "type": ["number", "null"],
+      "exclusiveMinimum": 0
+    },
+    "visionProvider": {
+      "description": "Vision provider to use when `useVision` is true. `copilot` (default) routes per-slide vision through the configured LLM. `local` runs the fully-on-device LocalOnnxVisionProvider — no LLM, no network — with structured fields derived from OCR plus optional CLIP zero-shot classification and BLIP image captioning.",
+      "type": "string",
+      "enum": ["copilot", "local"]
+    },
+    "localVisionMode": {
+      "description": "Sub-mode for the local vision provider. `heuristic` uses zero models. `clip` adds CLIP zero-shot classification for the `kind` field. `clip-blip` (default for the local provider) additionally runs BLIP image captioning to fill `freeText`. Ignored when `visionProvider` is `copilot`.",
+      "type": ["string", "null"],
+      "enum": ["heuristic", "clip", "clip-blip", null]
     }
   }
 }

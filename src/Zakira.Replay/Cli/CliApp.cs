@@ -52,6 +52,32 @@ public static class CliApp
         var parsed = CommandOptions.Parse(args);
         var configStore = new ConfigStore();
         var config = await configStore.EnsureExistsAsync(cancellationToken).ConfigureAwait(false);
+        var installer = new PortableDependencyInstaller(config);
+        var whisperOptions = SafeResolveWhisperOptions(config);
+        var ocrPaths = SafeResolveOcrPaths(config);
+        var dependencies = new DependencyResolver(config);
+        var dependencyStatuses = dependencies.GetAllStatuses().ToDictionary(s => s.Name, s => s);
+
+        var resolvedDependencies = new ReplayInfoDependencies(
+            PortableDirectory: installer.Layout.PortableDirectory,
+            OcrModelDirectory: installer.Layout.OcrModelDirectory,
+            OcrLanguagePack: ocrPaths?.LanguagePack ?? config.Ocr.Local.LanguagePack ?? OcrLanguagePacks.Latin,
+            OnnxModelDirectory: installer.Layout.OnnxModelDirectory,
+            WhisperModelDirectory: installer.Layout.WhisperModelDirectory,
+            WhisperModelPath: whisperOptions?.ModelPath,
+            WhisperModelSize: config.Llm.LocalWhisper.ModelSize,
+            DiarizationModelDirectory: installer.Layout.DiarizationModelDirectory,
+            OllamaEndpoint: config.Llm.Ollama.Endpoint,
+            OllamaModel: config.Llm.Ollama.Model,
+            OllamaVisionModel: config.Llm.Ollama.VisionModel);
+
+        var capabilities = new ReplayInfoCapabilities(
+            LocalOcrReady: ocrPaths is not null && ocrPaths.MissingFiles().Count == 0,
+            LocalWhisperReady: whisperOptions is not null && !string.IsNullOrWhiteSpace(whisperOptions.ModelPath) && File.Exists(whisperOptions.ModelPath),
+            DiarizationReady: TryCheckDiarizationReady(config),
+            YtDlpAvailable: dependencyStatuses.TryGetValue("yt-dlp", out var ytdlp) && ytdlp.IsFound,
+            FfmpegAvailable: dependencyStatuses.TryGetValue("ffmpeg", out var ffmpeg) && ffmpeg.IsFound);
+
         var info = new ReplayInfo(
             Name: AppInfo.Name,
             Version: AppInfo.Version,
@@ -67,6 +93,7 @@ public static class CliApp
                 "transcript-normalization.schema.json",
                 "chapters.schema.json",
                 "clip.schema.json",
+                "frame-capture.schema.json",
                 "search-index.schema.json",
                 "batch.schema.json",
                 "batch-result.schema.json",
@@ -78,7 +105,9 @@ public static class CliApp
                 "vision.schema.json",
                 "evidence-aligned.schema.json",
                 "captions-discovered.schema.json"
-            ]);
+            ],
+            ResolvedDependencies: resolvedDependencies,
+            Capabilities: capabilities);
 
         if (parsed.GetBool("json", defaultValue: false))
         {
@@ -91,8 +120,47 @@ public static class CliApp
         stdout.WriteLine($"Runs: {info.RunsDirectory}");
         stdout.WriteLine($"LLM provider: {info.LlmProvider}");
         stdout.WriteLine($"Default model: {info.DefaultModel}");
+        stdout.WriteLine($"OCR pack: {resolvedDependencies.OcrLanguagePack}");
+        stdout.WriteLine($"Capabilities: local-ocr={capabilities.LocalOcrReady}, local-whisper={capabilities.LocalWhisperReady}, diarization={capabilities.DiarizationReady}, yt-dlp={capabilities.YtDlpAvailable}, ffmpeg={capabilities.FfmpegAvailable}");
         stdout.WriteLine("Schemas: " + string.Join(", ", info.Schemas));
         return 0;
+    }
+
+    private static LocalWhisperOptions? SafeResolveWhisperOptions(ReplayConfig config)
+    {
+        try
+        {
+            return LocalWhisperOptions.Resolve(config);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static LocalOcrModelPaths? SafeResolveOcrPaths(ReplayConfig config)
+    {
+        try
+        {
+            return LocalOcrModelPaths.Resolve(config);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    private static bool TryCheckDiarizationReady(ReplayConfig config)
+    {
+        try
+        {
+            var options = DiarizationOptions.Resolve(config);
+            return options.MissingFiles().Count == 0;
+        }
+        catch
+        {
+            return false;
+        }
     }
 
     private static async Task<int> RunDoctorAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
@@ -116,6 +184,15 @@ public static class CliApp
 
         var whisperReport = BuildWhisperDoctorReport();
         reports.Add(whisperReport);
+
+        var ollamaReport = await BuildOllamaDoctorReportAsync(cancellationToken).ConfigureAwait(false);
+        reports.Add(ollamaReport);
+
+        var diarizationReport = BuildDiarizationDoctorReport();
+        reports.Add(diarizationReport);
+
+        var ocrReport = BuildOcrDoctorReport();
+        reports.Add(ocrReport);
 
         if (parsed.GetBool("json", defaultValue: false))
         {
@@ -142,9 +219,10 @@ public static class CliApp
     }
 
     /// <summary>
-    /// Inspect the resolved local Whisper model and return a synthetic
-    /// <see cref="DoctorDependencyReport"/> so <c>doctor</c> exposes the same diagnostic surface
-    /// for the new <c>--llm-provider local-whisper</c> path as for ffmpeg/yt-dlp/ONNX/OCR.
+    /// Probe the configured Ollama daemon with a 2-second HEAD-ish request against
+    /// <c>/api/tags</c> (cheap; daemon answers immediately when up). Synthesises a
+    /// <c>DoctorDependencyReport</c> so users get a clear "Ollama daemon running" or "Ollama
+    /// daemon unreachable" signal alongside the other dependencies.
     /// </summary>
     private static DoctorDependencyReport BuildWhisperDoctorReport()
     {
@@ -176,6 +254,152 @@ public static class CliApp
                 Source: "config",
                 Message: ex.Message,
                 RunnableError: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Inspect the resolved local OCR models and return a synthetic
+    /// <see cref="DoctorDependencyReport"/> showing the configured language pack and the
+    /// missing-file list (if any). Mirrors the Whisper / diarization probes.
+    /// </summary>
+    private static DoctorDependencyReport BuildOcrDoctorReport()
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var paths = LocalOcrModelPaths.Resolve(config);
+            var missing = paths.MissingFiles();
+            var ok = missing.Count == 0;
+            var message = ok
+                ? $"pack={paths.LanguagePack}, dir={Path.GetDirectoryName(paths.RecognitionPath)}"
+                : $"pack={paths.LanguagePack} (run `zakira-replay deps install ocr --language {paths.LanguagePack}` to download)";
+            return new DoctorDependencyReport(
+                Name: "ocr-models",
+                IsFound: ok,
+                IsRunnable: ok,
+                Path: paths.RecognitionPath,
+                Source: "config",
+                Message: message,
+                RunnableError: ok ? null : $"missing: {string.Join(", ", missing.Select(Path.GetFileName))}");
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "ocr-models",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "config",
+                Message: ex.Message,
+                RunnableError: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Inspect the resolved diarization models and return a synthetic
+    /// <see cref="DoctorDependencyReport"/> so <c>doctor</c> exposes whether the
+    /// <c>--diarize</c> path is wired up.
+    /// </summary>
+    private static DoctorDependencyReport BuildDiarizationDoctorReport()
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var options = DiarizationOptions.Resolve(config);
+            var missing = options.MissingFiles();
+            var ok = missing.Count == 0;
+            var message = ok
+                ? $"provider={config.Diarization.Provider}, numSpeakers={(config.Diarization.NumSpeakers?.ToString() ?? "auto")}, threshold={(config.Diarization.Threshold?.ToString("0.00") ?? "0.50")}"
+                : "Run `zakira-replay deps install diarization` to download.";
+            return new DoctorDependencyReport(
+                Name: "diarization-models",
+                IsFound: ok,
+                IsRunnable: ok,
+                Path: options.SegmentationModelPath,
+                Source: "config",
+                Message: message,
+                RunnableError: ok ? null : $"missing: {string.Join(", ", missing.Select(Path.GetFileName))}");
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "diarization-models",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "config",
+                Message: ex.Message,
+                RunnableError: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Probe the configured Ollama daemon with a 2-second HEAD-ish request against
+    /// <c>/api/tags</c> (cheap; daemon answers immediately when up). Synthesises a
+    /// <c>DoctorDependencyReport</c> so users get a clear "Ollama daemon running" or "Ollama
+    /// daemon unreachable" signal alongside the other dependencies.
+    /// </summary>
+    private static async Task<DoctorDependencyReport> BuildOllamaDoctorReportAsync(CancellationToken cancellationToken)
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var endpointValue = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OLLAMA_ENDPOINT")
+                ?? Environment.GetEnvironmentVariable("OLLAMA_HOST")
+                ?? config.Llm.Ollama.Endpoint
+                ?? OllamaLlmProvider.DefaultEndpoint;
+
+            if (!Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpoint))
+            {
+                return new DoctorDependencyReport(
+                    Name: "ollama",
+                    IsFound: false,
+                    IsRunnable: false,
+                    Path: endpointValue,
+                    Source: "config",
+                    Message: $"Invalid Ollama endpoint: '{endpointValue}'",
+                    RunnableError: "invalid endpoint");
+            }
+
+            using var http = new HttpClient { Timeout = TimeSpan.FromSeconds(2) };
+            using var response = await http.GetAsync(new Uri(endpoint, "/api/tags"), cancellationToken).ConfigureAwait(false);
+            if (response.IsSuccessStatusCode)
+            {
+                var configured = string.IsNullOrWhiteSpace(config.Llm.Ollama.Model)
+                    ? OllamaLlmProvider.DefaultChatModel
+                    : config.Llm.Ollama.Model;
+                var vision = string.IsNullOrWhiteSpace(config.Llm.Ollama.VisionModel)
+                    ? "<none>"
+                    : config.Llm.Ollama.VisionModel;
+                return new DoctorDependencyReport(
+                    Name: "ollama",
+                    IsFound: true,
+                    IsRunnable: true,
+                    Path: endpoint.ToString(),
+                    Source: "daemon",
+                    Message: $"model={configured}, visionModel={vision}",
+                    RunnableError: null);
+            }
+
+            return new DoctorDependencyReport(
+                Name: "ollama",
+                IsFound: false,
+                IsRunnable: false,
+                Path: endpoint.ToString(),
+                Source: "daemon",
+                Message: $"daemon responded {(int)response.StatusCode}",
+                RunnableError: response.ReasonPhrase);
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "ollama",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "daemon",
+                Message: $"daemon unreachable: {ex.Message}",
+                RunnableError: "daemon unreachable");
         }
     }
 
@@ -228,15 +452,115 @@ public static class CliApp
         return RunPipelineAsync(request, stdout, cancellationToken);
     }
 
-    private static Task<int> RunFramesAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
+    private static async Task<int> RunFramesAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
     {
         var parsed = CommandOptions.Parse(args);
-        var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay frames <url-or-file> [--count <count>] [--run-id <id>]");
-        var count = parsed.GetInt("count", parsed.GetInt("frames", 500));
-        var runId = parsed.Get("run-id");
-        var request = CreateAnalyzeRequest(parsed, source, includeTranscript: false, frameCount: count, runId);
+        var source = parsed.GetRequiredPositional("source", "Usage: zakira-replay frames <url-or-file> [--at <timestamps>] [--from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--count <count>] [--run-id <id>]");
 
-        return RunPipelineAsync(request, stdout, cancellationToken);
+        var atRaw = parsed.Get("at") ?? parsed.Get("timestamps");
+        var fromRaw = parsed.Get("from");
+        var toRaw = parsed.Get("to");
+        var hasAdHocFlags = !string.IsNullOrWhiteSpace(atRaw) || !string.IsNullOrWhiteSpace(fromRaw) || !string.IsNullOrWhiteSpace(toRaw);
+
+        if (!hasAdHocFlags)
+        {
+            // Backward-compatible "frames-only" full analyze: equivalent to `analyze --no-transcript`.
+            var count = parsed.GetInt("count", parsed.GetInt("frames", 500));
+            var runId = parsed.Get("run-id");
+            var request = CreateAnalyzeRequest(parsed, source, includeTranscript: false, frameCount: count, runId);
+            return await RunPipelineAsync(request, stdout, cancellationToken).ConfigureAwait(false);
+        }
+
+        var captureRequest = BuildFrameCaptureRequest(parsed, source, atRaw, fromRaw, toRaw);
+        var service = CreateFrameCaptureService();
+        var progress = new Progress<string>(message => stdout.WriteLine(message));
+        var result = await service.CaptureAsync(captureRequest, progress, cancellationToken).ConfigureAwait(false);
+
+        if (parsed.GetBool("json", defaultValue: false))
+        {
+            stdout.WriteLine(JsonSerializer.Serialize(new
+            {
+                runId = result.Run.Id,
+                artifactDirectory = result.Run.Directory,
+                manifestPath = result.Run.GetPath("frame-capture.json"),
+                frameCount = result.Manifest.Frames.Count,
+                frames = result.Manifest.Frames.Select(frame => new
+                {
+                    id = frame.Id,
+                    path = result.Run.GetPath(frame.Path),
+                    relativePath = frame.Path,
+                    timestampSeconds = frame.TimestampSeconds,
+                    timestampLabel = frame.TimestampLabel,
+                    perceptualHash = frame.PerceptualHash
+                }),
+                warnings = result.Manifest.Warnings
+            }, CliJson.Options));
+            return 0;
+        }
+
+        stdout.WriteLine();
+        stdout.WriteLine($"Captured {result.Manifest.Frames.Count} frame(s) into {result.Run.Directory}.");
+        foreach (var frame in result.Manifest.Frames)
+        {
+            stdout.WriteLine($"  {frame.TimestampLabel}  {result.Run.GetPath(frame.Path)}");
+        }
+
+        foreach (var warning in result.Manifest.Warnings)
+        {
+            stdout.WriteLine($"[{warning.Severity}] {warning.Code}: {warning.Message}");
+        }
+
+        return 0;
+    }
+
+    private static FrameCaptureRequest BuildFrameCaptureRequest(CommandOptions parsed, string source, string? atRaw, string? fromRaw, string? toRaw)
+    {
+        var hasAt = !string.IsNullOrWhiteSpace(atRaw);
+        var hasFromOrTo = !string.IsNullOrWhiteSpace(fromRaw) || !string.IsNullOrWhiteSpace(toRaw);
+        if (hasAt && hasFromOrTo)
+        {
+            throw new ReplayException("`--at` and `--from`/`--to` are mutually exclusive.");
+        }
+
+        IReadOnlyList<TimeSpan>? timestamps = null;
+        TimeSpan? rangeStart = null;
+        TimeSpan? rangeEnd = null;
+
+        if (hasAt)
+        {
+            timestamps = FrameCaptureInput.ParseTimestamps(atRaw!, "at");
+        }
+        else
+        {
+            if (string.IsNullOrWhiteSpace(fromRaw) || string.IsNullOrWhiteSpace(toRaw))
+            {
+                throw new ReplayException("Window capture requires both `--from` and `--to`.");
+            }
+
+            rangeStart = Timestamp.ParseRequired(fromRaw!, "from");
+            rangeEnd = Timestamp.ParseRequired(toRaw!, "to");
+        }
+
+        var strategy = parsed.Get("strategy") ?? parsed.Get("frame-strategy") ?? FrameSelectionStrategies.Interval;
+        var maxEdge = parsed.GetOptionalInt("max-edge") ?? parsed.GetOptionalInt("max-long-edge-pixels");
+        var quality = parsed.GetOptionalInt("quality") ?? parsed.GetOptionalInt("jpeg-quality");
+        var phash = parsed.GetBool("phash", defaultValue: false) || parsed.GetBool("perceptual-hash", defaultValue: false);
+        var browserAuth = parsed.Get("browser-auth");
+
+        return new FrameCaptureRequest(
+            Source: source,
+            Timestamps: timestamps,
+            RangeStart: rangeStart,
+            RangeEnd: rangeEnd,
+            RangeCount: parsed.GetOptionalInt("count") ?? parsed.GetOptionalInt("frames"),
+            RangeStrategy: strategy,
+            RunId: parsed.Get("run-id"),
+            MaxLongEdgePixels: maxEdge,
+            JpegQuality: quality,
+            ComputePerceptualHash: phash,
+            SceneSafetyCap: parsed.GetOptionalInt("scene-safety-cap"),
+            CookiesPath: parsed.Get("cookies"),
+            CookiesFromBrowser: browserAuth ?? parsed.Get("cookies-from-browser"));
     }
 
     private static async Task<int> RunClipAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
@@ -548,13 +872,15 @@ public static class CliApp
                 var targets = parsed.Positionals.Count == 0 ? ["media"] : parsed.Positionals;
                 var progress = new Progress<string>(message => stdout.WriteLine(message));
                 var whisperModelSize = parsed.Get("whisper-model") ?? parsed.Get("model-size");
-                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken, whisperModelSize).ConfigureAwait(false);
+                var ocrLanguagePack = parsed.Get("language") ?? parsed.Get("ocr-language") ?? parsed.Get("language-pack");
+                var result = await installer.InstallAsync(targets, parsed.GetBool("force", defaultValue: false), progress, cancellationToken, whisperModelSize, ocrLanguagePack).ConfigureAwait(false);
                 stdout.WriteLine();
                 stdout.WriteLine("Dependency install complete.");
                 stdout.WriteLine($"Portable directory: {result.PortableDirectory}");
                 stdout.WriteLine($"ONNX model directory: {result.OnnxModelDirectory}");
                 stdout.WriteLine($"OCR model directory: {result.OcrModelDirectory}");
                 stdout.WriteLine($"Whisper model directory: {result.WhisperModelDirectory}");
+                stdout.WriteLine($"Diarization model directory: {result.DiarizationModelDirectory}");
                 foreach (var item in result.Items)
                 {
                     stdout.WriteLine($"{item.Name}: {item.Message} ({item.Path})");
@@ -578,6 +904,9 @@ public static class CliApp
                 stdout.WriteLine($"OCR dictionary: {installer.GetOcrDictionaryPath()}");
                 stdout.WriteLine($"Whisper model directory: {installer.Layout.WhisperModelDirectory}");
                 stdout.WriteLine($"Whisper default model: {installer.GetWhisperModelPath()}");
+                stdout.WriteLine($"Diarization model directory: {installer.Layout.DiarizationModelDirectory}");
+                stdout.WriteLine($"Diarization segmentation: {installer.GetDiarizationSegmentationPath()}");
+                stdout.WriteLine($"Diarization embedding: {installer.GetDiarizationEmbeddingPath()}");
                 return 0;
 
             default:
@@ -768,6 +1097,16 @@ public static class CliApp
         return new ClipExtractionService(artifactStore, ytDlp, ffmpeg);
     }
 
+    private static FrameCaptureService CreateFrameCaptureService()
+    {
+        var dependencies = new DependencyResolver();
+        var processRunner = new ProcessRunner();
+        var artifactStore = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+        var ytDlp = new YtDlpClient(dependencies, processRunner);
+        var ffmpeg = new FfmpegClient(dependencies, processRunner);
+        return new FrameCaptureService(artifactStore, ytDlp, ffmpeg);
+    }
+
     private static string GetRequiredOption(CommandOptions parsed, string name, string usage)
     {
         var value = parsed.Get(name);
@@ -796,6 +1135,9 @@ public static class CliApp
         llmProvider = LlmProviderFactory.Normalize(parsed.Get("llm-provider") ?? parsed.Get("provider") ?? llmProvider);
         var ocrProvider = OcrProviderFactory.GetConfiguredProvider(config);
         ocrProvider = OcrProviderFactory.Normalize(parsed.Get("ocr-provider") ?? ocrProvider);
+        var visionProvider = VisionProviderFactory.GetConfiguredProvider(config);
+        visionProvider = VisionProviderFactory.Normalize(parsed.Get("vision-provider") ?? visionProvider);
+        var localVisionMode = parsed.Get("local-vision-mode") ?? parsed.Get("vision-local-mode");
         bool? smartCrop = null;
         if (parsed.GetBool("smart-crop", defaultValue: false))
         {
@@ -815,6 +1157,16 @@ public static class CliApp
         var sceneSafetyCap = parsed.GetOptionalInt("scene-safety-cap");
         var visionInstruction = parsed.Get("vision-instruction") ?? string.Empty;
         var ocrInstruction = parsed.Get("ocr-instruction") ?? string.Empty;
+        var useDiarization = parsed.GetBool("diarize", defaultValue: false) || parsed.GetBool("diarization", defaultValue: false);
+        var numSpeakers = parsed.GetOptionalInt("num-speakers");
+        float? diarizationThreshold = null;
+        var thresholdValue = parsed.Get("diarize-threshold") ?? parsed.Get("diarization-threshold");
+        if (!string.IsNullOrWhiteSpace(thresholdValue)
+            && float.TryParse(thresholdValue, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedThreshold)
+            && parsedThreshold > 0)
+        {
+            diarizationThreshold = parsedThreshold;
+        }
         return new AnalyzeRequest(
             Source: source,
             VisionInstruction: visionInstruction,
@@ -843,7 +1195,12 @@ public static class CliApp
             SmartCrop: smartCrop,
             SmartCropProfile: smartCropProfile,
             CaptureMode: captureMode,
-            AuthProfile: authProfile);
+            AuthProfile: authProfile,
+            UseDiarization: useDiarization,
+            NumSpeakers: numSpeakers,
+            DiarizationThreshold: diarizationThreshold,
+            VisionProvider: visionProvider,
+            LocalVisionMode: localVisionMode);
     }
 
     private static IReadOnlyList<string>? ParseCaptionLanguagesOption(CommandOptions parsed)
@@ -893,9 +1250,9 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay version");
         stdout.WriteLine("  zakira-replay info [--json]");
         stdout.WriteLine("  zakira-replay doctor [--json]");
-        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]    # Defaults: --frames 500, --frame-strategy scene, --ocr-provider local (auto-downloads models), --max-ai-frames 50, --scene-safety-cap 5000. local-whisper provides fully-local STT only; chat/vision/OCR still go through the configured chat provider or `--ocr-provider local`.");
+        stdout.WriteLine("  zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--vision-provider copilot|local] [--local-vision-mode heuristic|clip|clip-blip] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]    # Defaults: --frames 500, --frame-strategy scene, --ocr-provider local (auto-downloads models), --vision-provider copilot, --max-ai-frames 50, --scene-safety-cap 5000. --vision-provider local runs a fully-on-device LocalOnnxVisionProvider that never calls an LLM (heuristic mode is zero-model; clip/clip-blip require user-supplied ONNX files configured via `config set vision.local.*`). ollama provides fully-local chat/vision via an Ollama daemon (no STT); local-whisper provides fully-local STT only; --diarize runs local sherpa-onnx speaker diarization on top of the transcript.");
         stdout.WriteLine("  zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]");
-        stdout.WriteLine("  zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]");
+        stdout.WriteLine("  zakira-replay frames <url-or-file> [--at <ts1,ts2,...>] [--from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--json]   # Ad-hoc capture: pass `--at` for exact timestamps OR `--from`/`--to` for a window. Without either flag, falls back to the legacy analyze-frames pipeline (--count controls how many).");
         stdout.WriteLine("  zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]");
         stdout.WriteLine("  zakira-replay search build <run-directory> [--backend json|sqlite|sqlite-onnx]");
         stdout.WriteLine("  zakira-replay search query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]");
@@ -906,8 +1263,8 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]");
         stdout.WriteLine("  zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]");
         stdout.WriteLine("  zakira-replay queue status [--queue-id <id>] [--json]");
-        stdout.WriteLine("  zakira-replay llm ask <prompt> [--llm-provider github-copilot|openai|azure-openai] [--model <model>] [--attach <path>]    # local-whisper is STT-only and not valid for `llm ask`");
-        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]  # defaults: target=media, --whisper-model=small");
+        stdout.WriteLine("  zakira-replay llm ask <prompt> [--llm-provider github-copilot|openai|azure-openai|ollama] [--model <model>] [--attach <path>]    # local-whisper is STT-only and not valid for `llm ask`");
+        stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--language latin|chinese|english|korean|cyrillic|arabic|devanagari|greek|telugu|tamil] [--force]  # defaults: target=media, --whisper-model=small, --language=latin");
         stdout.WriteLine("  zakira-replay deps path");
         stdout.WriteLine("  zakira-replay auth login <profile-name> [--url <start-url>]");
         stdout.WriteLine("  zakira-replay auth list");
@@ -939,7 +1296,40 @@ internal sealed record ReplayInfo(
     string RunsDirectory,
     string LlmProvider,
     string DefaultModel,
-    IReadOnlyList<string> Schemas);
+    IReadOnlyList<string> Schemas,
+    ReplayInfoDependencies? ResolvedDependencies = null,
+    ReplayInfoCapabilities? Capabilities = null);
+
+/// <summary>
+/// Resolved on-disk paths and configured names for every optional dependency. Useful as a
+/// pre-flight for orchestrators: they can call <c>zakira-replay info --json</c> once and know
+/// which optional features are wired up without separately running <c>doctor</c>.
+/// </summary>
+internal sealed record ReplayInfoDependencies(
+    string PortableDirectory,
+    string OcrModelDirectory,
+    string OcrLanguagePack,
+    string OnnxModelDirectory,
+    string WhisperModelDirectory,
+    string? WhisperModelPath,
+    string? WhisperModelSize,
+    string DiarizationModelDirectory,
+    string? OllamaEndpoint,
+    string? OllamaModel,
+    string? OllamaVisionModel);
+
+/// <summary>
+/// Static capability summary: which optional features are available without launching a
+/// daemon, downloading a model, or hitting the network. Booleans here reflect what's
+/// installed and reachable at info-time; they do NOT promise the dependency will still be
+/// working at analysis-time (use <c>doctor</c> for that).
+/// </summary>
+internal sealed record ReplayInfoCapabilities(
+    bool LocalOcrReady,
+    bool LocalWhisperReady,
+    bool DiarizationReady,
+    bool YtDlpAvailable,
+    bool FfmpegAvailable);
 
 internal sealed class CommandOptions
 {

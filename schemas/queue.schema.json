@@ -83,7 +83,7 @@
         "useVision": { "type": "boolean" },
         "maxAiFrames": { "type": "integer", "minimum": 0 },
         "model": { "type": "string" },
-        "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai"] },
+        "llmProvider": { "type": "string", "enum": ["github-copilot", "openai", "azure-openai", "ollama", "local-whisper"] },
         "force": { "type": "boolean" },
         "useCache": { "type": "boolean" },
         "frameStrategy": { "type": "string", "enum": ["interval", "scene", "every-frame"] },
@@ -101,7 +101,12 @@
         "smartCrop": { "type": ["boolean", "null"] },
         "smartCropProfile": { "type": ["string", "null"] },
         "captureMode": { "type": ["string", "null"], "enum": ["auto", "ytdlp", "browser", null] },
-        "authProfile": { "type": ["string", "null"] }
+        "authProfile": { "type": ["string", "null"] },
+        "useDiarization": { "type": "boolean" },
+        "numSpeakers": { "type": ["integer", "null"], "minimum": 1 },
+        "diarizationThreshold": { "type": ["number", "null"], "exclusiveMinimum": 0 },
+        "visionProvider": { "type": "string", "enum": ["copilot", "local"] },
+        "localVisionMode": { "type": ["string", "null"], "enum": ["heuristic", "clip", "clip-blip", null] }
       }
     }
   }

@@ -7,6 +7,25 @@ public interface IFfmpegClient
 {
     Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken);
 
+    /// <summary>
+    /// Extracts one JPEG per supplied timestamp using ffmpeg input-side seeking. Used by
+    /// ad-hoc <see cref="FrameCaptureService"/> requests (e.g. agents grabbing a handful of
+    /// frames at known moments). Each output is named <c>frame-NNN-MM-SS.jpg</c> and lands in
+    /// <c>frames/</c> inside the run directory. Timestamps that fail to capture are simply
+    /// omitted from the returned list (no exception); callers can surface that as a warning.
+    /// </summary>
+    Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Runs scene-cut detection scoped to <c>[rangeStart, rangeEnd]</c> and returns the
+    /// resulting frames. Uses output-side <c>-ss</c>/<c>-to</c> so timestamps emitted by
+    /// ffmpeg's <c>showinfo</c> filter are relative to <c>rangeStart</c>; the returned
+    /// <see cref="FrameArtifact.TimestampSeconds"/> values are normalised back to the absolute
+    /// source timeline. Falls back to no frames (empty list) when ffmpeg detects no cuts in
+    /// the window.
+    /// </summary>
+    Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken);
+
     Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken);
 
     Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken);
@@ -18,6 +37,16 @@ public interface IFfmpegClient
     Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Preprocesses an image into a packed 8-bit RGB buffer at the requested resolution.
+    /// Used by <see cref="LocalOnnxVisionProvider"/> to feed CLIP / BLIP ONNX models a
+    /// preprocessed tensor without requiring an in-process image library: ffmpeg does the
+    /// decode + bilinear scale + colour-space conversion. The returned buffer is exactly
+    /// <c>width * height * 3</c> bytes (R, G, B interleaved per pixel, row-major).
+    /// </summary>
+    /// <returns>The packed RGB buffer, or <c>null</c> when ffmpeg failed (e.g. unreadable image).</returns>
+    Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken);
+
+    /// <summary>
     /// Computes a 64-bit perceptual difference hash (dHash) for a still image and returns it as
     /// a 16-character lowercase hex string. The image is downscaled to 9x8 grayscale by ffmpeg
     /// itself; no managed image library is required. Returns <c>null</c> when the hash cannot
@@ -25,6 +54,18 @@ public interface IFfmpegClient
     /// </summary>
     Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// Output controls for ad-hoc frame capture (<see cref="IFfmpegClient.ExtractFramesAtAsync"/>
+/// and <see cref="IFfmpegClient.ExtractSceneFramesInRangeAsync"/>).
+/// </summary>
+/// <param name="MaxLongEdgePixels">When set, scales the output so the longest edge is at most
+/// this many pixels (aspect ratio preserved). Useful for thumbnail-sized JPEGs an LLM/agent
+/// can attach to a recipe step without paying for full-resolution stills.</param>
+/// <param name="JpegQuality">When set, controls JPEG quality on a 1 (worst) - 100 (best) scale
+/// mapped to ffmpeg's <c>-q:v</c> qscale (2..31, lower = better). Defaults to qscale 2
+/// (high quality) when null.</param>
+public sealed record FrameCaptureOptions(int? MaxLongEdgePixels = null, int? JpegQuality = null);
 
 /// <summary>
 /// A contiguous span of audio considered silence by ffmpeg's <c>silencedetect</c> filter.
@@ -73,45 +114,215 @@ public sealed class FfmpegClient : IFfmpegClient
             return await ExtractEveryFrameAsync(mediaSource, run, count, cancellationToken).ConfigureAwait(false);
         }
 
-        var ffmpeg = dependencies.RequireFfmpeg("extracting frames from video media");
         var duration = durationSeconds ?? await TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false);
         if (duration is null || duration <= 1)
         {
             throw new ReplayException("Cannot extract timestamped frames because video duration is unknown.");
         }
 
-        var frames = new List<FrameArtifact>();
+        var timestamps = new List<TimeSpan>(count);
         for (var i = 1; i <= count; i++)
         {
-            var timestamp = duration.Value * i / (count + 1);
-            var label = Timestamp.Format(timestamp);
-            var frameId = $"frame-{i:000}";
-            var fileName = $"{frameId}-{label.Replace(':', '-').Replace('.', '-')}.jpg";
-            var relativePath = Path.Combine("frames", fileName);
-            var outputPath = run.GetPath(relativePath);
+            timestamps.Add(TimeSpan.FromSeconds(duration.Value * i / (count + 1)));
+        }
 
-            var result = await processRunner.RunAsync(
-                ffmpeg,
-                [
-                    "-hide_banner",
-                    "-loglevel", "error",
-                    "-ss", timestamp.ToString("0.###", CultureInfo.InvariantCulture),
-                    "-i", mediaSource,
-                    "-frames:v", "1",
-                    "-q:v", "2",
-                    "-y",
-                    outputPath
-                ],
-                timeout: TimeSpan.FromMinutes(3),
-                cancellationToken: cancellationToken).ConfigureAwait(false);
+        return await ExtractFramesAtAsync(mediaSource, run, timestamps, new FrameCaptureOptions(), cancellationToken).ConfigureAwait(false);
+    }
 
-            if (result.ExitCode == 0 && File.Exists(outputPath))
+    public async Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(
+        string mediaSource,
+        VideoRun run,
+        IReadOnlyList<TimeSpan> timestamps,
+        FrameCaptureOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (timestamps.Count == 0)
+        {
+            return [];
+        }
+
+        var frames = new List<FrameArtifact>(timestamps.Count);
+        for (var i = 0; i < timestamps.Count; i++)
+        {
+            var artifact = await CaptureSingleFrameAsync(
+                mediaSource,
+                run,
+                timestamps[i],
+                frameIndex: i + 1,
+                fileNamePrefix: "frame",
+                idPrefix: "frame",
+                options,
+                cancellationToken).ConfigureAwait(false);
+            if (artifact is not null)
             {
-                frames.Add(new FrameArtifact(frameId, relativePath.Replace('\\', '/'), timestamp, label));
+                frames.Add(artifact);
             }
         }
 
         return frames;
+    }
+
+    public async Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(
+        string mediaSource,
+        VideoRun run,
+        TimeSpan rangeStart,
+        TimeSpan rangeEnd,
+        int sceneSafetyCap,
+        FrameCaptureOptions options,
+        CancellationToken cancellationToken)
+    {
+        if (rangeEnd <= rangeStart)
+        {
+            throw new ReplayException("Range end timestamp must be after start timestamp.");
+        }
+
+        var safetyCap = Math.Max(1, sceneSafetyCap);
+        var ffmpeg = dependencies.RequireFfmpeg("extracting scene-change frames within a time range");
+        var framesDirectory = run.GetPath("frames");
+        Directory.CreateDirectory(framesDirectory);
+        var outputPattern = Path.Combine(framesDirectory, "range-scene-%04d.jpg");
+
+        // Output-side -ss/-to (after -i) keeps ffmpeg honest about respecting the window
+        // while letting showinfo emit pts_time in source-stream coordinates after we add
+        // rangeStart back below. Input-side seeking is faster but resets PTS to zero, which
+        // would force us to recover the absolute timestamp by other means.
+        var filter = $"select=gt(scene\\,0.35){GetScaleFilterSuffix(options)},showinfo";
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-i", mediaSource,
+            "-ss", rangeStart.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
+            "-to", rangeEnd.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
+            "-vf", filter,
+            "-vsync", "vfr",
+            "-frames:v", safetyCap.ToString(CultureInfo.InvariantCulture),
+            "-q:v", MapJpegQualityToQscale(options.JpegQuality).ToString(CultureInfo.InvariantCulture),
+            "-y",
+            outputPattern
+        };
+
+        var result = await processRunner.RunAsync(
+            ffmpeg,
+            [.. args],
+            timeout: TimeSpan.FromMinutes(15),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        // showinfo's pts_time is in the OUTPUT stream timeline. With output-side -ss the
+        // output starts at 0 from the seek point, so we add rangeStart back to recover the
+        // absolute source timestamp.
+        var rawTimestamps = FfmpegOutputPatterns.ShowInfoTimeRegex().Matches(result.StandardError)
+            .Select(match => double.TryParse(match.Groups[1].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var value) ? value : (double?)null)
+            .Where(value => value is not null)
+            .Select(value => value!.Value + rangeStart.TotalSeconds)
+            .ToArray();
+        var files = Directory.EnumerateFiles(framesDirectory, "range-scene-*.jpg", SearchOption.TopDirectoryOnly)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .Take(safetyCap)
+            .ToArray();
+
+        var frames = new List<FrameArtifact>();
+        for (var i = 0; i < files.Length; i++)
+        {
+            var timestamp = i < rawTimestamps.Length ? rawTimestamps[i] : rangeStart.TotalSeconds + i;
+            // Clamp to the requested window in case ffmpeg emitted a frame slightly outside.
+            if (timestamp < rangeStart.TotalSeconds - 0.05 || timestamp > rangeEnd.TotalSeconds + 0.05)
+            {
+                continue;
+            }
+
+            var label = Timestamp.Format(timestamp);
+            var frameId = $"scene-{frames.Count + 1:0000}";
+            frames.Add(new FrameArtifact(frameId, Path.GetRelativePath(run.Directory, files[i]).Replace('\\', '/'), timestamp, label));
+        }
+
+        if (frames.Count == 0
+            && result.ExitCode != 0
+            && !result.StandardError.Contains("No filtered frames", StringComparison.OrdinalIgnoreCase))
+        {
+            result.EnsureSuccess();
+        }
+
+        return frames;
+    }
+
+    private async Task<FrameArtifact?> CaptureSingleFrameAsync(
+        string mediaSource,
+        VideoRun run,
+        TimeSpan timestamp,
+        int frameIndex,
+        string fileNamePrefix,
+        string idPrefix,
+        FrameCaptureOptions options,
+        CancellationToken cancellationToken)
+    {
+        var ffmpeg = dependencies.RequireFfmpeg("extracting frames from video media");
+        var seconds = Math.Max(0, timestamp.TotalSeconds);
+        var label = Timestamp.Format(seconds);
+        var fileSafeLabel = label.Replace(':', '-').Replace('.', '-');
+        var frameId = $"{idPrefix}-{frameIndex:000}";
+        var fileName = $"{fileNamePrefix}-{frameIndex:000}-{fileSafeLabel}.jpg";
+        var relativePath = Path.Combine("frames", fileName);
+        var outputPath = run.GetPath(relativePath);
+        Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+
+        var args = new List<string>
+        {
+            "-hide_banner",
+            "-loglevel", "error",
+            "-ss", seconds.ToString("0.###", CultureInfo.InvariantCulture),
+            "-i", mediaSource,
+            "-frames:v", "1"
+        };
+        var scaleSuffix = GetScaleFilterSuffix(options);
+        if (scaleSuffix.Length > 0)
+        {
+            // Drop the leading comma when scale is the only filter.
+            args.Add("-vf");
+            args.Add(scaleSuffix.TrimStart(','));
+        }
+        args.Add("-q:v");
+        args.Add(MapJpegQualityToQscale(options.JpegQuality).ToString(CultureInfo.InvariantCulture));
+        args.Add("-y");
+        args.Add(outputPath);
+
+        var result = await processRunner.RunAsync(
+            ffmpeg,
+            [.. args],
+            timeout: TimeSpan.FromMinutes(3),
+            cancellationToken: cancellationToken).ConfigureAwait(false);
+
+        if (result.ExitCode == 0 && File.Exists(outputPath))
+        {
+            return new FrameArtifact(frameId, relativePath.Replace('\\', '/'), seconds, label);
+        }
+
+        return null;
+    }
+
+    private static string GetScaleFilterSuffix(FrameCaptureOptions options)
+    {
+        if (options.MaxLongEdgePixels is int maxEdge && maxEdge > 0)
+        {
+            // "force_original_aspect_ratio=decrease" fits the image inside an N x N box while
+            // preserving aspect ratio, leaving the longest edge at exactly N (or smaller if
+            // the source was already smaller). Leading comma lets the value be appended to
+            // an existing filter chain (e.g. after select=gt(scene\,0.35)).
+            return $",scale={maxEdge}:{maxEdge}:force_original_aspect_ratio=decrease";
+        }
+
+        return string.Empty;
+    }
+
+    internal static int MapJpegQualityToQscale(int? quality)
+    {
+        if (quality is null)
+        {
+            return 2;
+        }
+
+        var clamped = Math.Clamp(quality.Value, 1, 100);
+        var qscale = (int)Math.Round(31 - ((clamped - 1) * 29.0 / 99.0));
+        return Math.Clamp(qscale, 2, 31);
     }
 
     private async Task<IReadOnlyList<FrameArtifact>> ExtractEveryFrameAsync(
@@ -384,6 +595,70 @@ public sealed class FfmpegClient : IFfmpegClient
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         result.EnsureSuccess();
+    }
+
+    public async Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(imagePath) || !File.Exists(imagePath))
+        {
+            return null;
+        }
+
+        if (width <= 0 || height <= 0)
+        {
+            throw new ReplayException($"PreprocessImageRgb24Async requires positive width/height (got {width}x{height}).");
+        }
+
+        var ffmpeg = dependencies.RequireFfmpeg("preprocessing images for local vision models");
+        var tempPath = Path.Combine(Path.GetTempPath(), $"zakira-replay-vision-{Guid.NewGuid():N}.bin");
+        try
+        {
+            var result = await processRunner.RunAsync(
+                ffmpeg,
+                [
+                    "-hide_banner",
+                    "-loglevel", "error",
+                    "-i", imagePath,
+                    "-vf", $"scale={width}:{height}:flags=bilinear,format=rgb24",
+                    "-f", "rawvideo",
+                    "-y",
+                    tempPath
+                ],
+                timeout: TimeSpan.FromSeconds(30),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0 || !File.Exists(tempPath))
+            {
+                return null;
+            }
+
+            var bytes = await File.ReadAllBytesAsync(tempPath, cancellationToken).ConfigureAwait(false);
+            // Defensive: ffmpeg sometimes emits trailing padding; truncate or reject if size mismatches.
+            var expected = (long)width * height * 3;
+            if (bytes.LongLength < expected)
+            {
+                return null;
+            }
+            if (bytes.LongLength > expected)
+            {
+                Array.Resize(ref bytes, (int)expected);
+            }
+            return bytes;
+        }
+        finally
+        {
+            try
+            {
+                if (File.Exists(tempPath))
+                {
+                    File.Delete(tempPath);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup; ignore filesystem races.
+            }
+        }
     }
 
     public async Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)

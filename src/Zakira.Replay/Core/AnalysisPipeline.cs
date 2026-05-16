@@ -57,6 +57,7 @@ public sealed class AnalysisPipeline
 
         var run = artifactStore.CreateRun(request.Source, request.RunId);
         var warnings = new List<ReplayWarning>();
+        var timings = new RunTimings();
         ILlmProvider? llm = null;
         string? audioPath = null;
         string? ocrPath = null;
@@ -65,10 +66,14 @@ public sealed class AnalysisPipeline
         progress?.Report($"Run directory: {run.Directory}");
         await artifactStore.WriteJsonAsync(run, "request.json", request, cancellationToken).ConfigureAwait(false);
 
-        var info = isLocalFile
-            ? CreateLocalInfo(localPath)
-            : await ResolveUrlMetadataAsync(request, progress, cancellationToken).ConfigureAwait(false);
-        info.AvailableSubtitleLanguages = BuildAvailableSubtitleLanguages(info);
+        YtDlpInfo info;
+        using (timings.Measure(RunTimingStages.Probe))
+        {
+            info = isLocalFile
+                ? CreateLocalInfo(localPath)
+                : await ResolveUrlMetadataAsync(request, progress, cancellationToken).ConfigureAwait(false);
+            info.AvailableSubtitleLanguages = BuildAvailableSubtitleLanguages(info);
+        }
         await artifactStore.WriteJsonAsync(run, "metadata.json", info, cancellationToken).ConfigureAwait(false);
 
         TranscriptArtifact? transcript = null;
@@ -176,6 +181,7 @@ public sealed class AnalysisPipeline
 
         if (request.UseSpeechToText && transcript is null)
         {
+            using var sttScope = timings.Measure(RunTimingStages.Stt);
             if (audioPath is null)
             {
                 warnings.Add(new ReplayWarning(
@@ -238,6 +244,12 @@ public sealed class AnalysisPipeline
             }
         }
 
+        if (request.UseDiarization)
+        {
+            using var diarizationScope = timings.Measure(RunTimingStages.Diarization);
+            await TryRunDiarizationAsync(request, run, audioPath, transcript, warnings, progress, cancellationToken).ConfigureAwait(false);
+        }
+
         IReadOnlyList<FrameArtifact> frames = [];
         var sceneSafetyCap = ResolveSceneSafetyCap(request);
         var requestedFrameCount = ResolveEffectiveFrameCount(request, info.DurationSeconds, new ConfigStore().Load().Frames.PerMinute);
@@ -247,6 +259,7 @@ public sealed class AnalysisPipeline
         var browserDiscoveredCaptions = new List<BrowserCapturedCaption>();
         if (requestedFrameCount > 0 || isSceneStrategy)
         {
+            using var framesScope = timings.Measure(RunTimingStages.Frames);
             if (captureMode == CaptureModes.Browser && !isLocalFile)
             {
                 browserCaptureAttempted = true;
@@ -390,7 +403,11 @@ public sealed class AnalysisPipeline
         }
 
         var slideOptions = ResolveSlideGroupingOptions(request);
-        var slides = SlideGrouper.Group(frames, slideOptions);
+        IReadOnlyList<SlideArtifact> slides;
+        using (timings.Measure(RunTimingStages.Slides))
+        {
+            slides = SlideGrouper.Group(frames, slideOptions);
+        }
 
         var rawTranscriptSegments = transcript is null
             ? []
@@ -411,9 +428,28 @@ public sealed class AnalysisPipeline
 
         var primarySlides = slides.Take(request.MaxAiFrames).ToArray();
 
-        var ocrResults = new List<OcrFrameResult>();
-        if (request.UseOcr && primarySlides.Length > 0)
+        // Local vision needs per-frame OCR to populate the structured fields (title, bullets,
+        // code blocks, UI elements). When the caller asked for `--vision --vision-provider local`
+        // without `--ocr`, transparently flip OCR on and record the implicit decision so the
+        // orchestrator sees what happened.
+        var effectiveUseOcr = request.UseOcr;
+        if (!effectiveUseOcr
+            && request.UseVision
+            && VisionProviderFactory.Normalize(request.VisionProvider) == VisionProviders.Local
+            && primarySlides.Length > 0)
         {
+            effectiveUseOcr = true;
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalOcrRequired,
+                "Local vision provider requires per-frame OCR results; OCR was auto-enabled for this run. Pass `--ocr` explicitly to silence this warning.",
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Info));
+        }
+
+        var ocrResults = new List<OcrFrameResult>();
+        if (effectiveUseOcr && primarySlides.Length > 0)
+        {
+            using var ocrScope = timings.Measure(RunTimingStages.Ocr);
             var ocrProviderName = OcrProviderFactory.Normalize(request.OcrProvider);
             IOcrProvider? ocrProvider = null;
             try
@@ -480,48 +516,97 @@ public sealed class AnalysisPipeline
         var visionResults = new List<VisionFrameResult>();
         if (request.UseVision && primarySlides.Length > 0)
         {
-            llm ??= TryResolveLlm(request);
-            if (llm is null)
+            using var visionScope = timings.Measure(RunTimingStages.Vision);
+            var visionProviderName = VisionProviderFactory.Normalize(request.VisionProvider);
+            IVisionProvider? visionProvider = null;
+            try
             {
-                warnings.Add(new ReplayWarning(
-                    ReplayWarningCodes.VisionNoLlmProvider,
-                    "Vision analysis was requested but no LLM provider is configured.",
-                    Source: "llm",
-                    Severity: ReplayWarningSeverities.Error));
-            }
-            else
-            {
-                var visionProvider = new CopilotVisionProvider(llm, request.Model);
-                foreach (var slide in primarySlides)
+                if (visionProviderName == VisionProviders.Local)
                 {
-                    var primaryFrame = frames.First(frame => frame.Id == slide.PrimaryFrameId);
-                    progress?.Report($"Analyzing slide {slide.Id} ({primaryFrame.Path})...");
-                    var raw = await visionProvider.DescribeAsync(run.GetPath(primaryFrame.Path), request.VisionInstruction, cancellationToken).ConfigureAwait(false);
-                    var visionParseResult = StructuredResponseParser.ParseVisionWithMode(raw);
-                    var structured = visionParseResult.Structured;
-                    if (visionParseResult.IsFallback)
+                    visionProvider = ResolveLocalVisionProvider(request, ocrResults, warnings);
+                }
+                else if (visionProviderName == VisionProviders.Copilot)
+                {
+                    llm ??= TryResolveLlm(request);
+                    if (llm is null)
                     {
                         warnings.Add(new ReplayWarning(
-                            ReplayWarningCodes.VisionParseFallback,
-                            $"Vision response for {slide.Id} was not strict JSON; stored as freeText only.",
-                            Source: "vision",
-                            Severity: ReplayWarningSeverities.Warning));
+                            ReplayWarningCodes.VisionNoLlmProvider,
+                            "Vision analysis was requested but no LLM provider is configured.",
+                            Source: "llm",
+                            Severity: ReplayWarningSeverities.Error));
                     }
-
-                    var result = new VisionFrameResult(
-                        FrameId: primaryFrame.Id,
-                        FramePath: primaryFrame.Path,
-                        TimestampSeconds: primaryFrame.TimestampSeconds,
-                        TimestampLabel: primaryFrame.TimestampLabel,
-                        Description: structured.FreeText,
-                        SlideId: slide.Id,
-                        Structured: structured);
-                    visionResults.Add(result);
-                    await artifactStore.WriteJsonAsync(run, $"vision/{primaryFrame.Id}.json", result, cancellationToken).ConfigureAwait(false);
+                    else
+                    {
+                        visionProvider = new CopilotVisionProvider(llm, request.Model);
+                    }
+                }
+                else
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.VisionUnknownProvider,
+                        $"Unknown vision provider '{request.VisionProvider}'. Use one of: copilot, local.",
+                        Source: "vision",
+                        Severity: ReplayWarningSeverities.Error));
                 }
 
-                visionPath = "vision/combined.md";
-                await artifactStore.WriteTextAsync(run, visionPath, FormatVision(visionResults), cancellationToken).ConfigureAwait(false);
+                if (visionProvider is not null)
+                {
+                    foreach (var slide in primarySlides)
+                    {
+                        var primaryFrame = frames.First(frame => frame.Id == slide.PrimaryFrameId);
+                        progress?.Report($"Analyzing slide {slide.Id} ({primaryFrame.Path})...");
+                        var ocrContext = ocrResults.FirstOrDefault(o => o.FrameId == primaryFrame.Id);
+                        var visionInput = new VisionRequest(
+                            ImagePath: run.GetPath(primaryFrame.Path),
+                            Instruction: request.VisionInstruction,
+                            Frame: primaryFrame,
+                            OcrContext: ocrContext);
+                        string raw;
+                        try
+                        {
+                            raw = await visionProvider.DescribeAsync(visionInput, cancellationToken).ConfigureAwait(false);
+                        }
+                        catch (Exception ex) when (visionProviderName == VisionProviders.Local && ex is not OperationCanceledException)
+                        {
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.VisionLocalInferenceFailed,
+                                $"Local vision inference failed for {slide.Id}: {ex.Message}. Frame skipped.",
+                                Source: "vision",
+                                Severity: ReplayWarningSeverities.Warning));
+                            continue;
+                        }
+                        var visionParseResult = StructuredResponseParser.ParseVisionWithMode(raw);
+                        var structured = visionParseResult.Structured;
+                        if (visionParseResult.IsFallback)
+                        {
+                            warnings.Add(new ReplayWarning(
+                                ReplayWarningCodes.VisionParseFallback,
+                                $"Vision response for {slide.Id} was not strict JSON; stored as freeText only.",
+                                Source: "vision",
+                                Severity: ReplayWarningSeverities.Warning));
+                        }
+
+                        var result = new VisionFrameResult(
+                            FrameId: primaryFrame.Id,
+                            FramePath: primaryFrame.Path,
+                            TimestampSeconds: primaryFrame.TimestampSeconds,
+                            TimestampLabel: primaryFrame.TimestampLabel,
+                            Description: structured.FreeText,
+                            SlideId: slide.Id,
+                            Structured: structured,
+                            Provider: visionProviderName);
+                        visionResults.Add(result);
+                        await artifactStore.WriteJsonAsync(run, $"vision/{primaryFrame.Id}.json", result, cancellationToken).ConfigureAwait(false);
+                    }
+
+                    visionPath = "vision/combined.md";
+                    await artifactStore.WriteTextAsync(run, visionPath, FormatVision(visionResults), cancellationToken).ConfigureAwait(false);
+                }
+            }
+            finally
+            {
+                (visionProvider as IDisposable)?.Dispose();
             }
         }
 
@@ -544,12 +629,15 @@ public sealed class AnalysisPipeline
             Warnings: warnings);
 
         var evidenceMarkdown = BuildEvidenceIndexMarkdown(request, info, audioPath, transcript, frames, ocrPath, visionPath, warnings);
-        await artifactStore.WriteTextAsync(run, "evidence.md", evidenceMarkdown, cancellationToken).ConfigureAwait(false);
-        await artifactStore.WriteJsonAsync(run, "evidence.json", evidence, cancellationToken).ConfigureAwait(false);
-
-        if (slides.Count > 0)
+        using (timings.Measure(RunTimingStages.Evidence))
         {
-            await artifactStore.WriteJsonAsync(run, "slides/slides.json", slides, cancellationToken).ConfigureAwait(false);
+            await artifactStore.WriteTextAsync(run, "evidence.md", evidenceMarkdown, cancellationToken).ConfigureAwait(false);
+            await artifactStore.WriteJsonAsync(run, "evidence.json", evidence, cancellationToken).ConfigureAwait(false);
+
+            if (slides.Count > 0)
+            {
+                await artifactStore.WriteJsonAsync(run, "slides/slides.json", slides, cancellationToken).ConfigureAwait(false);
+            }
         }
 
         var manifest = new ArtifactManifest(
@@ -568,7 +656,8 @@ public sealed class AnalysisPipeline
             VisionPath: visionPath,
             EvidencePath: "evidence.json",
             Frames: frames,
-            Warnings: warnings);
+            Warnings: warnings,
+            Timings: timings.ToArtifact());
 
         await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, cancellationToken).ConfigureAwait(false);
         if (cacheKey is not null)
@@ -587,6 +676,78 @@ public sealed class AnalysisPipeline
         }
 
         return llmFactory(request.LlmProvider);
+    }
+
+    /// <summary>
+    /// Build a <see cref="LocalOnnxVisionProvider"/> from the request + ambient config. Records
+    /// any model-availability degradations as warnings on the run so the orchestrator can
+    /// audit which mode actually ran (heuristic, clip, or clip-blip). Returns null when the
+    /// underlying <see cref="LocalVisionOptions"/> could not be resolved at all (a hard
+    /// configuration error rather than missing models).
+    /// </summary>
+    private LocalOnnxVisionProvider? ResolveLocalVisionProvider(AnalyzeRequest request, IReadOnlyList<OcrFrameResult> ocrResults, List<ReplayWarning> warnings)
+    {
+        LocalVisionOptions options;
+        try
+        {
+            options = LocalVisionOptions.Resolve();
+            if (!string.IsNullOrWhiteSpace(request.LocalVisionMode))
+            {
+                options = options with { Mode = VisionProviderFactory.NormalizeMode(request.LocalVisionMode) };
+            }
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalInitFailed,
+                $"Local vision provider could not be initialised: {ex.Message}",
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+
+        var requestedMode = options.Mode;
+        var missing = options.MissingFilesFor(requestedMode);
+        if (missing.Count > 0 && requestedMode != LocalVisionMode.Heuristic)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalModelsMissing,
+                $"Local vision mode '{VisionProviderFactory.FormatMode(requestedMode)}' requires {missing.Count} model file(s) that are not present on disk: {string.Join(", ", missing)}. The provider will degrade to the highest mode whose files exist.",
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Warning));
+        }
+
+        if (ocrResults.Count == 0)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalOcrRequired,
+                "Local vision provider needs per-frame OCR results to populate the structured fields (title, bullets, code blocks, UI elements). Re-run with --ocr enabled, or expect those fields to remain empty.",
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Info));
+        }
+
+        var provider = new LocalOnnxVisionProvider(options, ffmpeg);
+        provider.Initialise();
+
+        foreach (var initWarning in provider.InitializationWarnings)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalModeDegraded,
+                initWarning,
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Warning));
+        }
+
+        if (provider.EffectiveMode != requestedMode)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.VisionLocalModeDegraded,
+                $"Local vision degraded from '{VisionProviderFactory.FormatMode(requestedMode)}' to '{VisionProviderFactory.FormatMode(provider.EffectiveMode)}' because not all required models were available.",
+                Source: "vision",
+                Severity: ReplayWarningSeverities.Warning));
+        }
+
+        return provider;
     }
 
     /// <summary>
@@ -727,6 +888,191 @@ public sealed class AnalysisPipeline
     }
 
     private sealed record LocalWhisperResult(TranscriptArtifact Transcript);
+
+    /// <summary>
+    /// Run the local sherpa-onnx diarization pass. Reads the existing <c>transcript.md</c> the
+    /// caption / STT step produced, attributes each segment to a speaker cluster via
+    /// <see cref="DiarizationMerger"/>, and rewrites the markdown with <c>[SPEAKER_NN]</c>
+    /// prefixes so the rest of the pipeline (<see cref="TranscriptNormalizer"/>, evidence
+    /// alignment, search) picks up the new attribution automatically.
+    /// </summary>
+    private async Task TryRunDiarizationAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        string? audioPath,
+        TranscriptArtifact? transcript,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(audioPath))
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationNoAudio,
+                "Diarization was requested but no audio artifact was available. Diarization needs the 16 kHz mono PCM WAV the audio extraction stage produces.",
+                Source: "ffmpeg",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        if (transcript is null)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationNoTranscript,
+                "Diarization was requested but no transcript was extracted. Diarization labels existing transcript segments; enable --stt or supply captions.",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        var providerName = DiarizationProviderFactory.Normalize(null);
+        if (providerName != DiarizationProviders.SherpaOnnx)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationUnknownProvider,
+                $"Unknown diarization provider: {providerName}. Only `sherpa-onnx` is wired in this release.",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        var config = new ConfigStore().Load();
+        DiarizationOptions options;
+        try
+        {
+            options = DiarizationOptions.Resolve(config) with
+            {
+                NumSpeakers = request.NumSpeakers ?? config.Diarization.NumSpeakers,
+                Threshold = request.DiarizationThreshold ?? config.Diarization.Threshold
+            };
+        }
+        catch (Exception ex) when (ex is not ReplayException)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationInitFailed,
+                $"Failed to resolve diarization options: {ex.Message}",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        var missing = options.MissingFiles();
+        if (missing.Count > 0 && IsDiarizationAutoDownloadEnabled(config))
+        {
+            progress?.Report("Diarization models missing; auto-downloading pyannote-segmentation-3.0 + 3D-Speaker (~32 MB)...");
+            try
+            {
+                var installer = new PortableDependencyInstaller(config);
+                await installer.InstallAsync(["diarization"], force: false, progress, cancellationToken).ConfigureAwait(false);
+                options = DiarizationOptions.Resolve(config) with
+                {
+                    NumSpeakers = request.NumSpeakers ?? config.Diarization.NumSpeakers,
+                    Threshold = request.DiarizationThreshold ?? config.Diarization.Threshold
+                };
+                missing = options.MissingFiles();
+            }
+            catch (Exception ex)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.DiarizationModelsMissing,
+                    $"Diarization auto-download failed: {ex.Message}. Run `zakira-replay deps install diarization` manually.",
+                    Source: "diarization",
+                    Severity: ReplayWarningSeverities.Error));
+                return;
+            }
+        }
+
+        if (missing.Count > 0)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationModelsMissing,
+                $"Diarization models not found. Run `zakira-replay deps install diarization` (or set `diarization.autoDownload=true`). Missing: {string.Join(", ", missing)}.",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        IReadOnlyList<DiarizationSegment> segments;
+        try
+        {
+            using var provider = new SherpaOnnxDiarizationProvider();
+            progress?.Report($"Diarizing audio (provider={providerName}, model={Path.GetFileName(options.SegmentationModelPath)})...");
+            segments = await provider.DiarizeAsync(run.GetPath(audioPath), options, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ReplayException ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationFailed,
+                ex.Message,
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+        catch (Exception ex)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationFailed,
+                $"Diarization failed: {ex.Message}",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        if (segments.Count == 0)
+        {
+            // No speakers detected. Surface as info-level so orchestrators can branch but don't
+            // treat as an error — silent / non-speech audio is a legitimate input.
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationFailed,
+                "Diarization completed but produced no speaker segments. Audio may be silent, music-only, or below the model's detection threshold.",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Info));
+            return;
+        }
+
+        // Rewrite transcript.md with [SPEAKER_NN] prefixes so the rest of the pipeline
+        // (TranscriptNormalizer, evidence.json speakers[] rollup, evidence-aligned slide /
+        // chapter speaker rollups, search) picks up the attribution automatically.
+        var markdownPath = run.GetPath("transcript.md");
+        if (!File.Exists(markdownPath))
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.DiarizationNoTranscript,
+                $"transcript.md disappeared between STT and diarization: {markdownPath}.",
+                Source: "diarization",
+                Severity: ReplayWarningSeverities.Error));
+            return;
+        }
+
+        var existing = await File.ReadAllTextAsync(markdownPath, cancellationToken).ConfigureAwait(false);
+        var annotated = DiarizationMerger.AnnotateMarkdown(existing, segments);
+        await File.WriteAllTextAsync(markdownPath, annotated + Environment.NewLine, cancellationToken).ConfigureAwait(false);
+
+        progress?.Report($"Diarization wrote {segments.Count} speaker segments across {segments.Select(s => s.SpeakerId).Distinct().Count()} speaker(s).");
+    }
+
+    private static bool IsDiarizationAutoDownloadEnabled(ReplayConfig config)
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_DIARIZATION_AUTODOWNLOAD");
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+        {
+            var normalized = fromEnv.Trim().ToLowerInvariant();
+            if (normalized is "false" or "0" or "no")
+            {
+                return false;
+            }
+            if (normalized is "true" or "1" or "yes")
+            {
+                return true;
+            }
+        }
+
+        return config.Diarization.AutoDownload;
+    }
 
     private static bool IsOcrLocalAutoDownloadEnabled(ReplayConfig config)
     {
@@ -1501,7 +1847,12 @@ public sealed record AnalyzeRequest(
     bool? SmartCrop = null,
     string? SmartCropProfile = null,
     string? CaptureMode = null,
-    string? AuthProfile = null);
+    string? AuthProfile = null,
+    bool UseDiarization = false,
+    int? NumSpeakers = null,
+    float? DiarizationThreshold = null,
+    string VisionProvider = VisionProviders.Copilot,
+    string? LocalVisionMode = null);
 
 public static class FrameSelectionStrategies
 {
@@ -1510,6 +1861,18 @@ public static class FrameSelectionStrategies
     public const string Scene = "scene";
 
     public const string EveryFrame = "every-frame";
+
+    /// <summary>
+    /// Ad-hoc capture strategy: caller supplies an explicit list of timestamps. Used by
+    /// <see cref="FrameCaptureService"/> for spot captures (not by <see cref="AnalysisPipeline"/>).
+    /// </summary>
+    public const string Timestamps = "timestamps";
+
+    /// <summary>
+    /// Ad-hoc capture strategy: caller supplies a <c>[start, end]</c> window plus a per-window
+    /// frame budget; used by <see cref="FrameCaptureService"/>.
+    /// </summary>
+    public const string Range = "range";
 }
 
 public sealed record AnalyzeResult(VideoRun Run, ArtifactManifest Manifest, bool Reused = false);

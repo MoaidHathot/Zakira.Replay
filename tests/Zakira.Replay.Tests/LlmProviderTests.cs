@@ -1,5 +1,5 @@
-using System.Net;
-using System.Text.Json;
+using System.Threading.Tasks;
+using Microsoft.Extensions.AI;
 using Zakira.Replay.Core;
 
 namespace Zakira.Replay.Tests;
@@ -7,13 +7,17 @@ namespace Zakira.Replay.Tests;
 public sealed class LlmProviderTests
 {
     [Fact]
-    public async Task OpenAiProviderSendsChatCompletionPayload()
+    public async Task OpenAiProviderSendsChatRequestThroughIChatClient()
     {
-        using var handler = new RecordingHttpMessageHandler("{\"choices\":[{\"message\":{\"content\":\"ok\"}}]}");
+        // Phase 4: OpenAi/Azure providers go through Microsoft.Extensions.AI.IChatClient
+        // internally. We mock at the IChatClient layer rather than at the HTTP wire shape:
+        // the OpenAI SDK is responsible for the wire, and the SDK is well-tested upstream.
         using var image = new TestTempDirectory();
         var imagePath = image.GetPath("frame.jpg");
         await File.WriteAllBytesAsync(imagePath, [1, 2, 3], CancellationToken.None);
-        var provider = new OpenAiLlmProvider("test-key", "https://api.test/v1", "gpt-test", httpClientFactory: () => new HttpClient(handler, disposeHandler: false));
+
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new OpenAiLlmProvider(fake);
 
         var response = await provider.CompleteAsync(new LlmRequest(
             Prompt: "Describe this frame.",
@@ -22,30 +26,60 @@ public sealed class LlmProviderTests
             SystemMessage: "system"), CancellationToken.None);
 
         Assert.Equal("ok", response);
-        Assert.Equal(HttpMethod.Post, handler.Requests.Single().Method);
-        Assert.Equal("https://api.test/v1/chat/completions", handler.Requests.Single().RequestUri!.ToString());
-        Assert.Equal("Bearer", handler.Requests.Single().Headers.Authorization?.Scheme);
-        Assert.Equal("test-key", handler.Requests.Single().Headers.Authorization?.Parameter);
-        using var body = JsonDocument.Parse(handler.RequestBodies.Single());
-        Assert.Equal("gpt-test", body.RootElement.GetProperty("model").GetString());
-        var messages = body.RootElement.GetProperty("messages");
-        Assert.Equal("system", messages[0].GetProperty("content").GetString());
-        var content = messages[1].GetProperty("content");
-        Assert.Equal("Describe this frame.", content[0].GetProperty("text").GetString());
-        Assert.StartsWith("data:image/jpeg;base64,", content[1].GetProperty("image_url").GetProperty("url").GetString(), StringComparison.Ordinal);
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal(2, call.Messages.Count);
+        Assert.Equal(ChatRole.System, call.Messages[0].Role);
+        Assert.Equal("system", call.Messages[0].Text);
+        Assert.Equal(ChatRole.User, call.Messages[1].Role);
+
+        // User content is [TextContent("Describe this frame."), DataContent(image-bytes, image/jpeg)].
+        Assert.Equal(2, call.Messages[1].Contents.Count);
+        var text = Assert.IsType<TextContent>(call.Messages[1].Contents[0]);
+        Assert.Equal("Describe this frame.", text.Text);
+        var data = Assert.IsType<DataContent>(call.Messages[1].Contents[1]);
+        Assert.Equal("image/jpeg", data.MediaType);
+        Assert.Equal(new byte[] { 1, 2, 3 }, data.Data.ToArray());
     }
 
     [Fact]
-    public async Task AzureOpenAiProviderSendsDeploymentChatPayload()
+    public async Task OpenAiProviderForwardsRequestModelToChatOptions()
     {
-        using var handler = new RecordingHttpMessageHandler("{\"choices\":[{\"message\":{\"content\":\"azure-ok\"}}]}");
-        var provider = new AzureOpenAiLlmProvider(
-            "https://azure.test",
-            "azure-key",
-            "deployment-one",
-            model: null,
-            apiVersion: "2024-10-21",
-            httpClientFactory: () => new HttpClient(handler, disposeHandler: false));
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new OpenAiLlmProvider(fake);
+
+        await provider.CompleteAsync(new LlmRequest(
+            Prompt: "Hi",
+            AttachmentPaths: [],
+            Model: "gpt-4o-mini-2024-07-18"), CancellationToken.None);
+
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal("gpt-4o-mini-2024-07-18", call.Options?.ModelId);
+        Assert.Equal(0.2f, call.Options?.Temperature);
+    }
+
+    [Fact]
+    public async Task OpenAiProviderIgnoresCopilotSentinelModelString()
+    {
+        // When the analysis pipeline forwards GitHubCopilotLlmProvider.DefaultModel as the model
+        // (the Copilot sentinel) into the OpenAI provider, we must NOT pass that value as the
+        // OpenAI model id — it would 404 the API. The provider's configured chatModel wins.
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new OpenAiLlmProvider(fake);
+
+        await provider.CompleteAsync(new LlmRequest(
+            Prompt: "Hi",
+            AttachmentPaths: [],
+            Model: GitHubCopilotLlmProvider.DefaultModel), CancellationToken.None);
+
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal(LlmProviderFactory.DefaultOpenAiModel, call.Options?.ModelId);
+    }
+
+    [Fact]
+    public async Task AzureOpenAiProviderSendsChatRequestThroughIChatClient()
+    {
+        using var fake = new RecordingChatClient(static _ => "azure-ok");
+        using var provider = new AzureOpenAiLlmProvider(fake, deployment: "deployment-one");
 
         var response = await provider.CompleteAsync(new LlmRequest(
             Prompt: "Summarize.",
@@ -53,28 +87,65 @@ public sealed class LlmProviderTests
             Model: "deployment-one"), CancellationToken.None);
 
         Assert.Equal("azure-ok", response);
-        Assert.Equal("https://azure.test/openai/deployments/deployment-one/chat/completions?api-version=2024-10-21", handler.Requests.Single().RequestUri!.ToString());
-        Assert.True(handler.Requests.Single().Headers.TryGetValues("api-key", out var values));
-        Assert.Equal("azure-key", values.Single());
-        using var body = JsonDocument.Parse(handler.RequestBodies.Single());
-        Assert.False(body.RootElement.TryGetProperty("model", out _));
-        Assert.Equal("Summarize.", body.RootElement.GetProperty("messages")[0].GetProperty("content")[0].GetProperty("text").GetString());
+        var call = Assert.Single(fake.Calls);
+        // When request.Model equals the deployment, prefer the configured `model` (null) — fall
+        // through to the deployment id since model is null. This preserves the legacy contract.
+        Assert.Equal("deployment-one", call.Options?.ModelId);
+        Assert.Single(call.Messages);
+        Assert.Equal(ChatRole.User, call.Messages[0].Role);
+        var text = Assert.IsType<TextContent>(call.Messages[0].Contents[0]);
+        Assert.Equal("Summarize.", text.Text);
     }
 
     [Fact]
-    public async Task AzureOpenAiProviderAcceptsFullChatCompletionsEndpointWithoutDeployment()
+    public async Task AzureOpenAiProviderUsesConfiguredModelOverDeploymentSentinel()
     {
-        using var handler = new RecordingHttpMessageHandler("{\"choices\":[{\"message\":{\"content\":\"full-url-ok\"}}]}");
-        var provider = new AzureOpenAiLlmProvider(
-            "https://azure.test/openai/deployments/from-url/chat/completions?api-version=2024-10-21",
-            "azure-key",
-            deployment: string.Empty,
-            httpClientFactory: () => new HttpClient(handler, disposeHandler: false));
+        // Azure deployments are typically distinct from openai model ids; the provider lets
+        // users pin a specific model (e.g. "gpt-4o-2024-08-06") through the ctor `model` arg.
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new AzureOpenAiLlmProvider(fake, deployment: "deployment-one", model: "gpt-4o-2024-08-06");
 
-        var response = await provider.CompleteAsync(new LlmRequest("Ping", []), CancellationToken.None);
+        await provider.CompleteAsync(new LlmRequest(
+            Prompt: "Hi",
+            AttachmentPaths: [],
+            Model: "deployment-one"), CancellationToken.None);
 
-        Assert.Equal("full-url-ok", response);
-        Assert.Equal("https://azure.test/openai/deployments/from-url/chat/completions?api-version=2024-10-21", handler.Requests.Single().RequestUri!.ToString());
+        var call = Assert.Single(fake.Calls);
+        Assert.Equal("gpt-4o-2024-08-06", call.Options?.ModelId);
+    }
+
+    [Fact]
+    public async Task AzureOpenAiProviderRejectsAudioAttachmentsWithGuidance()
+    {
+        using var temp = new TestTempDirectory();
+        var audio = temp.GetPath("clip.wav");
+        await File.WriteAllBytesAsync(audio, [0, 0], CancellationToken.None);
+
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new AzureOpenAiLlmProvider(fake, deployment: "deployment-one");
+
+        var ex = await Assert.ThrowsAsync<ReplayException>(
+            () => provider.CompleteAsync(new LlmRequest("Transcribe", [audio]), CancellationToken.None));
+
+        Assert.Contains("audio transcription", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fake.Calls);
+    }
+
+    [Fact]
+    public async Task OpenAiProviderRejectsNonImageAttachments()
+    {
+        using var temp = new TestTempDirectory();
+        var binary = temp.GetPath("doc.pdf");
+        await File.WriteAllBytesAsync(binary, [1, 2, 3], CancellationToken.None);
+
+        using var fake = new RecordingChatClient(static _ => "ok");
+        using var provider = new OpenAiLlmProvider(fake);
+
+        var ex = await Assert.ThrowsAsync<ReplayException>(
+            () => provider.CompleteAsync(new LlmRequest("describe", [binary]), CancellationToken.None));
+
+        Assert.Contains("image attachments", ex.Message, StringComparison.OrdinalIgnoreCase);
+        Assert.Empty(fake.Calls);
     }
 
     [Fact]
@@ -151,27 +222,52 @@ public sealed class LlmProviderTests
         }
     }
 
-    private sealed class RecordingHttpMessageHandler : HttpMessageHandler, IDisposable
+    /// <summary>
+    /// Test double for <see cref="IChatClient"/>. Records every call so tests can assert on the
+    /// translated <see cref="ChatMessage"/> sequence and the <see cref="ChatOptions"/> the
+    /// provider built, and returns a canned response. Streaming is unsupported (the
+    /// production providers go through <c>GetResponseAsync</c>, not the streaming variant).
+    /// </summary>
+    private sealed class RecordingChatClient : IChatClient
     {
-        private readonly string responseBody;
+        private readonly Func<RecordedCall, string> responder;
 
-        public RecordingHttpMessageHandler(string responseBody)
+        public RecordingChatClient(Func<RecordedCall, string> responder)
         {
-            this.responseBody = responseBody;
+            this.responder = responder;
         }
 
-        public List<HttpRequestMessage> Requests { get; } = [];
+        public List<RecordedCall> Calls { get; } = [];
 
-        public List<string> RequestBodies { get; } = [];
-
-        protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellationToken)
+        public Task<ChatResponse> GetResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            CancellationToken cancellationToken = default)
         {
-            Requests.Add(request);
-            RequestBodies.Add(request.Content is null ? string.Empty : await request.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false));
-            return new HttpResponseMessage(HttpStatusCode.OK)
+            var call = new RecordedCall(messages.ToList(), options);
+            Calls.Add(call);
+            var text = responder(call);
+            return Task.FromResult(new ChatResponse(new ChatMessage(ChatRole.Assistant, text))
             {
-                Content = new StringContent(responseBody)
-            };
+                ModelId = options?.ModelId,
+                FinishReason = ChatFinishReason.Stop
+            });
+        }
+
+        public IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
+            IEnumerable<ChatMessage> messages,
+            ChatOptions? options = null,
+            CancellationToken cancellationToken = default)
+        {
+            throw new NotSupportedException("RecordingChatClient does not implement streaming.");
+        }
+
+        public object? GetService(Type serviceType, object? serviceKey = null) => null;
+
+        public void Dispose()
+        {
         }
     }
+
+    private sealed record RecordedCall(IReadOnlyList<ChatMessage> Messages, ChatOptions? Options);
 }

@@ -15,8 +15,27 @@ public interface IOcrProvider
 
 public interface IVisionProvider
 {
-    Task<string> DescribeAsync(string imagePath, string visionInstruction, CancellationToken cancellationToken);
+    Task<string> DescribeAsync(VisionRequest request, CancellationToken cancellationToken);
 }
+
+/// <summary>
+/// Per-frame vision input. Carries the image path, the orchestrator's focus signal, the frame
+/// metadata, and an optional <see cref="OcrFrameResult"/> for the same frame. Providers that
+/// need OCR context (notably <see cref="LocalOnnxVisionProvider"/>) consume <see cref="OcrContext"/>;
+/// LLM-backed providers may ignore it.
+/// </summary>
+/// <param name="ImagePath">Absolute path to the frame JPEG.</param>
+/// <param name="Instruction">Orchestrator-supplied focus signal; may be empty.</param>
+/// <param name="Frame">The <see cref="FrameArtifact"/> being analysed. Useful for providers that
+/// want to log timestamps or branch on cropped vs. original images.</param>
+/// <param name="OcrContext">Optional OCR result for the same frame. Always non-null when the
+/// local provider is selected (the pipeline auto-enables OCR in that case); may be null for the
+/// LLM provider when <c>--ocr</c> was not requested.</param>
+public sealed record VisionRequest(
+    string ImagePath,
+    string Instruction,
+    FrameArtifact Frame,
+    OcrFrameResult? OcrContext = null);
 
 public sealed class CopilotTranscriptionProvider : ITranscriptionProvider
 {
@@ -92,11 +111,11 @@ public sealed class CopilotVisionProvider : IVisionProvider
         this.model = model;
     }
 
-    public Task<string> DescribeAsync(string imagePath, string visionInstruction, CancellationToken cancellationToken)
+    public Task<string> DescribeAsync(VisionRequest request, CancellationToken cancellationToken)
     {
-        var focus = string.IsNullOrWhiteSpace(visionInstruction)
+        var focus = string.IsNullOrWhiteSpace(request.Instruction)
             ? string.Empty
-            : "\n\nAdditional focus from the orchestrator: " + visionInstruction.Trim() + "\nTreat this as a hint about which visible aspects to enumerate first; never invent content to satisfy it.";
+            : "\n\nAdditional focus from the orchestrator: " + request.Instruction.Trim() + "\nTreat this as a hint about which visible aspects to enumerate first; never invent content to satisfy it.";
 
         return llm.CompleteAsync(new LlmRequest(
             Prompt: $$"""
@@ -119,7 +138,7 @@ public sealed class CopilotVisionProvider : IVisionProvider
                 - Omit array entries you cannot fill from the visible frame; do not invent.
                 - Code blocks must contain text exactly as written on the screen.
                 """,
-            AttachmentPaths: [imagePath],
+            AttachmentPaths: [request.ImagePath],
             Model: model,
             SystemMessage: "You analyze individual video frames as evidence. Return strict JSON. Do not infer unsupported facts.",
             Timeout: TimeSpan.FromMinutes(5)), cancellationToken);

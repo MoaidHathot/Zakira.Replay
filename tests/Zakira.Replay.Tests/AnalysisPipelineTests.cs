@@ -621,6 +621,37 @@ public sealed class AnalysisPipelineTests
     }
 
     [Fact]
+    public async Task AnalyzeAsyncWithLocalVisionHeuristicModeProducesNoLlmVisionResults()
+    {
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        // No LLM provider wired up at all - any attempt to call one would fail. The local
+        // vision provider must succeed regardless because it never invokes one.
+        var pipeline = new AnalysisPipeline(store, new FakeYtDlpClient(), new FakeFfmpegClient(), _ => null);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: sourcePath,
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "local-vision-heuristic",
+            UseOcr: false,
+            UseVision: true,
+            VisionProvider: VisionProviders.Local,
+            LocalVisionMode: "heuristic",
+            FrameStrategy: FrameSelectionStrategies.Interval), progress: null, CancellationToken.None);
+
+        var evidence = await store.ReadJsonAsync<EvidenceDocument>(result.Run, "evidence.json", CancellationToken.None);
+        Assert.NotNull(evidence);
+        Assert.Single(evidence.Vision);
+        Assert.Equal(VisionProviders.Local, evidence.Vision[0].Provider);
+        Assert.NotNull(evidence.Vision[0].Structured);
+        Assert.Contains(evidence.Warnings, w => w.Code == ReplayWarningCodes.VisionLocalOcrRequired);
+    }
+
+    [Fact]
     public async Task AnalyzeAsyncTagsOcrResultsWithCopilotProviderWhenExplicitlyRequested()
     {
         using var temp = new TestTempDirectory();
@@ -1100,6 +1131,27 @@ public sealed class AnalysisPipelineTests
             return Task.FromResult<IReadOnlyList<FrameArtifact>>([new FrameArtifact("frame-001", "frames/frame-001.jpg", 4.5, "00:04")]);
         }
 
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            var frames = new List<FrameArtifact>(timestamps.Count);
+            for (var i = 0; i < timestamps.Count; i++)
+            {
+                var seconds = timestamps[i].TotalSeconds;
+                var label = Timestamp.Format(seconds);
+                var fileSafeLabel = label.Replace(':', '-').Replace('.', '-');
+                frames.Add(new FrameArtifact($"frame-{i + 1:000}", $"frames/frame-{i + 1:000}-{fileSafeLabel}.jpg", seconds, label));
+            }
+
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>(frames);
+        }
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            var timestamp = (rangeStart.TotalSeconds + rangeEnd.TotalSeconds) / 2.0;
+            var label = Timestamp.Format(timestamp);
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>([new FrameArtifact("scene-0001", "frames/range-scene-0001.jpg", timestamp, label)]);
+        }
+
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken)
         {
             return Task.FromResult("audio/audio.wav");
@@ -1125,6 +1177,11 @@ public sealed class AnalysisPipelineTests
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)!);
             File.WriteAllText(outputPath, "fake chunk");
             return Task.CompletedTask;
+        }
+
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<byte[]?>(null);
         }
 
         public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)

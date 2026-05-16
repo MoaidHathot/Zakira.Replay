@@ -131,21 +131,36 @@ public sealed class LocalOnnxOcrProvider : IOcrProvider, IDisposable
 }
 
 /// <summary>
-/// Resolved on-disk paths for the four PP-OCRv5 latin model files that
+/// Resolved on-disk paths for the four PP-OCRv5 model files that
 /// <see cref="LocalOnnxOcrProvider"/> needs. Use
 /// <see cref="LocalOcrModelPaths.Resolve(ReplayConfig)"/> to populate from config/env defaults.
 /// </summary>
-public sealed record LocalOcrModelPaths(string DetectionPath, string ClassificationPath, string RecognitionPath, string DictionaryPath)
+public sealed record LocalOcrModelPaths(string DetectionPath, string ClassificationPath, string RecognitionPath, string DictionaryPath, string LanguagePack = OcrLanguagePacks.Latin)
 {
     /// <summary>
     /// Resolve model paths from environment variables, then explicit <c>ocr.local.*Path</c>
-    /// config keys, then the configured (or default) RapidOCR model directory.
+    /// config keys, then the configured (or default) RapidOCR model directory + language pack.
     /// </summary>
     public static LocalOcrModelPaths Resolve(ReplayConfig? config = null)
     {
         config ??= new ConfigStore().Load();
         var installer = new PortableDependencyInstaller(config);
         var directory = installer.Layout.OcrModelDirectory;
+
+        // Language pack resolution: env var > config > Latin default. Unknown packs are not
+        // silently fall-back-corrected here — TryGet returns false and the caller (the local
+        // OCR provider) surfaces a clear `OCR_LOCAL_INIT_FAILED` warning.
+        var packName = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_LANGUAGE_PACK"),
+            config.Ocr.Local.LanguagePack,
+            OcrLanguagePacks.Latin)!;
+
+        if (!OcrLanguagePacks.TryGet(packName, out var pack))
+        {
+            // Surface the unknown pack name verbatim so the provider's error message can quote it
+            // back to the user; the file existence check below will fail with a clear pointer.
+            pack = OcrLanguagePacks.Get(OcrLanguagePacks.Latin) with { Name = packName };
+        }
 
         var det = FirstNonEmpty(
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_DETECTION_MODEL_PATH"),
@@ -160,14 +175,14 @@ public sealed record LocalOcrModelPaths(string DetectionPath, string Classificat
         var rec = FirstNonEmpty(
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_RECOGNITION_MODEL_PATH"),
             config.Ocr.Local.RecognitionModelPath,
-            Path.Combine(directory, PortableDependencyInstaller.OcrRecognitionModelFile));
+            Path.Combine(directory, pack.RecognitionModelFile));
 
         var dict = FirstNonEmpty(
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_OCR_DICTIONARY_PATH"),
             config.Ocr.Local.DictionaryPath,
-            Path.Combine(directory, PortableDependencyInstaller.OcrDictionaryFile));
+            Path.Combine(directory, pack.DictionaryFile));
 
-        return new LocalOcrModelPaths(det!, cls!, rec!, dict!);
+        return new LocalOcrModelPaths(det!, cls!, rec!, dict!, pack.Name);
     }
 
     public IReadOnlyList<string> MissingFiles()

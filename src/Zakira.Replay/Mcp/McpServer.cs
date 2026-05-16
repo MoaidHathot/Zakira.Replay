@@ -146,6 +146,12 @@ public sealed class McpServer
                         },
                         new
                         {
+                            name = "extract_frames",
+                            description = "Ad-hoc frame capture from a URL or local media file. Pass either `at` (an array of exact timestamps) or `from`/`to`/`count` (a time window). Output is JPEG stills in a new run folder; the analyze pipeline (slides/OCR/vision/alignment) is intentionally skipped for speed.",
+                            inputSchema = ExtractFramesInputSchema()
+                        },
+                        new
+                        {
                             name = "build_search_index",
                             description = "Builds a local search index over a completed run's evidence.json.",
                             inputSchema = SearchBuildInputSchema()
@@ -302,6 +308,32 @@ public sealed class McpServer
                 }, JsonOptions), cancellationToken).ConfigureAwait(false);
                 break;
 
+            case "extract_frames":
+                var frameCaptureService = CreateFrameCaptureService();
+                var frameCaptureResult = await frameCaptureService.CaptureAsync(ParseExtractFramesRequest(args), progress: null, cancellationToken).ConfigureAwait(false);
+                var resolvedFrames = frameCaptureResult.Manifest.Frames
+                    .Select(frame => new
+                    {
+                        id = frame.Id,
+                        path = frameCaptureResult.Run.GetPath(frame.Path),
+                        relativePath = frame.Path,
+                        timestampSeconds = frame.TimestampSeconds,
+                        timestampLabel = frame.TimestampLabel,
+                        perceptualHash = frame.PerceptualHash
+                    })
+                    .ToArray();
+                await WriteToolTextAsync(request.Id, JsonSerializer.Serialize(new
+                {
+                    runId = frameCaptureResult.Run.Id,
+                    artifactDirectory = frameCaptureResult.Run.Directory,
+                    manifestPath = frameCaptureResult.Run.GetPath("frame-capture.json"),
+                    frameCount = resolvedFrames.Length,
+                    frames = resolvedFrames,
+                    warnings = frameCaptureResult.Manifest.Warnings,
+                    manifest = frameCaptureResult.Manifest
+                }, JsonOptions), cancellationToken).ConfigureAwait(false);
+                break;
+
             case "build_search_index":
                 var runDirectory = GetRequiredString(args, "runDirectory", "build_search_index requires `runDirectory`.");
                 var buildResult = await new SearchIndexService().BuildAsync(runDirectory, ParseSearchBuildOptions(args), cancellationToken).ConfigureAwait(false);
@@ -412,6 +444,8 @@ public sealed class McpServer
         var stt = GetBool(args, "stt");
         var llmProvider = LlmProviderFactory.Normalize(GetString(args, "llmProvider") ?? GetString(args, "provider") ?? GetString(args, "llm-provider"));
         var ocrProvider = OcrProviderFactory.Normalize(GetString(args, "ocrProvider") ?? GetString(args, "ocr-provider"));
+        var visionProvider = VisionProviderFactory.Normalize(GetString(args, "visionProvider") ?? GetString(args, "vision-provider"));
+        var localVisionMode = GetString(args, "localVisionMode") ?? GetString(args, "local-vision-mode");
         bool? slideGrouping = null;
         if (args.TryGetPropertyValue("slideGrouping", out var slideGroupingNode) && slideGroupingNode is not null)
         {
@@ -455,7 +489,9 @@ public sealed class McpServer
             SmartCrop: smartCrop,
             SmartCropProfile: smartCropProfile,
             CaptureMode: captureMode,
-            AuthProfile: authProfile);
+            AuthProfile: authProfile,
+            VisionProvider: visionProvider,
+            LocalVisionMode: localVisionMode);
     }
 
     private static IReadOnlyList<string>? GetCaptionLanguages(JsonObject args)
@@ -540,6 +576,101 @@ public sealed class McpServer
         var processRunner = new ProcessRunner();
         var artifactStore = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
         return new ClipExtractionService(artifactStore, new YtDlpClient(dependencies, processRunner), new FfmpegClient(dependencies, processRunner));
+    }
+
+    private static FrameCaptureService CreateFrameCaptureService()
+    {
+        var dependencies = new DependencyResolver();
+        var processRunner = new ProcessRunner();
+        var artifactStore = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+        return new FrameCaptureService(artifactStore, new YtDlpClient(dependencies, processRunner), new FfmpegClient(dependencies, processRunner));
+    }
+
+    private static FrameCaptureRequest ParseExtractFramesRequest(JsonObject? args)
+    {
+        var source = GetRequiredString(args, "source", "extract_frames requires `source`.");
+        var timestamps = ParseTimestampList(args, "at");
+        TimeSpan? rangeStart = null;
+        TimeSpan? rangeEnd = null;
+        if (args is not null)
+        {
+            if (args.TryGetPropertyValue("from", out var fromNode) && fromNode is not null)
+            {
+                rangeStart = Timestamp.ParseRequired(ReadTimestampNode(fromNode, "from"), "from");
+            }
+
+            if (args.TryGetPropertyValue("to", out var toNode) && toNode is not null)
+            {
+                rangeEnd = Timestamp.ParseRequired(ReadTimestampNode(toNode, "to"), "to");
+            }
+        }
+
+        var strategy = GetString(args ?? new JsonObject(), "strategy");
+        return new FrameCaptureRequest(
+            Source: source,
+            Timestamps: timestamps.Count == 0 ? null : timestamps,
+            RangeStart: rangeStart,
+            RangeEnd: rangeEnd,
+            RangeCount: args is null ? null : GetOptionalInt(args, "count"),
+            RangeStrategy: string.IsNullOrWhiteSpace(strategy) ? FrameSelectionStrategies.Interval : strategy!,
+            RunId: args is null ? null : GetString(args, "runId"),
+            MaxLongEdgePixels: args is null ? null : GetOptionalInt(args, "maxLongEdgePixels"),
+            JpegQuality: args is null ? null : GetOptionalInt(args, "jpegQuality"),
+            ComputePerceptualHash: args is not null && GetBool(args, "computePerceptualHash"),
+            SceneSafetyCap: args is null ? null : GetOptionalInt(args, "sceneSafetyCap"),
+            CookiesPath: args is null ? null : GetString(args, "cookies"),
+            CookiesFromBrowser: args is null ? null : GetString(args, "browserAuth") ?? GetString(args, "cookiesFromBrowser"));
+    }
+
+    private static IReadOnlyList<TimeSpan> ParseTimestampList(JsonObject? args, string fieldName)
+    {
+        if (args is null || !args.TryGetPropertyValue(fieldName, out var node) || node is null)
+        {
+            return [];
+        }
+
+        if (node is JsonArray array)
+        {
+            var timestamps = new List<TimeSpan>(array.Count);
+            for (var i = 0; i < array.Count; i++)
+            {
+                var entry = array[i];
+                if (entry is null)
+                {
+                    continue;
+                }
+
+                timestamps.Add(Timestamp.ParseRequired(ReadTimestampNode(entry, fieldName), fieldName));
+            }
+
+            return timestamps;
+        }
+
+        var raw = node.GetValue<string>();
+        return FrameCaptureInput.ParseTimestamps(raw, fieldName);
+    }
+
+    private static string ReadTimestampNode(JsonNode node, string fieldName)
+    {
+        if (node is JsonValue value)
+        {
+            if (value.TryGetValue(out string? str) && str is not null)
+            {
+                return str;
+            }
+
+            if (value.TryGetValue(out double dbl))
+            {
+                return dbl.ToString("0.###", System.Globalization.CultureInfo.InvariantCulture);
+            }
+
+            if (value.TryGetValue(out long lng))
+            {
+                return lng.ToString(System.Globalization.CultureInfo.InvariantCulture);
+            }
+        }
+
+        throw new ReplayException($"Invalid `{fieldName}` value: must be a number or string.");
     }
 
     private static string GetJobId(JsonObject? args)
@@ -631,6 +762,8 @@ public sealed class McpServer
                 framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is max(framesPerMinute * durationMinutes, frames). Ignored for scene and every-frame strategies." },
                 sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000). Bounds the maximum number of scene-cut frames extracted. When the cap is reached, the run carries a FRAMES_SCENE_CAP_REACHED warning." },
                 ocrProvider = new { type = "string", description = "OCR provider: 'copilot' (LLM vision-as-OCR, default) or 'local' (RapidOCR / PP-OCRv5 via ONNX). Install local models with `deps install ocr`." },
+                visionProvider = new { type = "string", description = "Vision provider: 'copilot' (LLM-backed; default) or 'local' (fully-on-device LocalOnnxVisionProvider that never calls an LLM)." },
+                localVisionMode = new { type = "string", description = "Sub-mode for the local vision provider. 'heuristic' (zero models; structure from OCR), 'clip' (heuristic + CLIP zero-shot for kind), or 'clip-blip' (default; CLIP + BLIP captioning for freeText). Ignored when visionProvider is 'copilot'." },
                 smartCrop = new { type = "boolean", description = "Run smart-crop preprocessing on each frame before perceptual hashing, OCR, and vision. Removes Teams/Zoom/WebEx UI chrome (controls bar, participant gallery, black letterbox bars). Defaults to false." },
                 smartCropProfile = new { type = "string", description = "Smart-crop profile: 'auto' (default), 'teams', 'zoom', 'webex', 'generic', or 'off'. All non-off profiles share the same algorithm in this release; the value is recorded on each FrameCropBox for audit." },
                 captureMode = new { type = "string", description = "Frame-capture mode: 'ytdlp' (default; yt-dlp + ffmpeg), 'browser' (Playwright-driven Chromium for sites yt-dlp can't reach), or 'auto' (try yt-dlp, fall back to browser on failure with CAPTURE_BROWSER_FALLBACK)." },
@@ -694,6 +827,8 @@ public sealed class McpServer
                 framesPerMinute = new { type = "integer", description = "Optional duration-aware sampling rate for the interval strategy." },
                 sceneSafetyCap = new { type = "integer", description = "Per-run override of frames.sceneSafetyCap (default 2000)." },
                 ocrProvider = new { type = "string", description = "OCR provider: 'copilot' (LLM vision-as-OCR, default) or 'local' (RapidOCR via ONNX, requires `deps install ocr`)." },
+                visionProvider = new { type = "string", description = "Vision provider: 'copilot' (LLM-backed; default) or 'local' (fully-on-device, never calls an LLM)." },
+                localVisionMode = new { type = "string", description = "Sub-mode for local vision: 'heuristic', 'clip', or 'clip-blip' (default for the local provider)." },
                 smartCrop = new { type = "boolean", description = "Run smart-crop preprocessing on every frame before perceptual hashing, OCR, and vision (Teams/Zoom/WebEx UI chrome removal)." },
                 smartCropProfile = new { type = "string", description = "Smart-crop profile: auto|teams|zoom|webex|generic|off." },
                 captureMode = new { type = "string", description = "Frame-capture mode: ytdlp|browser|auto." },
@@ -748,6 +883,79 @@ public sealed class McpServer
                 browserAuth = new { type = "string", description = "Alias for cookiesFromBrowser." }
             },
             required = new[] { "source", "start", "end" }
+        };
+    }
+
+    private static object ExtractFramesInputSchema()
+    {
+        return new
+        {
+            type = "object",
+            description = "Pass either `at` (list of exact timestamps) or `from`+`to` (a time window with optional `count` and `strategy`). The two modes are mutually exclusive.",
+            properties = new
+            {
+                source = new { type = "string", description = "Video URL or local media path." },
+                at = new
+                {
+                    description = "Exact timestamps to capture. Accepts an array of strings/numbers (`\"02:34\"`, `\"01:02:03\"`, `154.5`) or a comma-separated string. Up to 64 timestamps per call; excess entries are dropped with a FRAME_CAPTURE_TOO_MANY_TIMESTAMPS warning. Out-of-range entries are dropped with FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE.",
+                    type = new[] { "array", "string", "null" },
+                    items = new
+                    {
+                        type = new[] { "string", "number" }
+                    }
+                },
+                from = new
+                {
+                    description = "Start of the capture window (inclusive). Required when using window mode. Seconds, MM:SS, or HH:MM:SS.",
+                    type = new[] { "string", "number", "null" }
+                },
+                to = new
+                {
+                    description = "End of the capture window (inclusive). Required when using window mode. Seconds, MM:SS, or HH:MM:SS.",
+                    type = new[] { "string", "number", "null" }
+                },
+                count = new
+                {
+                    description = "Number of frames to capture inside the window when `strategy` is `interval`. When `strategy` is `scene`, acts as an upper bound on the number of returned scene cuts.",
+                    type = new[] { "integer", "null" },
+                    minimum = 1
+                },
+                strategy = new
+                {
+                    description = "Frame selection inside the window. `interval` (default) evenly spaces `count` timestamps inclusive of `from` and `to`. `scene` runs ffmpeg's scene-cut detector scoped to the window.",
+                    type = "string",
+                    @enum = new[] { "interval", "scene" }
+                },
+                runId = new { type = "string", description = "Optional run ID for the artifact folder. A new folder is created under `runs/` when omitted." },
+                maxLongEdgePixels = new
+                {
+                    description = "Optional resize: max length of the longest edge in pixels. Aspect ratio is preserved. Useful for thumbnail-sized stills.",
+                    type = new[] { "integer", "null" },
+                    minimum = 16
+                },
+                jpegQuality = new
+                {
+                    description = "Optional JPEG quality on a 1-100 scale (mapped to ffmpeg's `-q:v` qscale). Defaults to high quality when omitted.",
+                    type = new[] { "integer", "null" },
+                    minimum = 1,
+                    maximum = 100
+                },
+                computePerceptualHash = new
+                {
+                    description = "When true, also computes a 64-bit perceptual hash (dHash) per captured frame so consumers can dedupe near-identical stills.",
+                    type = "boolean"
+                },
+                sceneSafetyCap = new
+                {
+                    description = "Optional hard cap on scene-cut frames inside the window (defaults to max(count, 200)). When the cap is reached the manifest carries FRAME_CAPTURE_SCENE_CAP_REACHED.",
+                    type = new[] { "integer", "null" },
+                    minimum = 1
+                },
+                cookies = new { type = "string", description = "Path to a Netscape cookies file for yt-dlp." },
+                cookiesFromBrowser = new { type = "string", description = "Browser name/profile spec for yt-dlp --cookies-from-browser." },
+                browserAuth = new { type = "string", description = "Alias for cookiesFromBrowser." }
+            },
+            required = new[] { "source" }
         };
     }
 

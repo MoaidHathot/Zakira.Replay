@@ -36,6 +36,7 @@ Prefer these tools:
 - `build_search_index`: build JSON, SQLite, or SQLite+ONNX search over a completed run.
 - `query_search_index`: retrieve relevant evidence chunks.
 - `extract_clip`: create a timestamped clip when start/end are known.
+- `extract_frames`: ad-hoc frame capture at specific timestamps or inside a time window, without paying for the full analyze pipeline (no slides/OCR/vision/alignment). Use after a full `analyze_video` run when an agent needs additional stills for a downstream artifact (e.g. illustrating a recipe step, attaching a thumbnail to a chapter, or grabbing a screenshot at a transcript moment).
 - `build_evidence_alignment`: build cross-modal alignment views (`by-chapter`, `by-slide`) over a completed run. Pure rearrangement; no model calls.
 - `doctor`: diagnose dependencies and provider setup.
 - `enqueue_analysis_queue_job`, `run_analysis_queue`, `get_analysis_queue_status`: persistent queue workflow for many videos.
@@ -157,7 +158,8 @@ Use these defaults unless the user says otherwise:
 - `visionInstruction` and `ocrInstruction`: optional focus signals appended to the vision and OCR prompts. Both default to empty; the model already extracts every visible piece of content (vision: slide titles, bullets, code blocks, chart axes, UI controls; OCR: every readable character). Use these only to bias enumeration toward what matters for your question (e.g. `visionInstruction: "Bias toward chart axes and code"`, `ocrInstruction: "Preserve indentation in code-like text"`). Both are persisted into `evidence.json::visionInstruction` and `evidence.json::ocrInstruction` for audit. They never relax the "do not invent" guardrails.
 - `framesPerMinute`: optional duration-aware sampling rate for the interval strategy. When set, the effective frame count is `max(framesPerMinute * durationMinutes, frames)`. Ignored for `scene` and `every-frame`. Use this instead of cranking `frames` when sampling a long video.
 - `sceneSafetyCap`: per-run override of `frames.sceneSafetyCap` (default 5000). The scene strategy returns up to this many frames; slide grouping deduplicates. The run carries a `FRAMES_SCENE_CAP_REACHED` warning when the cap is hit, and `FRAMES_LIKELY_UNDERSAMPLED` when interval sampling without `framesPerMinute` (and with `frames.perMinute=0` in config) produces fewer than 1 frame per 5 minutes.
-- `ocrProvider`: choose the OCR backend. `"local"` (default) runs RapidOCR (PP-OCRv5 latin) entirely on-device via ONNX — no LLM, no network at run-time after the one-time model download, no per-frame agent loop. `"copilot"` routes the image through the configured LLM (GitHub Copilot / OpenAI / Azure OpenAI) using vision-capable chat models — prefer this for complex layouts, mixed scripts, or when `tables[]` reconstruction matters (the local provider leaves `tables[]` empty in this release). The first local-OCR run auto-downloads ~30 MB of models (`ocr.local.autoDownload=true` by default; set false to disable, or pre-install with `zakira-replay deps install ocr`). The chosen provider is recorded on every `OcrFrameResult.provider`.
+- `ocrProvider`: choose the OCR backend. `"local"` (default) runs RapidOCR (PP-OCRv5) entirely on-device via ONNX — no LLM, no network at run-time after the one-time model download, no per-frame agent loop. Defaults to the **latin** language pack; switch packs for non-Latin scripts via `zakira-replay deps install ocr --language <pack>` + `ocr.local.languagePack` config (or `ZAKIRA_REPLAY_OCR_LANGUAGE_PACK`). Supported packs: `latin`, `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`. `"copilot"` routes the image through the configured LLM (GitHub Copilot / OpenAI / Azure OpenAI / Ollama) using vision-capable chat models — prefer this for complex layouts, mixed scripts not covered by the local packs, or when `tables[]` reconstruction matters (the local provider leaves `tables[]` empty in this release). The first local-OCR run auto-downloads ~30 MB of models (`ocr.local.autoDownload=true` by default; set false to disable, or pre-install with `zakira-replay deps install ocr [--language <pack>]`). The chosen provider is recorded on every `OcrFrameResult.provider`.
+- `visionProvider` + `localVisionMode`: choose the vision backend. `"copilot"` (default) routes the image through the configured LLM; `"local"` runs the fully-on-device `LocalOnnxVisionProvider` that never calls an LLM. Under `"local"`, set `localVisionMode` to one of `"heuristic"` (zero models, structure derived from OCR; the only mode that runs out of the box), `"clip"` (heuristic + CLIP ViT-B/32 zero-shot for `kind`, ~150 MB user-supplied ONNX), or `"clip-blip"` (default for the local provider; CLIP + BLIP image captioning, ~550 MB total). When `visionProvider: "local"` is requested without `useOcr: true`, the pipeline auto-enables OCR and records `VISION_LOCAL_OCR_REQUIRED` (info) — the structured fields need it. Missing CLIP/BLIP files cause graceful degradation (`clip-blip` → `clip` → `heuristic`) with a `VISION_LOCAL_MODE_DEGRADED` warning. Local-mode `charts[]` is always empty; the LLM path is structurally better for charts, diagrams, and free-form scenes.
 - `smartCrop` + `smartCropProfile`: enable smart-crop preprocessing that removes meeting-platform UI chrome (Teams/Zoom/WebEx controls bar, participant gallery sidebar, black letterbox bars, bottom navigation) before perceptual hashing, OCR, and vision. Profiles: `"auto"` (default), `"teams"`, `"zoom"`, `"webex"`, `"generic"` (all share the same algorithm in this release; the value is recorded on each `FrameCropBox.source` for audit), or `"off"` to disable. Use this when the source is a meeting recording — it dramatically improves slide-grouping stability (the persistent gallery sidebar otherwise dilutes the dHash) and removes meeting-app vocabulary from OCR text. Cropped frames are written to `frames/<frameId>-cropped.jpg`; the `FrameArtifact` records `width`, `height`, `crop` (the box), and `originalPath` (the pre-crop frame).
 - `captureMode`: choose the frame-capture backend. `"ytdlp"` (default) uses yt-dlp + ffmpeg — works for ~1000 sites yt-dlp supports plus local files. `"browser"` drives a Playwright-controlled Chromium pinned to Edge to navigate, click play, JS-seek `video.currentTime`, and screenshot the `<video>` element — required for SharePoint/Medius/Teams recordings and any source yt-dlp can't reach. `"auto"` tries yt-dlp first and falls back to `"browser"` on failure, emitting `CAPTURE_BROWSER_FALLBACK` so orchestrators can branch on which path was used. **Side benefit:** when browser capture runs, a network listener watches for any `.vtt`/`.srt` responses the page fetches, persists them under `captions/browser-NNNN.vtt`, indexes them in `captions/discovered.json` (schema: `captions-discovered.schema.json`), and — if no transcript was found by yt-dlp / sidecar / STT — picks the best-language match (using `captionLanguages` and the source's primary language as hints) and uses it to populate `transcript.md`. This is the easiest way to get transcripts for Medius/Ignite/MVP-Summit sessions and any custom player whose page-side JS fetches a caption file.
 - `authProfile`: name of a persistent Playwright storage-state profile to load into the browser context before navigating. Only consulted in `browser` and `auto` capture modes. Created on the user's machine via the CLI `zakira-replay auth login <name>` (interactive — MCP cannot perform the initial login). Required for SSO-gated sources. The pipeline emits `AUTH_PROFILE_NOT_FOUND` (severity error) when the named profile does not exist on disk and `AUTH_PROFILE_STALE` (severity info) when the profile's file mtime is older than `auth.staleThresholdMinutes` (default 60). Staleness is informational — capture proceeds; if downstream extraction looks like it landed on a login page rather than the intended content, suggest the user re-runs `auth login <name>` with the same name.
@@ -169,8 +171,11 @@ Provider notes:
 - `github-copilot` is the default LLM provider for STT/OCR/vision when `ocrProvider: "copilot"`.
 - `openai` supports chat/image and audio transcription.
 - `azure-openai` supports chat/image for OCR/vision, but Zakira.Replay STT is not implemented yet.
+- `ollama` talks to a local Ollama daemon (`http://localhost:11434` default) through OllamaSharp's native `Microsoft.Extensions.AI.IChatClient`. **Chat / vision only** — no STT. The orchestrator must have a running daemon and pre-pulled models (`ollama pull qwen2.5:7b`, `ollama pull llama3.2-vision:11b`). Configure via `llm.ollama.*` keys or `ZAKIRA_REPLAY_OLLAMA_*` env vars. Combine with `local-whisper` for STT and `ocrProvider: "local"` for OCR to get an air-gapped run.
 - `local-whisper` runs Whisper.net (whisper.cpp bindings) entirely on-device for STT. **STT-only** — has no chat/vision/OCR surface; combine with `ocrProvider: "local"` for a fully-offline run. The orchestrator must pre-install a model with `zakira-replay deps install whisper-model` (default `small`, ~466 MB) or set `llm.localWhisper.modelPath` to an existing ggml file. Surface-specific warnings: `STT_LOCAL_MODEL_MISSING`, `STT_LOCAL_INIT_FAILED`, `STT_LOCAL_INFERENCE_FAILED`.
 - `ocrProvider: "local"` bypasses LLM providers entirely — useful when GitHub Copilot is rate-limited or behind an agent-loop session that times out, when the user is offline, or when per-frame OCR cost matters.
+
+Diarization (`useDiarization: true`): runs local sherpa-onnx speaker diarization (pyannote-segmentation-3.0 + 3D-Speaker embedding) over the audio after STT, labelling each transcript segment with a `SPEAKER_NN` cluster. Requires a transcript (set `useSpeechToText: true` or rely on captions). Combine `numSpeakers: <n>` when the number of speakers is known; otherwise `diarizationThreshold: <0.0-1.0>` (default 0.5) controls the cluster cutoff. The pipeline rewrites `transcript.md` with `[SPEAKER_NN]` prefixes and re-populates `evidence.speakers[]` plus `evidence-aligned/by-{slide,chapter}.json` speaker rollups automatically — no extra calls required. Pre-install models with `zakira-replay deps install diarization`. Surface-specific warnings: `DIARIZATION_NO_AUDIO`, `DIARIZATION_NO_TRANSCRIPT`, `DIARIZATION_MODELS_MISSING`, `DIARIZATION_INIT_FAILED`, `DIARIZATION_FAILED`.
 
 ## Artifact Reading Order
 
@@ -268,6 +273,57 @@ Extract a clip only when timestamps are known or justified by evidence:
 ```
 
 Report the clip path and timestamp range from the returned clip artifact.
+
+## Ad-hoc Frame Capture Workflow
+
+Use `extract_frames` for the "I already analyzed this and just want a few specific stills" case. The tool skips slide grouping, hashing, OCR, vision, and chapter synthesis, so it is cheap to call repeatedly between turns. Output lands in a new `runs/<id>/frames/` folder with a minimal `frame-capture.json` manifest (schema: `frame-capture.schema.json`, `kind: "frame-capture"`).
+
+Two mutually-exclusive modes:
+
+**Mode A — exact timestamps.** Pass `at` as either a JSON array of strings/numbers or a single comma-separated string. Up to 64 timestamps per request; excess are dropped with `FRAME_CAPTURE_TOO_MANY_TIMESTAMPS`.
+
+```json
+{
+  "source": "./cooking.mp4",
+  "at": ["02:34", "03:10", "04:55"],
+  "maxLongEdgePixels": 1024,
+  "jpegQuality": 85
+}
+```
+
+**Mode B — window with frame budget.** Required: `from`, `to`. Optional: `count` (defaults to 1 for `interval`), `strategy` (`"interval"` default, or `"scene"`). For `interval`, the captured timestamps are evenly spaced inclusive of both endpoints. For `scene`, ffmpeg's scene-cut filter is scoped to the window; reported timestamps stay in absolute source timeline.
+
+```json
+{
+  "source": "https://example.com/video",
+  "from": "02:00",
+  "to": "03:00",
+  "count": 5,
+  "strategy": "interval"
+}
+```
+
+Shared optional fields:
+
+- `runId`: pin the artifact folder name (otherwise auto-generated from source).
+- `maxLongEdgePixels`: resize so the longest edge is at most N pixels (aspect ratio preserved). Use for thumbnail-sized stills.
+- `jpegQuality`: 1-100 (mapped to ffmpeg qscale 31-2). Default high quality.
+- `computePerceptualHash`: when true, also computes a 64-bit dHash per frame so you can dedupe near-identical stills downstream.
+- `sceneSafetyCap`: upper bound on scene cuts inside the window (defaults to `max(count, 200)`). Emits `FRAME_CAPTURE_SCENE_CAP_REACHED` when reached.
+- `cookies` / `cookiesFromBrowser` / `browserAuth`: yt-dlp auth for remote sources, identical semantics to `analyze_video`.
+
+The tool response includes `runId`, `artifactDirectory`, `manifestPath`, `frameCount`, a `frames` array (absolute and relative paths plus `timestampSeconds` / `timestampLabel`), and `warnings`. When you want to embed the frames into a downstream artifact (recipe Markdown, work-item file, alignment view), prefer the absolute `path` returned for each frame.
+
+Frame-capture-specific warning codes (all under `frames[*].warnings`/`manifest.warnings`):
+
+- `FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE` - a requested timestamp was negative or past the source duration; the entry was dropped.
+- `FRAME_CAPTURE_RANGE_OUT_OF_BOUNDS` - the requested `to` exceeded source duration and was clamped.
+- `FRAME_CAPTURE_TOO_MANY_TIMESTAMPS` - more than 64 timestamps were supplied; only the first 64 were used.
+- `FRAME_CAPTURE_NO_FRAMES` - ffmpeg returned zero frames (e.g. scene detection found nothing inside the window).
+- `FRAME_CAPTURE_SCENE_CAP_REACHED` - the safety cap was hit during scene detection.
+- `FRAME_CAPTURE_MEDIA_URL_UNRESOLVED` - yt-dlp could not resolve a direct media URL; fell back to downloading.
+
+Do not use `extract_frames` as a substitute for `analyze_video`/`create_analysis_job` when you actually need transcript, slides, OCR, vision, chapters, or evidence alignment. It is purpose-built for spot frames.
 
 ## Queue Workflow
 

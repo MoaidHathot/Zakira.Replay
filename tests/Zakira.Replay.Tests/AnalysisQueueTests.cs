@@ -132,6 +132,10 @@ public sealed class AnalysisQueueTests
     {
         public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken) => throw new ReplayException("simulated frame failure");
 
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken) => throw new ReplayException("simulated frame-at failure");
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken) => throw new ReplayException("simulated scene-in-range failure");
+
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken) => throw new ReplayException("simulated audio failure");
 
         public Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken) => throw new ReplayException("simulated clip failure");
@@ -141,6 +145,8 @@ public sealed class AnalysisQueueTests
         public Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken) => throw new ReplayException("simulated silence detection failure");
 
         public Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken) => throw new ReplayException("simulated audio range failure");
+
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken) => throw new ReplayException("simulated image preprocess failure");
 
         public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken) => throw new ReplayException("simulated perceptual hash failure");
     }

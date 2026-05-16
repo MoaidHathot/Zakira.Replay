@@ -366,6 +366,16 @@ public sealed class SmartCropTests
             ]);
         }
 
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+        }
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+        }
+
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken)
         {
             return Task.FromResult("audio/audio.wav");
@@ -389,6 +399,11 @@ public sealed class SmartCropTests
         public Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken)
         {
             return Task.CompletedTask;
+        }
+
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<byte[]?>(null);
         }
 
         public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)

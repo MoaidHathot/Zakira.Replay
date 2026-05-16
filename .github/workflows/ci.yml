@@ -7,7 +7,12 @@ on:
 
 jobs:
   test:
-    runs-on: windows-latest
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -21,5 +26,39 @@ jobs:
       - name: Restore
         run: dotnet restore Zakira.Replay.slnx
 
+      - name: Build
+        run: dotnet build Zakira.Replay.slnx --no-restore --configuration Release
+
       - name: Test
-        run: dotnet test Zakira.Replay.slnx --no-restore --configuration Release
+        run: dotnet test Zakira.Replay.slnx --no-build --configuration Release --logger "trx;LogFileName=test-results.trx"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ matrix.os }}
+          path: '**/TestResults/*.trx'
+          if-no-files-found: ignore
+
+  pack:
+    name: pack (smoke)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+          dotnet-quality: preview
+
+      - name: Pack
+        run: dotnet pack src/Zakira.Replay/Zakira.Replay.csproj --configuration Release
+
+      - name: Upload nupkg
+        uses: actions/upload-artifact@v4
+        with:
+          name: nupkg
+          path: src/Zakira.Replay/bin/Release/*.nupkg

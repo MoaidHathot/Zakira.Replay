@@ -36,6 +36,7 @@ Present only when browser capture ran and observed at least one caption response
 - Read `vision/combined.md` for visual descriptions.
 - Inspect frame files when the user asks about layout, diagrams, UI, code, charts, or visual details.
 - Each `OcrFrameResult.provider` records whether the result came from `"copilot"` (LLM vision-as-OCR) or `"local"` (RapidOCR via ONNX). Local-OCR results are typically lower fidelity on complex layouts and leave `tables[]` empty (no layout-analysis-based table reconstruction in this release); prefer `"copilot"` when `tables[]` matters.
+- Each `VisionFrameResult.provider` records whether vision came from `"copilot"` (LLM-backed) or `"local"` (LocalOnnxVisionProvider — never calls an LLM). Local-mode `charts[]` is always empty; the `freeText` includes a BLIP caption ("Frame appears to show: ...") followed by the literal OCR text when `clip-blip` mode is active. Local-mode degradation is recorded via `VISION_LOCAL_MODE_DEGRADED` warnings listing which CLIP/BLIP files were missing.
 - Each `FrameArtifact` may carry optional `width`, `height`, `crop` (the rectangle), and `originalPath` (the pre-crop frame) when smart-crop ran. The frame's `path` then points to the cropped variant; the perceptual hash and downstream OCR/vision were computed on the crop, not the original.
 - If frames are sparse, rerun with more `frames` or `frameStrategy: "scene"`.
 - For meeting recordings (Teams/Zoom/WebEx), enable `smartCrop: true` (CLI: `--smart-crop`) so the persistent UI chrome is removed before slide grouping. This dramatically improves slide stability and removes meeting-app vocabulary ("Take control", "Raise", "Mute all", etc.) from OCR text.
@@ -50,6 +51,13 @@ Present only when browser capture ran and observed at least one caption response
 
 - Use clip extraction only when start/end timestamps are known or can be justified from artifacts.
 - Save clip paths from `clip.json` and report them with the timestamp range.
+
+## Ad-hoc Frame Capture
+
+- A `frame-capture.json` file (schema: `frame-capture.schema.json`, `kind: "frame-capture"`) at the root of a run means the run came from `extract_frames` / `zakira-replay frames --at|--from`, not the full analyze pipeline. There is no `manifest.json`, no `evidence.json`, no slides/OCR/vision/chapters in that directory.
+- `frame-capture.json` carries the request summary (`mode: "timestamps" | "range"`, the original timestamps or range bounds, requested options) plus the resulting `frames[]` array (same shape as `FrameArtifact`) and `warnings[]`.
+- Use ad-hoc capture to grab additional stills after a full analyze run (recipe-card photos at known timestamps, transcript-aligned thumbnails, screenshots at evidence-cited moments) without re-running the expensive pipeline.
+- Range-mode frames carry timestamps in absolute source-timeline seconds even when the underlying ffmpeg call was scoped to a window.
 
 ## Auth Profiles (SSO-Gated Sources)
 
@@ -70,12 +78,14 @@ Present only when browser capture ran and observed at least one caption response
   - `FRAMES_NO_MEDIA` / `FRAMES_REMOTE_FALLBACK` (info) / `FRAMES_DOWNLOAD_FAILED` (error) / `FRAMES_SCENE_CAP_REACHED` (warning) / `FRAMES_LIKELY_UNDERSAMPLED` (warning) — frame-extraction issues.
   - `OCR_NO_LLM_PROVIDER` (error) / `OCR_PARSE_FALLBACK` (warning) / `OCR_LOCAL_MODELS_MISSING` (error) / `OCR_LOCAL_INIT_FAILED` (error) / `OCR_LOCAL_INFERENCE_FAILED` (warning) / `OCR_UNKNOWN_PROVIDER` (error) — OCR-side issues. The `OCR_LOCAL_*` codes only fire under `ocrProvider: "local"`.
   - `VISION_NO_LLM_PROVIDER` (error) / `VISION_PARSE_FALLBACK` (warning) — vision-side issues.
+  - `VISION_LOCAL_MODELS_MISSING` (warning) / `VISION_LOCAL_INIT_FAILED` (error) / `VISION_LOCAL_INFERENCE_FAILED` (warning, per-frame) / `VISION_LOCAL_MODE_DEGRADED` (warning) / `VISION_LOCAL_OCR_REQUIRED` (info) / `VISION_UNKNOWN_PROVIDER` (error) — local vision provider diagnostics. The first four indicate model availability or runtime issues; the fifth records that OCR was auto-enabled because the local provider needs it; the sixth means an invalid `--vision-provider` value was passed.
   - `PERCEPTUAL_HASH_FAILED` (warning) — slide grouping may be coarse for at least one frame.
   - `CROP_IMAGE_DECODE_FAILED` (warning) / `CROP_BAIL_OUT` (info) / `CROP_PROFILE_UNKNOWN` (warning) / `CROP_OUTPUT_FAILED` (warning) — smart-crop issues. `CROP_BAIL_OUT` is informational — the algorithm proposed a too-aggressive crop and used the original frame instead.
   - `CAPTURE_BROWSER_UNAVAILABLE` (error) / `CAPTURE_BROWSER_FALLBACK` (info) / `CAPTURE_PLAY_BUTTON_NOT_FOUND` (info-or-warning) / `CAPTURE_DURATION_UNRESOLVED` (error) / `CAPTURE_SEEK_FAILED` (warning) / `CAPTURE_SCREENSHOT_FAILED` (warning) / `CAPTURE_UNKNOWN_MODE` (warning) — Playwright capture issues.
   - `CAPTIONS_BROWSER_NETWORK_NONE` (info) / `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED` (warning) / `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED` (warning) — browser caption interceptor results.
   - `AUTH_PROFILE_NOT_FOUND` (error) / `AUTH_PROFILE_STALE` (info) / `AUTH_PROFILE_LOAD_FAILED` (error) — auth profile resolution issues.
   - `CLIP_MEDIA_URL_UNRESOLVED` (error) — clip extraction couldn't resolve the source.
+  - `FRAME_CAPTURE_MEDIA_URL_UNRESOLVED` (info-or-error) / `FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE` (warning) / `FRAME_CAPTURE_RANGE_OUT_OF_BOUNDS` (warning) / `FRAME_CAPTURE_TOO_MANY_TIMESTAMPS` (warning) / `FRAME_CAPTURE_NO_FRAMES` (warning) / `FRAME_CAPTURE_SCENE_CAP_REACHED` (warning) — ad-hoc frame-capture issues. All live on `frame-capture.json::warnings`, not `manifest.json`, because they are emitted by the lean capture path.
 - Treat missing captions, missing media URL, failed OCR, failed vision, fallback downloads, undersampled frame coverage, and stale auth profiles as confidence modifiers — none of them prevent the run from completing, but all of them affect what claims the orchestrator can make.
 
 ## Response Quality

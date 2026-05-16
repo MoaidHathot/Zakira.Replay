@@ -183,7 +183,8 @@ public sealed record ArtifactManifest(
     string? VisionPath,
     string? EvidencePath,
     IReadOnlyList<FrameArtifact> Frames,
-    IReadOnlyList<ReplayWarning> Warnings);
+    IReadOnlyList<ReplayWarning> Warnings,
+    RunTimingsArtifact? Timings = null);
 
 public sealed record FrameArtifact(
     string Id,
@@ -289,7 +290,8 @@ public sealed record VisionFrameResult(
     string TimestampLabel,
     string Description,
     string? SlideId = null,
-    VisionFrameStructured? Structured = null);
+    VisionFrameStructured? Structured = null,
+    string? Provider = null);
 
 /// <summary>
 /// Structured vision analysis of a frame. <see cref="FreeText"/> always carries the full raw

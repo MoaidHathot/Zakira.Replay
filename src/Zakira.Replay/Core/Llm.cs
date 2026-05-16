@@ -1,6 +1,12 @@
+using System.ClientModel;
+using System.ClientModel.Primitives;
 using System.Text;
 using System.Text.Json;
+using Azure;
+using Azure.AI.OpenAI;
 using GitHub.Copilot.SDK;
+using Microsoft.Extensions.AI;
+using OpenAI;
 
 namespace Zakira.Replay.Core;
 
@@ -117,13 +123,20 @@ public sealed class GitHubCopilotLlmProvider : ILlmProvider
     }
 }
 
-public sealed class OpenAiLlmProvider : ILlmProvider
+public sealed class OpenAiLlmProvider : ILlmProvider, IDisposable
 {
     private readonly string apiKey;
     private readonly string baseUrl;
     private readonly string chatModel;
     private readonly string transcriptionModel;
     private readonly Func<HttpClient> httpClientFactory;
+
+    // Lazily-constructed IChatClient from OpenAI SDK. Tests inject a fake via the internal
+    // constructor below; production builds use `BuildChatClient`.
+    private readonly Func<IChatClient> chatClientFactory;
+    private readonly object initLock = new();
+    private IChatClient? chatClient;
+    private bool disposed;
 
     public OpenAiLlmProvider(string apiKey, string? baseUrl = null, string? chatModel = null, string? transcriptionModel = null, Func<HttpClient>? httpClientFactory = null)
     {
@@ -132,40 +145,111 @@ public sealed class OpenAiLlmProvider : ILlmProvider
         this.chatModel = string.IsNullOrWhiteSpace(chatModel) ? LlmProviderFactory.DefaultOpenAiModel : chatModel;
         this.transcriptionModel = string.IsNullOrWhiteSpace(transcriptionModel) ? "whisper-1" : transcriptionModel;
         this.httpClientFactory = httpClientFactory ?? (() => new HttpClient());
+        this.chatClientFactory = BuildChatClient;
+    }
+
+    /// <summary>
+    /// Test seam: inject a pre-built <see cref="IChatClient"/> instead of going through the
+    /// OpenAI SDK. Used by <c>LlmProviderTests</c> to mock the chat layer without spinning up
+    /// real HTTP transport or relying on the SDK's wire shape. The audio path (when an audio
+    /// attachment is present) still uses HTTP via <paramref name="httpClientFactory"/>.
+    /// </summary>
+    internal OpenAiLlmProvider(IChatClient chatClient, string? baseUrl = null, string? transcriptionModel = null, Func<HttpClient>? httpClientFactory = null)
+    {
+        ArgumentNullException.ThrowIfNull(chatClient);
+        this.apiKey = "test-key";
+        this.baseUrl = string.IsNullOrWhiteSpace(baseUrl) ? "https://api.openai.com/v1" : baseUrl.TrimEnd('/');
+        this.chatModel = LlmProviderFactory.DefaultOpenAiModel;
+        this.transcriptionModel = string.IsNullOrWhiteSpace(transcriptionModel) ? "whisper-1" : transcriptionModel;
+        this.httpClientFactory = httpClientFactory ?? (() => new HttpClient());
+        this.chatClient = chatClient;
+        this.chatClientFactory = () => chatClient;
     }
 
     public string Name => LlmProviders.OpenAi;
 
     public async Task<string> CompleteAsync(LlmRequest request, CancellationToken cancellationToken)
     {
+        ObjectDisposedException.ThrowIf(disposed, this);
+
         if (request.AttachmentPaths.Count == 1 && OpenAiRequestHelpers.IsAudioAttachment(request.AttachmentPaths[0]))
         {
             return await TranscribeAudioAsync(request, cancellationToken).ConfigureAwait(false);
         }
 
-        using var client = httpClientFactory();
-        client.Timeout = request.Timeout ?? TimeSpan.FromMinutes(3);
-        using var message = new HttpRequestMessage(HttpMethod.Post, baseUrl + "/chat/completions");
-        message.Headers.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", apiKey);
-        message.Content = OpenAiRequestHelpers.JsonContent(new
-        {
-            model = string.IsNullOrWhiteSpace(request.Model) || request.Model == GitHubCopilotLlmProvider.DefaultModel ? chatModel : request.Model,
-            messages = OpenAiRequestHelpers.BuildMessages(request),
-            temperature = 0.2
-        });
+        var chat = EnsureChatClient();
+        var model = string.IsNullOrWhiteSpace(request.Model) || request.Model == GitHubCopilotLlmProvider.DefaultModel
+            ? chatModel
+            : request.Model;
 
-        using var response = await client.SendAsync(message, cancellationToken).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        var messages = OpenAiRequestHelpers.BuildChatClientMessages(request);
+        var options = new ChatOptions { ModelId = model, Temperature = 0.2f };
+
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(request.Timeout ?? TimeSpan.FromMinutes(3));
+
+        try
         {
-            throw new ReplayException($"OpenAI request failed: {(int)response.StatusCode} {body}");
+            var response = await chat.GetResponseAsync(messages, options, cts.Token).ConfigureAwait(false);
+            return (response.Text ?? string.Empty).Trim();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ReplayException($"OpenAI chat request timed out after {(request.Timeout ?? TimeSpan.FromMinutes(3)).TotalSeconds:F0}s.");
+        }
+        catch (Exception ex) when (ex is not ReplayException and not OperationCanceledException)
+        {
+            throw new ReplayException($"OpenAI request failed: {ex.Message}", ex);
+        }
+    }
+
+    public void Dispose()
+    {
+        if (disposed)
+        {
+            return;
         }
 
-        return OpenAiRequestHelpers.ExtractChatCompletionText(body, "OpenAI");
+        disposed = true;
+        (chatClient as IDisposable)?.Dispose();
+        chatClient = null;
+    }
+
+    private IChatClient EnsureChatClient()
+    {
+        if (chatClient is not null)
+        {
+            return chatClient;
+        }
+
+        lock (initLock)
+        {
+            chatClient ??= chatClientFactory();
+            return chatClient;
+        }
+    }
+
+    private IChatClient BuildChatClient()
+    {
+        try
+        {
+            var options = new OpenAIClientOptions { Endpoint = new Uri(baseUrl) };
+            options.Transport = new HttpClientPipelineTransport(httpClientFactory());
+            var openAiClient = new OpenAIClient(new ApiKeyCredential(apiKey), options);
+            return openAiClient.GetChatClient(chatModel).AsIChatClient();
+        }
+        catch (Exception ex) when (ex is not ReplayException)
+        {
+            throw new ReplayException($"Failed to initialise OpenAI chat client for {baseUrl}: {ex.Message}", ex);
+        }
     }
 
     private async Task<string> TranscribeAudioAsync(LlmRequest request, CancellationToken cancellationToken)
     {
+        // STT goes through the dedicated /audio/transcriptions HTTP endpoint. IChatClient
+        // doesn't model audio transcription, and the OpenAI SDK's AudioClient.TranscribeAudioAsync
+        // would force an extra layer of wrapping; the existing HTTP code is small and easy to
+        // reason about, so we keep it here as a side-channel.
         using var client = httpClientFactory();
         client.Timeout = request.Timeout ?? TimeSpan.FromMinutes(5);
         using var form = new MultipartFormDataContent();
@@ -192,15 +276,18 @@ public sealed class OpenAiLlmProvider : ILlmProvider
     }
 }
 
-public sealed class AzureOpenAiLlmProvider : ILlmProvider
+public sealed class AzureOpenAiLlmProvider : ILlmProvider, IDisposable
 {
     private readonly string endpoint;
     private readonly string apiKey;
     private readonly string deployment;
     private readonly string? model;
     private readonly string apiVersion;
-    private readonly string? chatCompletionsUrl;
     private readonly Func<HttpClient> httpClientFactory;
+    private readonly Func<IChatClient> chatClientFactory;
+    private readonly object initLock = new();
+    private IChatClient? chatClient;
+    private bool disposed;
 
     public AzureOpenAiLlmProvider(string endpoint, string apiKey, string deployment, string? model = null, string? apiVersion = null, Func<HttpClient>? httpClientFactory = null)
     {
@@ -212,70 +299,151 @@ public sealed class AzureOpenAiLlmProvider : ILlmProvider
         var normalizedEndpoint = endpoint.TrimEnd('/');
         this.endpoint = normalizedEndpoint;
         this.apiKey = string.IsNullOrWhiteSpace(apiKey) ? throw new ReplayException("Azure OpenAI provider requires AZURE_OPENAI_API_KEY.") : apiKey;
-        chatCompletionsUrl = IsChatCompletionsEndpoint(normalizedEndpoint) ? EnsureApiVersion(normalizedEndpoint, apiVersion) : null;
-        this.deployment = string.IsNullOrWhiteSpace(deployment) && chatCompletionsUrl is null
-            ? throw new ReplayException("Azure OpenAI provider requires AZURE_OPENAI_DEPLOYMENT unless the endpoint is a full chat completions URL.")
-            : deployment;
+
+        // Azure can be configured either as base endpoint + deployment, or as a full
+        // chat/completions URL that already encodes the deployment. The SDK works with the base
+        // endpoint form; we strip a /openai/deployments/<deployment>/chat/completions suffix if
+        // present so the user can continue passing the same value.
+        var (parsedBase, parsedDeployment) = ParseAzureEndpoint(normalizedEndpoint, deployment);
+        this.endpoint = parsedBase;
+        this.deployment = parsedDeployment;
+        if (string.IsNullOrWhiteSpace(this.deployment))
+        {
+            throw new ReplayException("Azure OpenAI provider requires AZURE_OPENAI_DEPLOYMENT unless the endpoint is a full chat completions URL containing /openai/deployments/<deployment>/.");
+        }
+
         this.model = model;
         this.apiVersion = string.IsNullOrWhiteSpace(apiVersion) ? "2024-10-21" : apiVersion;
         this.httpClientFactory = httpClientFactory ?? (() => new HttpClient());
+        this.chatClientFactory = BuildChatClient;
+    }
+
+    /// <summary>
+    /// Test seam: inject a pre-built <see cref="IChatClient"/> instead of going through the
+    /// Azure OpenAI SDK. Identical purpose to <see cref="OpenAiLlmProvider"/>'s internal ctor.
+    /// </summary>
+    internal AzureOpenAiLlmProvider(IChatClient chatClient, string deployment, string? model = null)
+    {
+        ArgumentNullException.ThrowIfNull(chatClient);
+        this.endpoint = "https://azure.test";
+        this.apiKey = "test-key";
+        this.deployment = string.IsNullOrWhiteSpace(deployment) ? "test-deployment" : deployment;
+        this.model = model;
+        this.apiVersion = "2024-10-21";
+        this.httpClientFactory = () => new HttpClient();
+        this.chatClient = chatClient;
+        this.chatClientFactory = () => chatClient;
     }
 
     public string Name => LlmProviders.AzureOpenAi;
 
     public async Task<string> CompleteAsync(LlmRequest request, CancellationToken cancellationToken)
     {
+        ObjectDisposedException.ThrowIf(disposed, this);
+
         if (request.AttachmentPaths.Any(OpenAiRequestHelpers.IsAudioAttachment))
         {
             throw new ReplayException("Azure OpenAI chat provider does not support audio transcription through Zakira.Replay yet. Use captions, sidecars, GitHub Copilot STT, or OpenAI transcription.");
         }
 
-        using var client = httpClientFactory();
-        client.Timeout = request.Timeout ?? TimeSpan.FromMinutes(3);
-        using var message = new HttpRequestMessage(HttpMethod.Post, chatCompletionsUrl ?? $"{endpoint}/openai/deployments/{Uri.EscapeDataString(deployment)}/chat/completions?api-version={Uri.EscapeDataString(apiVersion)}");
-        message.Headers.Add("api-key", apiKey);
-        var effectiveModel = string.IsNullOrWhiteSpace(request.Model) || request.Model == deployment
+        var chat = EnsureChatClient();
+        var effectiveModel = string.IsNullOrWhiteSpace(request.Model) || request.Model == deployment || request.Model == GitHubCopilotLlmProvider.DefaultModel
             ? model
             : request.Model;
-        object payload = string.IsNullOrWhiteSpace(effectiveModel)
-            ? new
-            {
-                messages = OpenAiRequestHelpers.BuildMessages(request),
-                temperature = 0.2
-            }
-            : new
-            {
-                model = effectiveModel,
-                messages = OpenAiRequestHelpers.BuildMessages(request),
-                temperature = 0.2
-            };
-        message.Content = OpenAiRequestHelpers.JsonContent(payload);
 
-        using var response = await client.SendAsync(message, cancellationToken).ConfigureAwait(false);
-        var body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        var messages = OpenAiRequestHelpers.BuildChatClientMessages(request);
+        var options = new ChatOptions
         {
-            throw new ReplayException($"Azure OpenAI request failed: {(int)response.StatusCode} {body}");
-        }
+            ModelId = effectiveModel ?? deployment,
+            Temperature = 0.2f
+        };
 
-        return OpenAiRequestHelpers.ExtractChatCompletionText(body, "Azure OpenAI");
+        using var cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        cts.CancelAfter(request.Timeout ?? TimeSpan.FromMinutes(3));
+
+        try
+        {
+            var response = await chat.GetResponseAsync(messages, options, cts.Token).ConfigureAwait(false);
+            return (response.Text ?? string.Empty).Trim();
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            throw new ReplayException($"Azure OpenAI chat request timed out after {(request.Timeout ?? TimeSpan.FromMinutes(3)).TotalSeconds:F0}s.");
+        }
+        catch (Exception ex) when (ex is not ReplayException and not OperationCanceledException)
+        {
+            throw new ReplayException($"Azure OpenAI request failed: {ex.Message}", ex);
+        }
     }
 
-    private static bool IsChatCompletionsEndpoint(string endpoint)
+    public void Dispose()
     {
-        return Uri.TryCreate(endpoint, UriKind.Absolute, out var uri)
-            && uri.AbsolutePath.Contains("/chat/completions", StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static string EnsureApiVersion(string endpoint, string? apiVersion)
-    {
-        if (endpoint.Contains("api-version=", StringComparison.OrdinalIgnoreCase) || string.IsNullOrWhiteSpace(apiVersion))
+        if (disposed)
         {
-            return endpoint;
+            return;
         }
 
-        var separator = endpoint.Contains('?', StringComparison.Ordinal) ? "&" : "?";
-        return endpoint + separator + "api-version=" + Uri.EscapeDataString(apiVersion);
+        disposed = true;
+        (chatClient as IDisposable)?.Dispose();
+        chatClient = null;
+    }
+
+    private IChatClient EnsureChatClient()
+    {
+        if (chatClient is not null)
+        {
+            return chatClient;
+        }
+
+        lock (initLock)
+        {
+            chatClient ??= chatClientFactory();
+            return chatClient;
+        }
+    }
+
+    private IChatClient BuildChatClient()
+    {
+        try
+        {
+            var options = new AzureOpenAIClientOptions();
+            options.Transport = new HttpClientPipelineTransport(httpClientFactory());
+            // The SDK exposes the API version on the AzureOpenAIClientOptions enum; we let the
+            // SDK pick the default for the current version of Azure.AI.OpenAI. Users that need a
+            // specific version can pin it via the constructor field; the existing api-version
+            // parsing is preserved for ToString diagnostics.
+            var azureClient = new AzureOpenAIClient(new Uri(endpoint), new AzureKeyCredential(apiKey), options);
+            return azureClient.GetChatClient(deployment).AsIChatClient();
+        }
+        catch (Exception ex) when (ex is not ReplayException)
+        {
+            throw new ReplayException($"Failed to initialise Azure OpenAI chat client for {endpoint} (deployment={deployment}): {ex.Message}", ex);
+        }
+    }
+
+    private static (string BaseEndpoint, string Deployment) ParseAzureEndpoint(string normalizedEndpoint, string deployment)
+    {
+        // Strip /openai/deployments/<name>/chat/completions and recover the deployment name from
+        // the URL when the caller passed a full chat-completions URL.
+        if (!Uri.TryCreate(normalizedEndpoint, UriKind.Absolute, out var uri))
+        {
+            return (normalizedEndpoint, deployment);
+        }
+
+        var path = uri.AbsolutePath;
+        const string marker = "/openai/deployments/";
+        var markerIndex = path.IndexOf(marker, StringComparison.OrdinalIgnoreCase);
+        if (markerIndex < 0)
+        {
+            return (normalizedEndpoint, deployment);
+        }
+
+        var afterMarker = path.Substring(markerIndex + marker.Length);
+        var slash = afterMarker.IndexOf('/');
+        var parsedDeployment = slash < 0 ? afterMarker : afterMarker.Substring(0, slash);
+        var basePath = path.Substring(0, markerIndex);
+        var baseEndpoint = new UriBuilder(uri) { Path = basePath, Query = string.Empty }.Uri.ToString().TrimEnd('/');
+        return (baseEndpoint, string.IsNullOrWhiteSpace(deployment) ? parsedDeployment : deployment);
     }
 }
 
@@ -284,6 +452,15 @@ public static class LlmProviders
     public const string GitHubCopilot = "github-copilot";
     public const string OpenAi = "openai";
     public const string AzureOpenAi = "azure-openai";
+
+    /// <summary>
+    /// Local <a href="https://ollama.com">Ollama</a> daemon for chat and vision. Backed by
+    /// OllamaSharp's native <see cref="Microsoft.Extensions.AI.IChatClient"/> implementation;
+    /// supports image attachments via vision-capable models (<c>llava</c>,
+    /// <c>llama3.2-vision</c>, …). Does <b>not</b> support audio — combine with
+    /// <see cref="LocalWhisper"/> for a fully-offline pipeline.
+    /// </summary>
+    public const string Ollama = "ollama";
 
     /// <summary>
     /// Fully-local Whisper.net speech-to-text. STT-only — does not implement chat / vision /
@@ -322,9 +499,37 @@ public static class LlmProviderFactory
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.DeploymentEnvironmentVariables, "AZURE_OPENAI_DEPLOYMENT")) ?? config.Llm.AzureOpenAi.Deployment ?? string.Empty,
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ModelEnvironmentVariables, "AZURE_OPENAI_MODEL")) ?? config.Llm.AzureOpenAi.Model,
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ApiVersionEnvironmentVariables, "AZURE_OPENAI_API_VERSION")) ?? config.Llm.AzureOpenAi.ApiVersion),
-            LlmProviders.LocalWhisper => throw new ReplayException("Provider `local-whisper` is speech-to-text only (no chat/vision/OCR). For chat tasks, pass --llm-provider github-copilot|openai|azure-openai or omit the flag."),
+            LlmProviders.Ollama => CreateOllamaProvider(config),
+            LlmProviders.LocalWhisper => throw new ReplayException("Provider `local-whisper` is speech-to-text only (no chat/vision/OCR). For chat tasks, pass --llm-provider github-copilot|openai|azure-openai|ollama or omit the flag."),
             var value => throw new ReplayException($"Unknown LLM provider: {value}")
         };
+    }
+
+    private static OllamaLlmProvider CreateOllamaProvider(ReplayConfig config)
+    {
+        var endpointValue = GetFirstEnvironmentVariable(WithDefaults(config.Llm.Ollama.EndpointEnvironmentVariables, "ZAKIRA_REPLAY_OLLAMA_ENDPOINT", "OLLAMA_HOST"))
+            ?? config.Llm.Ollama.Endpoint
+            ?? OllamaLlmProvider.DefaultEndpoint;
+
+        if (!Uri.TryCreate(endpointValue, UriKind.Absolute, out var endpoint))
+        {
+            throw new ReplayException($"Ollama endpoint must be an absolute URL; got '{endpointValue}'. Set `llm.ollama.endpoint` or ZAKIRA_REPLAY_OLLAMA_ENDPOINT.");
+        }
+
+        var model = GetFirstEnvironmentVariable(WithDefaults(config.Llm.Ollama.ModelEnvironmentVariables, "ZAKIRA_REPLAY_OLLAMA_MODEL"))
+            ?? config.Llm.Ollama.Model
+            ?? OllamaLlmProvider.DefaultChatModel;
+
+        var visionModel = GetFirstEnvironmentVariable(WithDefaults(config.Llm.Ollama.VisionModelEnvironmentVariables, "ZAKIRA_REPLAY_OLLAMA_VISION_MODEL"))
+            ?? config.Llm.Ollama.VisionModel;
+
+        TimeSpan? timeout = null;
+        if (config.Llm.Ollama.TimeoutSeconds is { } seconds && seconds > 0)
+        {
+            timeout = TimeSpan.FromSeconds(seconds);
+        }
+
+        return new OllamaLlmProvider(endpoint, model, visionModel, timeout);
     }
 
     /// <summary>
@@ -374,6 +579,7 @@ public static class LlmProviderFactory
             "copilot" or "github" or "github-copilot" => LlmProviders.GitHubCopilot,
             "openai" => LlmProviders.OpenAi,
             "azure" or "azure-openai" or "azureopenai" => LlmProviders.AzureOpenAi,
+            "ollama" or "ollamasharp" => LlmProviders.Ollama,
             "local-whisper" or "localwhisper" or "whisper" or "local-stt" or "localstt" => LlmProviders.LocalWhisper,
             var value => value
         };
@@ -386,6 +592,7 @@ public static class LlmProviderFactory
         {
             LlmProviders.OpenAi => GetFirstEnvironmentVariable(WithDefaults(config.Llm.OpenAi.ModelEnvironmentVariables, "OPENAI_MODEL")) ?? config.Llm.OpenAi.Model ?? DefaultOpenAiModel,
             LlmProviders.AzureOpenAi => GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.ModelEnvironmentVariables, "AZURE_OPENAI_MODEL")) ?? config.Llm.AzureOpenAi.Model ?? GetFirstEnvironmentVariable(WithDefaults(config.Llm.AzureOpenAi.DeploymentEnvironmentVariables, "AZURE_OPENAI_DEPLOYMENT")) ?? config.Llm.AzureOpenAi.Deployment ?? string.Empty,
+            LlmProviders.Ollama => GetFirstEnvironmentVariable(WithDefaults(config.Llm.Ollama.ModelEnvironmentVariables, "ZAKIRA_REPLAY_OLLAMA_MODEL")) ?? config.Llm.Ollama.Model ?? OllamaLlmProvider.DefaultChatModel,
             LlmProviders.LocalWhisper => LocalWhisperOptions.NormalizeModelSize(Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_WHISPER_MODEL_SIZE") ?? config.Llm.LocalWhisper.ModelSize),
             _ => GitHubCopilotLlmProvider.DefaultModel
         };
@@ -445,6 +652,38 @@ internal static class OpenAiRequestHelpers
 
         messages.Add(new { role = "user", content });
         return messages.ToArray();
+    }
+
+    /// <summary>
+    /// Build a <see cref="ChatMessage"/> sequence for the OpenAI / Azure providers that now go
+    /// through <see cref="IChatClient"/>. Same shape as <see cref="OllamaLlmProvider.BuildMessages"/>:
+    /// optional system message, then a user message whose <see cref="ChatMessage.Contents"/>
+    /// carries the text prompt and any image attachments as <see cref="DataContent"/>. Audio
+    /// attachments are rejected here because chat clients don't transcribe; the OpenAI provider
+    /// short-circuits to its dedicated transcription path before this is called.
+    /// </summary>
+    public static IList<ChatMessage> BuildChatClientMessages(LlmRequest request)
+    {
+        var messages = new List<ChatMessage>();
+        if (!string.IsNullOrWhiteSpace(request.SystemMessage))
+        {
+            messages.Add(new ChatMessage(ChatRole.System, request.SystemMessage!));
+        }
+
+        var userContents = new List<AIContent> { new TextContent(request.Prompt) };
+        foreach (var attachment in request.AttachmentPaths)
+        {
+            if (!IsImageAttachment(attachment))
+            {
+                throw new ReplayException($"OpenAI-compatible chat providers only support image attachments in this path: {attachment}");
+            }
+
+            var bytes = File.ReadAllBytes(attachment);
+            userContents.Add(new DataContent(bytes, GetMimeType(attachment)));
+        }
+
+        messages.Add(new ChatMessage(ChatRole.User, userContents));
+        return messages;
     }
 
     public static string ExtractChatCompletionText(string body, string providerName)

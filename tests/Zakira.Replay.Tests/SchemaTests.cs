@@ -13,6 +13,7 @@ public sealed class SchemaTests
     [InlineData("transcript-normalization.schema.json")]
     [InlineData("chapters.schema.json")]
     [InlineData("clip.schema.json")]
+    [InlineData("frame-capture.schema.json")]
     [InlineData("search-index.schema.json")]
     [InlineData("batch.schema.json")]
     [InlineData("batch-result.schema.json")]
@@ -200,6 +201,30 @@ public sealed class SchemaTests
         await AssertValidAsync("queue-run-result.schema.json", Path.Combine(enqueue.QueueDirectory, "last-run-result.json"));
     }
 
+    [Fact]
+    public async Task GeneratedFrameCaptureManifestValidatesAgainstPublishedSchema()
+    {
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var ytDlp = new FakeClipYtDlpClient();
+        var ffmpeg = new FrameCaptureSchemaFfmpegClient();
+        var service = new FrameCaptureService(store, ytDlp, ffmpeg);
+
+        var captureResult = await service.CaptureAsync(
+            new FrameCaptureRequest(
+                Source: sourcePath,
+                Timestamps: [TimeSpan.FromSeconds(1.5)],
+                RunId: "frame-capture-schema",
+                MaxLongEdgePixels: 640,
+                JpegQuality: 80),
+            progress: null,
+            CancellationToken.None);
+
+        await AssertValidAsync("frame-capture.schema.json", captureResult.Run.GetPath("frame-capture.json"));
+    }
+
     private static async Task AssertValidAsync(string schemaFileName, string jsonPath)
     {
         var schema = await JsonSchema.FromFileAsync(GetSchemaPath(schemaFileName));
@@ -257,6 +282,16 @@ public sealed class SchemaTests
             return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
         }
 
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+        }
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+        }
+
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken)
         {
             return Task.FromResult("audio/audio.wav");
@@ -287,9 +322,61 @@ public sealed class SchemaTests
             return Task.CompletedTask;
         }
 
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<byte[]?>(null);
+        }
+
         public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)
         {
             return Task.FromResult<string?>("0000000000000000");
         }
+    }
+
+    private sealed class FrameCaptureSchemaFfmpegClient : IFfmpegClient
+    {
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken)
+        {
+            var frames = new List<FrameArtifact>(timestamps.Count);
+            for (var i = 0; i < timestamps.Count; i++)
+            {
+                var seconds = timestamps[i].TotalSeconds;
+                var label = Timestamp.Format(seconds);
+                var fileSafeLabel = label.Replace(':', '-').Replace('.', '-');
+                var relativePath = $"frames/frame-{i + 1:000}-{fileSafeLabel}.jpg";
+                var absolute = run.GetPath(relativePath);
+                Directory.CreateDirectory(Path.GetDirectoryName(absolute)!);
+                File.WriteAllText(absolute, "fake jpeg");
+                frames.Add(new FrameArtifact($"frame-{i + 1:000}", relativePath, seconds, label));
+            }
+            return Task.FromResult<IReadOnlyList<FrameArtifact>>(frames);
+        }
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+
+        public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken)
+            => Task.FromResult("audio/audio.wav");
+
+        public Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken)
+            => Task.FromResult("clips/sample.mp4");
+
+        public Task<double?> TryProbeDurationAsync(string mediaSource, CancellationToken cancellationToken)
+            => Task.FromResult<double?>(30.0);
+
+        public Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<SilenceWindow>>([]);
+
+        public Task ExtractAudioRangeAsync(string mediaSource, string outputPath, TimeSpan start, TimeSpan duration, CancellationToken cancellationToken)
+            => Task.CompletedTask;
+
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+            => Task.FromResult<byte[]?>(null);
+
+        public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)
+            => Task.FromResult<string?>("0000000000000000");
     }
 }

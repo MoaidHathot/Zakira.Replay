@@ -14,6 +14,8 @@ public sealed class ReplayConfig
 
     public OcrConfig Ocr { get; set; } = new();
 
+    public VisionConfig Vision { get; set; } = new();
+
     public CaptionsConfig Captions { get; set; } = new();
 
     public SlidesConfig Slides { get; set; } = new();
@@ -25,6 +27,67 @@ public sealed class ReplayConfig
     public CaptureConfig Capture { get; set; } = new();
 
     public AuthConfig Auth { get; set; } = new();
+
+    public DiarizationConfig Diarization { get; set; } = new();
+}
+
+public sealed class DiarizationConfig
+{
+    /// <summary>
+    /// Preferred provider when the pipeline runs with <c>--diarize</c>. Currently only
+    /// <see cref="DiarizationProviders.SherpaOnnx"/> is wired; reserved for future plug-ins
+    /// (pyannoteAI cloud, NeMo, etc.).
+    /// </summary>
+    public string? Provider { get; set; } = DiarizationProviders.SherpaOnnx;
+
+    /// <summary>
+    /// Directory containing the two ONNX model files. Resolved against the portable directory
+    /// when null. Auto-populated by <c>zakira-replay deps install diarization</c>.
+    /// </summary>
+    public string? ModelDirectory { get; set; }
+
+    public string? SegmentationModelPath { get; set; }
+
+    public string? EmbeddingModelPath { get; set; }
+
+    /// <summary>
+    /// Hard cluster count when the orchestrator knows how many speakers are present. When null,
+    /// <see cref="Threshold"/> controls the clustering cutoff and the model auto-detects.
+    /// </summary>
+    public int? NumSpeakers { get; set; }
+
+    /// <summary>
+    /// Agglomerative clustering threshold (cosine distance) used when <see cref="NumSpeakers"/>
+    /// is null. Lower values mean stricter clustering (more speakers). Default 0.5 matches the
+    /// sherpa-onnx examples.
+    /// </summary>
+    public float? Threshold { get; set; }
+
+    /// <summary>
+    /// Minimum speech segment duration (seconds) emitted by pyannote-segmentation. Sub-threshold
+    /// activity is treated as part of an adjacent segment. Defaults to 0.3 s.
+    /// </summary>
+    public float? MinDurationOnSeconds { get; set; }
+
+    /// <summary>
+    /// Minimum silence duration (seconds) between speech segments. Sub-threshold gaps are
+    /// merged into a single contiguous segment. Defaults to 0.5 s.
+    /// </summary>
+    public float? MinDurationOffSeconds { get; set; }
+
+    /// <summary>
+    /// Native thread count for sherpa-onnx inference. Defaults to 1.
+    /// </summary>
+    public int? Threads { get; set; }
+
+    /// <summary>
+    /// When true (default), <see cref="SherpaOnnxDiarizationProvider"/> initialisation may
+    /// invoke <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the segmentation
+    /// and embedding models on first use. Mirror of <c>ocr.local.autoDownload</c> and
+    /// <c>llm.localWhisper.autoDownload</c>; set false to require explicit
+    /// <c>zakira-replay deps install diarization</c>.
+    /// </summary>
+    public bool AutoDownload { get; set; } = true;
 }
 
 public sealed class AuthConfig
@@ -152,9 +215,7 @@ public sealed class OcrConfig
 public sealed class LocalOcrConfig
 {
     /// <summary>
-    /// Directory containing the four RapidOCR (PP-OCRv5 latin) model files:
-    /// <c>ch_PP-OCRv5_det_mobile.onnx</c>, <c>ch_ppocr_mobile_v2.0_cls_mobile.onnx</c>,
-    /// <c>latin_PP-OCRv5_rec_mobile.onnx</c>, and <c>ppocrv5_latin_dict.txt</c>.
+    /// Directory containing the four RapidOCR (PP-OCRv5) model files (det, cls, rec, dict).
     /// Resolved against the portable directory when null.
     /// </summary>
     public string? ModelDirectory { get; set; }
@@ -168,10 +229,103 @@ public sealed class LocalOcrConfig
     public string? DictionaryPath { get; set; }
 
     /// <summary>
+    /// RapidOCR PP-OCRv5 language pack used by the local OCR provider. The detection and
+    /// classification models are shared across packs; only the recognition model + character
+    /// dictionary swap per pack. See <see cref="OcrLanguagePacks.All"/> for the supported list
+    /// (latin, chinese, english, korean, cyrillic, arabic, devanagari, greek, telugu, tamil).
+    /// Defaults to <see cref="OcrLanguagePacks.Latin"/> for backwards compatibility with 0.5.x
+    /// and earlier installs. Override via <c>--language</c> on <c>deps install ocr</c>,
+    /// <c>ZAKIRA_REPLAY_OCR_LANGUAGE_PACK</c>, or this config key.
+    /// </summary>
+    public string? LanguagePack { get; set; } = OcrLanguagePacks.Latin;
+
+    /// <summary>
     /// When true (default), <see cref="LocalOnnxOcrProvider"/> initialisation may invoke
     /// <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the RapidOCR
     /// models on first use. Install ahead-of-time with <c>deps install ocr</c> to skip the
     /// network round-trip; set false to disable on-demand downloads entirely.
+    /// </summary>
+    public bool AutoDownload { get; set; } = true;
+}
+
+public sealed class VisionConfig
+{
+    /// <summary>
+    /// Preferred vision provider when the pipeline runs with <c>--vision</c>. Use one of the
+    /// <see cref="VisionProviders"/> constants. Default is <see cref="VisionProviders.Copilot"/>
+    /// (LLM-backed via the configured provider) for backward compatibility; flip to
+    /// <see cref="VisionProviders.Local"/> in config or per request to use the fully-local
+    /// classical-CV path that never invokes an LLM.
+    /// </summary>
+    public string? Provider { get; set; } = VisionProviders.Copilot;
+
+    public LocalVisionConfig Local { get; set; } = new();
+}
+
+public sealed class LocalVisionConfig
+{
+    /// <summary>
+    /// Sub-mode for the local (no-LLM) vision provider. One of <c>heuristic</c>, <c>clip</c>,
+    /// or <c>clip-blip</c> (default). Controlled at runtime by the <see cref="LocalVisionMode"/>
+    /// enum; this string form is for config-file and env-var consumption.
+    /// </summary>
+    public string? Mode { get; set; } = "clip-blip";
+
+    /// <summary>
+    /// Directory containing the CLIP / BLIP ONNX model files. Resolved against the portable
+    /// directory's <c>vision/</c> subfolder when null. Auto-populated by
+    /// <c>zakira-replay deps install vision</c>.
+    /// </summary>
+    public string? ModelDirectory { get; set; }
+
+    /// <summary>
+    /// CLIP image-encoder ONNX path. Required for <c>clip</c> and <c>clip-blip</c> modes.
+    /// Heuristic mode ignores it. When null and <see cref="ModelDirectory"/> is set, the file
+    /// is looked up at <c>&lt;ModelDirectory&gt;/clip-image-encoder.onnx</c>.
+    /// </summary>
+    public string? ClipImageEncoderPath { get; set; }
+
+    /// <summary>
+    /// CLIP text-encoder ONNX path. Used by the provider to compute zero-shot text embeddings
+    /// for the <c>Kind</c> labels on first use (results are cached on disk at
+    /// <c>clip-kind-embeddings.bin</c> next to the encoder). Required when no pre-computed
+    /// embeddings file exists.
+    /// </summary>
+    public string? ClipTextEncoderPath { get; set; }
+
+    /// <summary>
+    /// Path to a pre-computed CLIP text embeddings file (7 vectors × 512 float32 little-endian).
+    /// When present, lets the provider skip loading the CLIP text encoder entirely. Generated
+    /// on first use when <see cref="ClipTextEncoderPath"/> is configured.
+    /// </summary>
+    public string? ClipKindEmbeddingsPath { get; set; }
+
+    /// <summary>
+    /// BLIP image-encoder ONNX path. Required for <c>clip-blip</c> mode. Heuristic and clip
+    /// modes ignore it.
+    /// </summary>
+    public string? BlipImageEncoderPath { get; set; }
+
+    /// <summary>
+    /// BLIP decoder ONNX path. Required for <c>clip-blip</c> mode.
+    /// </summary>
+    public string? BlipDecoderPath { get; set; }
+
+    /// <summary>
+    /// BLIP tokenizer vocabulary file (WordPiece, one token per line). Required for
+    /// <c>clip-blip</c> mode.
+    /// </summary>
+    public string? BlipVocabPath { get; set; }
+
+    /// <summary>
+    /// Maximum length (in tokens) for the BLIP greedy-decoded caption. Defaults to 40.
+    /// </summary>
+    public int? BlipMaxTokens { get; set; }
+
+    /// <summary>
+    /// When true (default), the provider may invoke
+    /// <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the CLIP/BLIP models on
+    /// first use. Set false to disable on-demand downloads entirely (e.g. air-gapped runs).
     /// </summary>
     public bool AutoDownload { get; set; } = true;
 }
@@ -266,11 +420,50 @@ public sealed class LlmConfig
     public AzureOpenAiConfig AzureOpenAi { get; set; } = new();
 
     /// <summary>
+    /// Options for the local Ollama daemon selected via <c>--llm-provider ollama</c>. Chat and
+    /// vision routed through Ollama's native <see cref="Microsoft.Extensions.AI.IChatClient"/>
+    /// implementation; STT remains the caller's responsibility (use <c>local-whisper</c>).
+    /// </summary>
+    public OllamaConfig Ollama { get; set; } = new();
+
+    /// <summary>
     /// Options for the fully-local Whisper.net STT path selected via
     /// <c>--llm-provider local-whisper</c>. Resolved end-to-end by
     /// <see cref="LocalWhisperOptions.Resolve(ReplayConfig?)"/>.
     /// </summary>
     public LocalWhisperConfig LocalWhisper { get; set; } = new();
+}
+
+public sealed class OllamaConfig
+{
+    public List<string> EndpointEnvironmentVariables { get; set; } = [];
+
+    public List<string> ModelEnvironmentVariables { get; set; } = [];
+
+    public List<string> VisionModelEnvironmentVariables { get; set; } = [];
+
+    /// <summary>HTTP endpoint of the local Ollama daemon. Defaults to <c>http://localhost:11434</c>.</summary>
+    public string? Endpoint { get; set; }
+
+    /// <summary>
+    /// Chat model name (matches the value passed to <c>ollama pull</c>, e.g. <c>qwen2.5:7b</c>,
+    /// <c>llama3.1:8b</c>). Required when the provider is selected.
+    /// </summary>
+    public string? Model { get; set; }
+
+    /// <summary>
+    /// Vision-capable model used when the request includes image attachments (e.g. OCR / vision
+    /// frames). Examples: <c>llava</c>, <c>llama3.2-vision</c>, <c>bakllava</c>. When null,
+    /// image requests fall back to <see cref="Model"/>.
+    /// </summary>
+    public string? VisionModel { get; set; }
+
+    /// <summary>
+    /// Per-request timeout for chat completions. Defaults to 5 minutes — generous because local
+    /// inference can be slow on CPU-only machines and meeting OCR/vision tasks frequently exceed
+    /// the cloud-default 60-second budget.
+    /// </summary>
+    public int? TimeoutSeconds { get; set; }
 }
 
 public sealed class LocalWhisperConfig
@@ -431,6 +624,13 @@ public sealed class ConfigStore
                     ModelEnvironmentVariables = ["AZURE_OPENAI_MODEL"],
                     ApiVersionEnvironmentVariables = ["AZURE_OPENAI_API_VERSION"]
                 },
+                Ollama = new OllamaConfig
+                {
+                    EndpointEnvironmentVariables = ["ZAKIRA_REPLAY_OLLAMA_ENDPOINT", "OLLAMA_HOST"],
+                    ModelEnvironmentVariables = ["ZAKIRA_REPLAY_OLLAMA_MODEL"],
+                    VisionModelEnvironmentVariables = ["ZAKIRA_REPLAY_OLLAMA_VISION_MODEL"],
+                    Endpoint = OllamaLlmProvider.DefaultEndpoint
+                },
                 LocalWhisper = new LocalWhisperConfig
                 {
                     ModelSize = LocalWhisperOptions.DefaultModelSize,
@@ -444,7 +644,8 @@ public sealed class ConfigStore
                 Local = new LocalOcrConfig
                 {
                     AutoDownload = true,
-                    ModelDirectory = PortableDependencyInstaller.GetDefaultOcrModelDirectory()
+                    ModelDirectory = PortableDependencyInstaller.GetDefaultOcrModelDirectory(),
+                    LanguagePack = OcrLanguagePacks.Latin
                 }
             },
             Captions = new CaptionsConfig
@@ -482,6 +683,15 @@ public sealed class ConfigStore
             Auth = new AuthConfig
             {
                 StaleThresholdMinutes = 60
+            },
+            Diarization = new DiarizationConfig
+            {
+                Provider = DiarizationProviders.SherpaOnnx,
+                ModelDirectory = PortableDependencyInstaller.GetDefaultDiarizationModelDirectory(),
+                MinDurationOnSeconds = 0.3f,
+                MinDurationOffSeconds = 0.5f,
+                Threads = 1,
+                AutoDownload = true
             }
         };
     }
@@ -745,6 +955,38 @@ public sealed class ConfigStore
             case "llm.azure-openai.api-version":
                 config.Llm.AzureOpenAi.ApiVersion = NormalizeNonEmpty(value, key);
                 break;
+            case "llm.ollama.endpoint":
+                config.Llm.Ollama.Endpoint = NormalizeUrl(value, key).TrimEnd('/');
+                break;
+            case "llm.ollama.endpointenvvars":
+            case "llm.ollama.endpoint-env-vars":
+            case "llm.ollama.endpointenvironmentvariables":
+            case "llm.ollama.endpoint-environment-variables":
+                config.Llm.Ollama.EndpointEnvironmentVariables = ParseEnvironmentVariableNames(value, key);
+                break;
+            case "llm.ollama.model":
+                config.Llm.Ollama.Model = NormalizeNonEmpty(value, key);
+                break;
+            case "llm.ollama.modelenvvars":
+            case "llm.ollama.model-env-vars":
+            case "llm.ollama.modelenvironmentvariables":
+            case "llm.ollama.model-environment-variables":
+                config.Llm.Ollama.ModelEnvironmentVariables = ParseEnvironmentVariableNames(value, key);
+                break;
+            case "llm.ollama.visionmodel":
+            case "llm.ollama.vision-model":
+                config.Llm.Ollama.VisionModel = NormalizeNonEmpty(value, key);
+                break;
+            case "llm.ollama.visionmodelenvvars":
+            case "llm.ollama.vision-model-env-vars":
+            case "llm.ollama.visionmodelenvironmentvariables":
+            case "llm.ollama.vision-model-environment-variables":
+                config.Llm.Ollama.VisionModelEnvironmentVariables = ParseEnvironmentVariableNames(value, key);
+                break;
+            case "llm.ollama.timeoutseconds":
+            case "llm.ollama.timeout-seconds":
+                config.Llm.Ollama.TimeoutSeconds = ParsePositiveInt(value, key);
+                break;
             case "llm.localwhisper.modelpath":
             case "llm.local-whisper.model-path":
             case "llm.localwhisper.path":
@@ -826,6 +1068,72 @@ public sealed class ConfigStore
             case "ocr.local.auto-download":
                 config.Ocr.Local.AutoDownload = ParseBool(value, key);
                 break;
+            case "ocr.local.languagepack":
+            case "ocr.local.language-pack":
+            case "ocr.local.language":
+            case "ocr.local.lang":
+            case "ocr.local.pack":
+                if (!OcrLanguagePacks.TryGet(value, out var resolvedPack))
+                {
+                    throw new ReplayException(
+                        $"Unknown OCR language pack: '{value}'. Known packs: {string.Join(", ", OcrLanguagePacks.All.Select(p => p.Name))}.");
+                }
+                config.Ocr.Local.LanguagePack = resolvedPack.Name;
+                break;
+            case "vision.provider":
+                config.Vision.Provider = VisionProviderFactory.Normalize(value);
+                break;
+            case "vision.local.mode":
+                config.Vision.Local.Mode = VisionProviderFactory.FormatMode(VisionProviderFactory.NormalizeMode(value));
+                break;
+            case "vision.local.modeldirectory":
+            case "vision.local.model-directory":
+                config.Vision.Local.ModelDirectory = NormalizeDirectoryPath(value);
+                break;
+            case "vision.local.clipimageencoderpath":
+            case "vision.local.clip-image-encoder-path":
+            case "vision.local.clip.imageencoderpath":
+            case "vision.local.clip.image-encoder-path":
+                config.Vision.Local.ClipImageEncoderPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.cliptextencoderpath":
+            case "vision.local.clip-text-encoder-path":
+            case "vision.local.clip.textencoderpath":
+            case "vision.local.clip.text-encoder-path":
+                config.Vision.Local.ClipTextEncoderPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.clipkindembeddingspath":
+            case "vision.local.clip-kind-embeddings-path":
+            case "vision.local.clip.kindembeddingspath":
+            case "vision.local.clip.kind-embeddings-path":
+                config.Vision.Local.ClipKindEmbeddingsPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.blipimageencoderpath":
+            case "vision.local.blip-image-encoder-path":
+            case "vision.local.blip.imageencoderpath":
+            case "vision.local.blip.image-encoder-path":
+                config.Vision.Local.BlipImageEncoderPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.blipdecoderpath":
+            case "vision.local.blip-decoder-path":
+            case "vision.local.blip.decoderpath":
+            case "vision.local.blip.decoder-path":
+                config.Vision.Local.BlipDecoderPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.blipvocabpath":
+            case "vision.local.blip-vocab-path":
+            case "vision.local.blip.vocabpath":
+            case "vision.local.blip.vocab-path":
+                config.Vision.Local.BlipVocabPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.blipmaxtokens":
+            case "vision.local.blip-max-tokens":
+                config.Vision.Local.BlipMaxTokens = ParsePositiveInt(value, key);
+                break;
+            case "vision.local.autodownload":
+            case "vision.local.auto-download":
+                config.Vision.Local.AutoDownload = ParseBool(value, key);
+                break;
             case "crop.enabled":
             case "smartcrop.enabled":
             case "smart-crop.enabled":
@@ -874,6 +1182,43 @@ public sealed class ConfigStore
             case "auth.stale-threshold-minutes":
                 config.Auth.StaleThresholdMinutes = ParsePositiveInt(value, key);
                 break;
+            case "diarization.provider":
+                config.Diarization.Provider = DiarizationProviderFactory.Normalize(value);
+                break;
+            case "diarization.modeldirectory":
+            case "diarization.model-directory":
+                config.Diarization.ModelDirectory = NormalizeDirectoryPath(value);
+                break;
+            case "diarization.segmentationmodelpath":
+            case "diarization.segmentation-model-path":
+                config.Diarization.SegmentationModelPath = NormalizeFilePath(value);
+                break;
+            case "diarization.embeddingmodelpath":
+            case "diarization.embedding-model-path":
+                config.Diarization.EmbeddingModelPath = NormalizeFilePath(value);
+                break;
+            case "diarization.numspeakers":
+            case "diarization.num-speakers":
+                config.Diarization.NumSpeakers = ParsePositiveInt(value, key);
+                break;
+            case "diarization.threshold":
+                config.Diarization.Threshold = (float)ParsePositiveDouble(value, key);
+                break;
+            case "diarization.mindurationonseconds":
+            case "diarization.min-duration-on-seconds":
+                config.Diarization.MinDurationOnSeconds = (float)ParsePositiveDouble(value, key);
+                break;
+            case "diarization.mindurationoffseconds":
+            case "diarization.min-duration-off-seconds":
+                config.Diarization.MinDurationOffSeconds = (float)ParsePositiveDouble(value, key);
+                break;
+            case "diarization.threads":
+                config.Diarization.Threads = ParsePositiveInt(value, key);
+                break;
+            case "diarization.autodownload":
+            case "diarization.auto-download":
+                config.Diarization.AutoDownload = ParseBool(value, key);
+                break;
             default:
                 throw new ReplayException($"Unknown config key: {key}");
         }
@@ -916,6 +1261,13 @@ public sealed class ConfigStore
             "llm.azureopenai.deployment" or "llm.azure-openai.deployment" => config.Llm.AzureOpenAi.Deployment,
             "llm.azureopenai.model" or "llm.azure-openai.model" => config.Llm.AzureOpenAi.Model,
             "llm.azureopenai.apiversion" or "llm.azure-openai.api-version" => config.Llm.AzureOpenAi.ApiVersion,
+            "llm.ollama.endpoint" => config.Llm.Ollama.Endpoint,
+            "llm.ollama.endpointenvvars" or "llm.ollama.endpoint-env-vars" or "llm.ollama.endpointenvironmentvariables" or "llm.ollama.endpoint-environment-variables" => FormatEnvironmentVariableNames(config.Llm.Ollama.EndpointEnvironmentVariables),
+            "llm.ollama.model" => config.Llm.Ollama.Model,
+            "llm.ollama.modelenvvars" or "llm.ollama.model-env-vars" or "llm.ollama.modelenvironmentvariables" or "llm.ollama.model-environment-variables" => FormatEnvironmentVariableNames(config.Llm.Ollama.ModelEnvironmentVariables),
+            "llm.ollama.visionmodel" or "llm.ollama.vision-model" => config.Llm.Ollama.VisionModel,
+            "llm.ollama.visionmodelenvvars" or "llm.ollama.vision-model-env-vars" or "llm.ollama.visionmodelenvironmentvariables" or "llm.ollama.vision-model-environment-variables" => FormatEnvironmentVariableNames(config.Llm.Ollama.VisionModelEnvironmentVariables),
+            "llm.ollama.timeoutseconds" or "llm.ollama.timeout-seconds" => config.Llm.Ollama.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture),
             "llm.localwhisper.modelpath" or "llm.local-whisper.model-path" or "llm.localwhisper.path" or "llm.local-whisper.path" => config.Llm.LocalWhisper.ModelPath,
             "llm.localwhisper.modelsize" or "llm.local-whisper.model-size" or "llm.localwhisper.size" or "llm.local-whisper.size" => config.Llm.LocalWhisper.ModelSize,
             "llm.localwhisper.language" or "llm.local-whisper.language" => config.Llm.LocalWhisper.Language,
@@ -934,6 +1286,18 @@ public sealed class ConfigStore
             "ocr.local.recognitionmodelpath" or "ocr.local.recognition-model-path" or "ocr.local.recmodelpath" or "ocr.local.rec-model-path" => config.Ocr.Local.RecognitionModelPath,
             "ocr.local.dictionarypath" or "ocr.local.dictionary-path" or "ocr.local.keyspath" or "ocr.local.keys-path" => config.Ocr.Local.DictionaryPath,
             "ocr.local.autodownload" or "ocr.local.auto-download" => config.Ocr.Local.AutoDownload.ToString(),
+            "ocr.local.languagepack" or "ocr.local.language-pack" or "ocr.local.language" or "ocr.local.lang" or "ocr.local.pack" => config.Ocr.Local.LanguagePack,
+            "vision.provider" => config.Vision.Provider,
+            "vision.local.mode" => config.Vision.Local.Mode,
+            "vision.local.modeldirectory" or "vision.local.model-directory" => config.Vision.Local.ModelDirectory,
+            "vision.local.clipimageencoderpath" or "vision.local.clip-image-encoder-path" or "vision.local.clip.imageencoderpath" or "vision.local.clip.image-encoder-path" => config.Vision.Local.ClipImageEncoderPath,
+            "vision.local.cliptextencoderpath" or "vision.local.clip-text-encoder-path" or "vision.local.clip.textencoderpath" or "vision.local.clip.text-encoder-path" => config.Vision.Local.ClipTextEncoderPath,
+            "vision.local.clipkindembeddingspath" or "vision.local.clip-kind-embeddings-path" or "vision.local.clip.kindembeddingspath" or "vision.local.clip.kind-embeddings-path" => config.Vision.Local.ClipKindEmbeddingsPath,
+            "vision.local.blipimageencoderpath" or "vision.local.blip-image-encoder-path" or "vision.local.blip.imageencoderpath" or "vision.local.blip.image-encoder-path" => config.Vision.Local.BlipImageEncoderPath,
+            "vision.local.blipdecoderpath" or "vision.local.blip-decoder-path" or "vision.local.blip.decoderpath" or "vision.local.blip.decoder-path" => config.Vision.Local.BlipDecoderPath,
+            "vision.local.blipvocabpath" or "vision.local.blip-vocab-path" or "vision.local.blip.vocabpath" or "vision.local.blip.vocab-path" => config.Vision.Local.BlipVocabPath,
+            "vision.local.blipmaxtokens" or "vision.local.blip-max-tokens" => config.Vision.Local.BlipMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            "vision.local.autodownload" or "vision.local.auto-download" => config.Vision.Local.AutoDownload.ToString(),
             "crop.enabled" or "smartcrop.enabled" or "smart-crop.enabled" => config.Crop.Enabled.ToString(),
             "crop.profile" or "smartcrop.profile" or "smart-crop.profile" => config.Crop.Profile,
             "capture.mode" => config.Capture.Mode,
@@ -946,6 +1310,16 @@ public sealed class ConfigStore
             "capture.browser.maxcaptionbytes" or "capture.browser.max-caption-bytes" => config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
             "auth.directory" => config.Auth.Directory,
             "auth.stalethresholdminutes" or "auth.stale-threshold-minutes" => config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
+            "diarization.provider" => config.Diarization.Provider,
+            "diarization.modeldirectory" or "diarization.model-directory" => config.Diarization.ModelDirectory,
+            "diarization.segmentationmodelpath" or "diarization.segmentation-model-path" => config.Diarization.SegmentationModelPath,
+            "diarization.embeddingmodelpath" or "diarization.embedding-model-path" => config.Diarization.EmbeddingModelPath,
+            "diarization.numspeakers" or "diarization.num-speakers" => config.Diarization.NumSpeakers?.ToString(CultureInfo.InvariantCulture),
+            "diarization.threshold" => config.Diarization.Threshold?.ToString(CultureInfo.InvariantCulture),
+            "diarization.mindurationonseconds" or "diarization.min-duration-on-seconds" => config.Diarization.MinDurationOnSeconds?.ToString(CultureInfo.InvariantCulture),
+            "diarization.mindurationoffseconds" or "diarization.min-duration-off-seconds" => config.Diarization.MinDurationOffSeconds?.ToString(CultureInfo.InvariantCulture),
+            "diarization.threads" => config.Diarization.Threads?.ToString(CultureInfo.InvariantCulture),
+            "diarization.autodownload" or "diarization.auto-download" => config.Diarization.AutoDownload.ToString(),
             _ => throw new ReplayException($"Unknown config key: {key}")
         };
     }
@@ -984,6 +1358,13 @@ public sealed class ConfigStore
             ["llm.azureOpenAi.deployment"] = config.Llm.AzureOpenAi.Deployment,
             ["llm.azureOpenAi.model"] = config.Llm.AzureOpenAi.Model,
             ["llm.azureOpenAi.apiVersion"] = config.Llm.AzureOpenAi.ApiVersion,
+            ["llm.ollama.endpoint"] = config.Llm.Ollama.Endpoint,
+            ["llm.ollama.endpointEnvVars"] = FormatEnvironmentVariableNames(config.Llm.Ollama.EndpointEnvironmentVariables),
+            ["llm.ollama.model"] = config.Llm.Ollama.Model,
+            ["llm.ollama.modelEnvVars"] = FormatEnvironmentVariableNames(config.Llm.Ollama.ModelEnvironmentVariables),
+            ["llm.ollama.visionModel"] = config.Llm.Ollama.VisionModel,
+            ["llm.ollama.visionModelEnvVars"] = FormatEnvironmentVariableNames(config.Llm.Ollama.VisionModelEnvironmentVariables),
+            ["llm.ollama.timeoutSeconds"] = config.Llm.Ollama.TimeoutSeconds?.ToString(CultureInfo.InvariantCulture),
             ["llm.localWhisper.modelPath"] = config.Llm.LocalWhisper.ModelPath,
             ["llm.localWhisper.modelSize"] = config.Llm.LocalWhisper.ModelSize,
             ["llm.localWhisper.language"] = config.Llm.LocalWhisper.Language,
@@ -1002,6 +1383,18 @@ public sealed class ConfigStore
             ["ocr.local.recognitionModelPath"] = config.Ocr.Local.RecognitionModelPath,
             ["ocr.local.dictionaryPath"] = config.Ocr.Local.DictionaryPath,
             ["ocr.local.autoDownload"] = config.Ocr.Local.AutoDownload.ToString(),
+            ["ocr.local.languagePack"] = config.Ocr.Local.LanguagePack,
+            ["vision.provider"] = config.Vision.Provider,
+            ["vision.local.mode"] = config.Vision.Local.Mode,
+            ["vision.local.modelDirectory"] = config.Vision.Local.ModelDirectory,
+            ["vision.local.clipImageEncoderPath"] = config.Vision.Local.ClipImageEncoderPath,
+            ["vision.local.clipTextEncoderPath"] = config.Vision.Local.ClipTextEncoderPath,
+            ["vision.local.clipKindEmbeddingsPath"] = config.Vision.Local.ClipKindEmbeddingsPath,
+            ["vision.local.blipImageEncoderPath"] = config.Vision.Local.BlipImageEncoderPath,
+            ["vision.local.blipDecoderPath"] = config.Vision.Local.BlipDecoderPath,
+            ["vision.local.blipVocabPath"] = config.Vision.Local.BlipVocabPath,
+            ["vision.local.blipMaxTokens"] = config.Vision.Local.BlipMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            ["vision.local.autoDownload"] = config.Vision.Local.AutoDownload.ToString(),
             ["crop.enabled"] = config.Crop.Enabled.ToString(),
             ["crop.profile"] = config.Crop.Profile,
             ["capture.mode"] = config.Capture.Mode,
@@ -1013,7 +1406,17 @@ public sealed class ConfigStore
             ["capture.browser.captureCaptions"] = config.Capture.Browser.CaptureCaptions.ToString(),
             ["capture.browser.maxCaptionBytes"] = config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
             ["auth.directory"] = config.Auth.Directory,
-            ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture)
+            ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
+            ["diarization.provider"] = config.Diarization.Provider,
+            ["diarization.modelDirectory"] = config.Diarization.ModelDirectory,
+            ["diarization.segmentationModelPath"] = config.Diarization.SegmentationModelPath,
+            ["diarization.embeddingModelPath"] = config.Diarization.EmbeddingModelPath,
+            ["diarization.numSpeakers"] = config.Diarization.NumSpeakers?.ToString(CultureInfo.InvariantCulture),
+            ["diarization.threshold"] = config.Diarization.Threshold?.ToString(CultureInfo.InvariantCulture),
+            ["diarization.minDurationOnSeconds"] = config.Diarization.MinDurationOnSeconds?.ToString(CultureInfo.InvariantCulture),
+            ["diarization.minDurationOffSeconds"] = config.Diarization.MinDurationOffSeconds?.ToString(CultureInfo.InvariantCulture),
+            ["diarization.threads"] = config.Diarization.Threads?.ToString(CultureInfo.InvariantCulture),
+            ["diarization.autoDownload"] = config.Diarization.AutoDownload.ToString()
         };
     }
 

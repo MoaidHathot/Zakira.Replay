@@ -41,7 +41,12 @@ public static class AnalysisCache
             SmartCrop: request.SmartCrop,
             SmartCropProfile: request.SmartCropProfile,
             CaptureMode: request.CaptureMode,
-            AuthProfile: request.AuthProfile);
+            AuthProfile: request.AuthProfile,
+            UseDiarization: request.UseDiarization,
+            NumSpeakers: request.NumSpeakers,
+            DiarizationThreshold: request.DiarizationThreshold,
+            VisionProvider: request.VisionProvider,
+            LocalVisionMode: request.LocalVisionMode);
         var json = JsonSerializer.Serialize(input, JsonOptions);
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(json))).ToLowerInvariant();
     }
@@ -71,7 +76,12 @@ public static class AnalysisCache
         bool? SmartCrop,
         string? SmartCropProfile,
         string? CaptureMode,
-        string? AuthProfile);
+        string? AuthProfile,
+        bool UseDiarization,
+        int? NumSpeakers,
+        float? DiarizationThreshold,
+        string VisionProvider,
+        string? LocalVisionMode);
 }
 
 public sealed record ArtifactCacheEntry(

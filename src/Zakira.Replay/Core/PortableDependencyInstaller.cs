@@ -11,6 +11,7 @@ public sealed class PortableDependencyInstaller
     public const string Onnx = "onnx";
     public const string Ocr = "ocr";
     public const string WhisperModel = "whisper-model";
+    public const string Diarization = "diarization";
     public const string All = "all";
     public const string DefaultOnnxModelFile = "model_quantized.onnx";
 
@@ -19,6 +20,12 @@ public sealed class PortableDependencyInstaller
     public const string OcrClassificationModelFile = "ch_ppocr_mobile_v2.0_cls_mobile.onnx";
     public const string OcrRecognitionModelFile = "latin_PP-OCRv5_rec_mobile.onnx";
     public const string OcrDictionaryFile = "ppocrv5_latin_dict.txt";
+
+    // Diarization model files. pyannote-segmentation-3.0 ONNX is mirrored on Hugging Face as a
+    // flat .onnx download (saves us implementing a tar.bz2 decoder), and the 3D-Speaker
+    // ERes2NetV2 embedding extractor lives directly on the sherpa-onnx GitHub release as .onnx.
+    public const string DiarizationSegmentationFile = "pyannote-segmentation-3-0.onnx";
+    public const string DiarizationEmbeddingFile = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
     private const string YtDlpWindowsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
     private const string YtDlpLinuxX64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
@@ -33,6 +40,10 @@ public sealed class PortableDependencyInstaller
     // ggml whisper.cpp model store on Hugging Face. Honours HF_TOKEN if set (rate-limit relief).
     private const string WhisperModelBaseUrl = "https://huggingface.co/ggerganov/whisper.cpp/resolve/main";
 
+    // Diarization model sources.
+    private const string DiarizationSegmentationUrl = "https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0/resolve/main/model.onnx?download=true";
+    private const string DiarizationEmbeddingUrl = "https://github.com/k2-fsa/sherpa-onnx/releases/download/speaker-recongition-models/3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
+
     private readonly ReplayConfig config;
     private readonly HttpClient httpClient;
 
@@ -46,7 +57,12 @@ public sealed class PortableDependencyInstaller
         }
     }
 
-    public PortableDependencyLayout Layout => new(GetPortableDirectory(config), GetOnnxModelDirectory(config), GetOcrModelDirectory(config), GetWhisperModelDirectory(config));
+    public PortableDependencyLayout Layout => new(
+        GetPortableDirectory(config),
+        GetOnnxModelDirectory(config),
+        GetOcrModelDirectory(config),
+        GetWhisperModelDirectory(config),
+        GetDiarizationModelDirectory(config));
 
     public string GetPortableExecutablePath(string executableName)
     {
@@ -77,9 +93,18 @@ public sealed class PortableDependencyInstaller
         return Path.Combine(Layout.WhisperModelDirectory, fileName);
     }
 
+    public string GetDiarizationSegmentationPath() => Path.Combine(Layout.DiarizationModelDirectory, DiarizationSegmentationFile);
+
+    public string GetDiarizationEmbeddingPath() => Path.Combine(Layout.DiarizationModelDirectory, DiarizationEmbeddingFile);
+
     public static string GetDefaultWhisperModelDirectory()
     {
         return Path.Combine(GetDefaultPortableDirectory(), "models", "whisper");
+    }
+
+    public static string GetDefaultDiarizationModelDirectory()
+    {
+        return Path.Combine(GetDefaultPortableDirectory(), "models", "diarization");
     }
 
     public static string GetDefaultPortableDirectory()
@@ -118,6 +143,7 @@ public sealed class PortableDependencyInstaller
                     AddUnique(normalized, Onnx);
                     AddUnique(normalized, Ocr);
                     AddUnique(normalized, WhisperModel);
+                    AddUnique(normalized, Diarization);
                     break;
                 case "media":
                     AddUnique(normalized, YtDlp);
@@ -149,8 +175,17 @@ public sealed class PortableDependencyInstaller
                 case "ggml":
                     AddUnique(normalized, WhisperModel);
                     break;
+                case Diarization:
+                case "diarize":
+                case "speaker":
+                case "speakers":
+                case "speaker-diarization":
+                case "sherpa-onnx":
+                case "sherpa":
+                    AddUnique(normalized, Diarization);
+                    break;
                 default:
-                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, media, or all.");
+                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, diarization, media, or all.");
             }
         }
 
@@ -163,7 +198,7 @@ public sealed class PortableDependencyInstaller
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize: null).ConfigureAwait(false);
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize: null, ocrLanguagePack: null).ConfigureAwait(false);
     }
 
     public async Task<PortableDependencyInstallResult> InstallAsync(
@@ -172,6 +207,17 @@ public sealed class PortableDependencyInstaller
         IProgress<string>? progress,
         CancellationToken cancellationToken,
         string? whisperModelSize)
+    {
+        return await InstallAsync(targets, force, progress, cancellationToken, whisperModelSize, ocrLanguagePack: null).ConfigureAwait(false);
+    }
+
+    public async Task<PortableDependencyInstallResult> InstallAsync(
+        IEnumerable<string>? targets,
+        bool force,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken,
+        string? whisperModelSize,
+        string? ocrLanguagePack)
     {
         var items = new List<PortableDependencyInstallItem>();
         var layout = Layout;
@@ -192,15 +238,18 @@ public sealed class PortableDependencyInstaller
                     items.Add(await InstallOnnxAsync(force, progress, cancellationToken).ConfigureAwait(false));
                     break;
                 case Ocr:
-                    items.AddRange(await InstallOcrModelsAsync(force, progress, cancellationToken).ConfigureAwait(false));
+                    items.AddRange(await InstallOcrModelsAsync(ocrLanguagePack, force, progress, cancellationToken).ConfigureAwait(false));
                     break;
                 case WhisperModel:
                     items.Add(await InstallWhisperModelAsync(whisperModelSize, force, progress, cancellationToken).ConfigureAwait(false));
                     break;
+                case Diarization:
+                    items.AddRange(await InstallDiarizationModelsAsync(force, progress, cancellationToken).ConfigureAwait(false));
+                    break;
             }
         }
 
-        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory, layout.WhisperModelDirectory);
+        return new PortableDependencyInstallResult(items, layout.PortableDirectory, layout.OnnxModelDirectory, layout.OcrModelDirectory, layout.WhisperModelDirectory, layout.DiarizationModelDirectory);
     }
 
     private async Task<PortableDependencyInstallItem> InstallYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -267,16 +316,33 @@ public sealed class PortableDependencyInstaller
         return new PortableDependencyInstallItem(Onnx, modelDirectory, installed, OnnxRepositoryBaseUrl, installed ? "downloaded" : "already exists");
     }
 
-    private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallOcrModelsAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallOcrModelsAsync(string? languagePack, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         var modelDirectory = Layout.OcrModelDirectory;
         Directory.CreateDirectory(modelDirectory);
+
+        // Resolve which language pack to install. Order:
+        //   1. CLI/explicit override (`languagePack` arg) — supports aliases.
+        //   2. Persistent config (`ocr.local.languagePack`).
+        //   3. Latin default for backwards compat with 0.5.x and earlier installs.
+        var requested = string.IsNullOrWhiteSpace(languagePack)
+            ? (config.Ocr.Local.LanguagePack ?? OcrLanguagePacks.Latin)
+            : languagePack;
+
+        if (!OcrLanguagePacks.TryGet(requested, out var pack))
+        {
+            throw new ReplayException(
+                $"Unknown OCR language pack: '{requested}'. Known packs: {string.Join(", ", OcrLanguagePacks.All.Select(p => p.Name))}.");
+        }
+
+        // Detection + classification are shared across packs — download once, reuse forever.
+        // The recognition model + dictionary are pack-specific.
         var files = new[]
         {
             new OnnxDownloadFile(OcrDetectionModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv5/det/{OcrDetectionModelFile}"),
             new OnnxDownloadFile(OcrClassificationModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv4/cls/{OcrClassificationModelFile}"),
-            new OnnxDownloadFile(OcrRecognitionModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv5/rec/{OcrRecognitionModelFile}"),
-            new OnnxDownloadFile(OcrDictionaryFile, $"{RapidOcrModelBaseUrl}/paddle/PP-OCRv5/rec/latin_PP-OCRv5_rec_mobile/{OcrDictionaryFile}")
+            new OnnxDownloadFile(pack.RecognitionModelFile, $"{RapidOcrModelBaseUrl}/onnx/PP-OCRv5/rec/{pack.RecognitionModelFile}"),
+            new OnnxDownloadFile(pack.DictionaryFile, $"{RapidOcrModelBaseUrl}/paddle/PP-OCRv5/rec/{pack.RecognitionModelDirectory}/{pack.DictionaryFile}")
         };
 
         var items = new List<PortableDependencyInstallItem>(files.Length);
@@ -284,7 +350,7 @@ public sealed class PortableDependencyInstaller
         {
             var destination = Path.Combine(modelDirectory, file.Name);
             var installed = await DownloadFileAsync(file.Url, destination, force, progress, cancellationToken).ConfigureAwait(false);
-            items.Add(new PortableDependencyInstallItem(Ocr, destination, installed, file.Url, installed ? "downloaded" : "already exists"));
+            items.Add(new PortableDependencyInstallItem(Ocr, destination, installed, file.Url, installed ? $"downloaded ({pack.Name})" : $"already exists ({pack.Name})"));
         }
 
         return items;
@@ -317,6 +383,29 @@ public sealed class PortableDependencyInstaller
             : await DownloadFileAsync(url, destination, force, progress, cancellationToken, authorizationHeader: ("Authorization", $"Bearer {hfToken}")).ConfigureAwait(false);
 
         return new PortableDependencyInstallItem(WhisperModel, destination, installed, url, installed ? $"downloaded ({size})" : $"already exists ({size})");
+    }
+
+    private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallDiarizationModelsAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        var modelDirectory = Layout.DiarizationModelDirectory;
+        Directory.CreateDirectory(modelDirectory);
+
+        var files = new (string Name, string Url)[]
+        {
+            (DiarizationSegmentationFile, DiarizationSegmentationUrl),
+            (DiarizationEmbeddingFile, DiarizationEmbeddingUrl)
+        };
+
+        var items = new List<PortableDependencyInstallItem>(files.Length);
+        foreach (var file in files)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var destination = Path.Combine(modelDirectory, file.Name);
+            var installed = await DownloadFileAsync(file.Url, destination, force, progress, cancellationToken).ConfigureAwait(false);
+            items.Add(new PortableDependencyInstallItem(Diarization, destination, installed, file.Url, installed ? "downloaded" : "already exists"));
+        }
+
+        return items;
     }
 
     private async Task<bool> DownloadFileAsync(string url, string destinationPath, bool force, IProgress<string>? progress, CancellationToken cancellationToken, (string Name, string Value)? authorizationHeader = null)
@@ -415,6 +504,14 @@ public sealed class PortableDependencyInstaller
             GetDefaultWhisperModelDirectory())!));
     }
 
+    private static string GetDiarizationModelDirectory(ReplayConfig config)
+    {
+        return Path.GetFullPath(Environment.ExpandEnvironmentVariables(FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_DIARIZATION_MODEL_DIRECTORY"),
+            config.Diarization.ModelDirectory,
+            GetDefaultDiarizationModelDirectory())!));
+    }
+
     private static string GetOnnxModelFile(ReplayConfig config)
     {
         return FirstNonEmpty(
@@ -484,14 +581,15 @@ public sealed class PortableDependencyInstaller
     private sealed record OnnxDownloadFile(string Name, string Url);
 }
 
-public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory, string WhisperModelDirectory);
+public sealed record PortableDependencyLayout(string PortableDirectory, string OnnxModelDirectory, string OcrModelDirectory, string WhisperModelDirectory, string DiarizationModelDirectory);
 
 public sealed record PortableDependencyInstallResult(
     IReadOnlyList<PortableDependencyInstallItem> Items,
     string PortableDirectory,
     string OnnxModelDirectory,
     string OcrModelDirectory,
-    string WhisperModelDirectory);
+    string WhisperModelDirectory,
+    string DiarizationModelDirectory);
 
 public sealed record PortableDependencyInstallItem(
     string Name,

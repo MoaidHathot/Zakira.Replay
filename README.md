@@ -29,9 +29,9 @@ Dependencies are not installed automatically unless explicitly configured. Missi
 zakira-replay doctor [--json]
 zakira-replay info [--json]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
-zakira-replay frames <url-or-file> [--count <count>] [--frame-strategy interval|scene|every-frame] [--ocr] [--vision] [--run-id <id>] [--cache] [--force]
+zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--json]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
 zakira-replay search build <run-directory> [--backend json|sqlite|sqlite-onnx]
 zakira-replay search query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]
@@ -42,7 +42,7 @@ zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
 zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
 zakira-replay queue status [--queue-id <id>] [--json]
-zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
+zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
 zakira-replay deps path
 zakira-replay auth login <profile-name> [--url <start-url>]
 zakira-replay auth list
@@ -81,7 +81,7 @@ Zakira.Replay resolves dependency paths in this order:
 - Portable dependency directory.
 - `PATH` or known install locations.
 
-Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr` to download the RapidOCR PP-OCRv5 latin models used by the local (non-LLM) OCR provider, or `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, OCR models, and the default Whisper model.
+Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr [--language <pack>]` to download a RapidOCR PP-OCRv5 language pack for the local OCR provider (default `latin`; other packs: `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`), `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path, or `zakira-replay deps install diarization` to download the pyannote-segmentation-3.0 and 3D-Speaker ONNX models used by the `--diarize` flag. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, the configured OCR language pack, the default Whisper model, and the diarization models.
 
 To allow on-demand downloads when a dependency is first required, set `dependencies.autoDownload=true`. To allow ONNX model download when `sqlite-onnx` search needs model files, set `search.onnx.autoDownload=true`. Both are `false` by default.
 
@@ -107,6 +107,7 @@ Environment variables:
 - `ZAKIRA_REPLAY_ONNX_MAX_SEQUENCE_LENGTH`
 - `ZAKIRA_REPLAY_ONNX_EMBEDDING_DIMENSIONS`
 - `ZAKIRA_REPLAY_OCR_PROVIDER`
+- `ZAKIRA_REPLAY_OCR_LANGUAGE_PACK`
 - `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY`
 - `ZAKIRA_REPLAY_OCR_DETECTION_MODEL_PATH`
 - `ZAKIRA_REPLAY_OCR_CLASSIFICATION_MODEL_PATH`
@@ -114,12 +115,26 @@ Environment variables:
 - `ZAKIRA_REPLAY_OCR_DICTIONARY_PATH`
 - `ZAKIRA_REPLAY_AUTH_DIRECTORY`
 - `ZAKIRA_REPLAY_LLM_PROVIDER`
+- `ZAKIRA_REPLAY_OLLAMA_ENDPOINT`
+- `ZAKIRA_REPLAY_OLLAMA_MODEL`
+- `ZAKIRA_REPLAY_OLLAMA_VISION_MODEL`
+- `OLLAMA_HOST` (Ollama's standard env var; honoured as a fallback for the endpoint)
 - `ZAKIRA_REPLAY_WHISPER_MODEL_PATH`
 - `ZAKIRA_REPLAY_WHISPER_MODEL_DIRECTORY`
 - `ZAKIRA_REPLAY_WHISPER_MODEL_SIZE`
 - `ZAKIRA_REPLAY_WHISPER_LANGUAGE`
 - `ZAKIRA_REPLAY_WHISPER_THREADS`
 - `ZAKIRA_REPLAY_WHISPER_AUTODOWNLOAD`
+- `ZAKIRA_REPLAY_DIARIZATION_PROVIDER`
+- `ZAKIRA_REPLAY_DIARIZATION_MODEL_DIRECTORY`
+- `ZAKIRA_REPLAY_DIARIZATION_SEGMENTATION_MODEL_PATH`
+- `ZAKIRA_REPLAY_DIARIZATION_EMBEDDING_MODEL_PATH`
+- `ZAKIRA_REPLAY_DIARIZATION_NUM_SPEAKERS`
+- `ZAKIRA_REPLAY_DIARIZATION_THRESHOLD`
+- `ZAKIRA_REPLAY_DIARIZATION_MIN_DURATION_ON`
+- `ZAKIRA_REPLAY_DIARIZATION_MIN_DURATION_OFF`
+- `ZAKIRA_REPLAY_DIARIZATION_THREADS`
+- `ZAKIRA_REPLAY_DIARIZATION_AUTODOWNLOAD`
 - `HF_TOKEN` (optional — used by `deps install whisper-model` to lift Hugging Face download rate limits)
 - `OPENAI_API_KEY`
 - `OPENAI_BASE_URL`
@@ -360,6 +375,116 @@ Warning codes specific to browser caption capture:
 - `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED` — a single caption response failed to download (timeout, oversize body, transient Playwright error). Other captures continue.
 - `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED` — a captured caption file could not be parsed as VTT/SRT or parsed to zero segments. Pipeline continues with no transcript fill.
 
+## Ad-hoc Frame Capture
+
+`zakira-replay frames` and the MCP `extract_frames` tool are designed for the "I already watched this and just want a few specific stills" use case: an agent that ran `analyze` on a cooking video and now wants the frame at 02:34 to drop into a recipe card, or a CI step that needs three thumbnails inside a known QA reproduction window.
+
+Both surfaces accept **either** an explicit list of timestamps **or** a window plus a small frame budget — never both. The capture path deliberately skips slide grouping, hashing, OCR, vision, and chapter synthesis so it is cheap to call repeatedly. Frames land in a new `runs/<id>/frames/` folder alongside a minimal `frame-capture.json` manifest (schema: `frame-capture.schema.json`, `kind: "frame-capture"`).
+
+```bash
+# Exact timestamps (comma-separated; accepts seconds, MM:SS, HH:MM:SS)
+zakira-replay frames "./cooking.mp4" --at 02:34,03:10,04:55 --max-edge 1024 --quality 85
+
+# Window with N evenly spaced frames (endpoints inclusive)
+zakira-replay frames "https://example.com/video" --from 02:00 --to 03:00 --count 5
+
+# Window with ffmpeg scene-cut detection scoped to the window
+zakira-replay frames "./demo.mp4" --from 02:00 --to 03:00 --strategy scene --scene-safety-cap 20
+
+# JSON output (same shape returned by the extract_frames MCP tool)
+zakira-replay frames "./demo.mp4" --at 02:34 --json
+```
+
+MCP equivalent:
+
+```jsonc
+// tools/call payload
+{
+  "name": "extract_frames",
+  "arguments": {
+    "source": "./cooking.mp4",
+    "at": ["02:34", "03:10", "04:55"],   // or a single comma-separated string
+    "maxLongEdgePixels": 1024,
+    "jpegQuality": 85,
+    "computePerceptualHash": false
+  }
+}
+```
+
+Validation and clamping rules — applied in this order, with warnings written into the manifest:
+
+- Up to **64 timestamps per request**; excess entries are dropped with `FRAME_CAPTURE_TOO_MANY_TIMESTAMPS`.
+- Negative timestamps and timestamps past the source duration are dropped with `FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE`.
+- Range mode clamps `--to` to the source duration with `FRAME_CAPTURE_RANGE_OUT_OF_BOUNDS` and requires `--to > --from`.
+- `--strategy scene` runs ffmpeg's scene-cut filter scoped to the window via output-side `-ss`/`-to`; timestamps reported in the manifest are normalised back to the absolute source timeline. When the safety cap is hit a `FRAME_CAPTURE_SCENE_CAP_REACHED` warning is added.
+- When ffmpeg returns zero frames, the request still produces a manifest (with `FRAME_CAPTURE_NO_FRAMES`) so consumers always have a stable artifact to inspect.
+
+When neither `--at` nor `--from`/`--to` is passed, `zakira-replay frames` falls back to the legacy "full analyze, frames-only" pipeline (`--count <n>` controls how many) for backward compatibility.
+
+## Watching Videos Without an LLM
+
+Zakira.Replay ships an LLM-free path end-to-end. Captions/sidecars handle transcripts when present; `--llm-provider local-whisper` fills in STT via on-device Whisper.net; `--ocr-provider local` (the default) runs RapidOCR via ONNX; `--diarize` runs sherpa-onnx for speaker diarization; chapters / search-index / evidence alignment are pure C# with no model calls. Only **vision** previously required an LLM.
+
+### `--vision-provider local`
+
+The local vision provider (`LocalOnnxVisionProvider`) produces the same `VisionFrameStructured` JSON shape as the LLM path - `kind`, `title`, `bullets[]`, `codeBlocks[]`, `charts[]`, `uiElements[]`, `freeText` - without ever calling an LLM. It piggybacks on the OCR result for the same frame to populate the structured fields and optionally adds a CLIP zero-shot classifier and a BLIP image captioner on top.
+
+```bash
+# Fully air-gapped: local STT, local OCR, local vision (heuristic mode is zero-model)
+zakira-replay analyze "<source>" --stt --llm-provider local-whisper \
+    --ocr --ocr-provider local \
+    --vision --vision-provider local --local-vision-mode heuristic --cache
+
+# Heuristic + CLIP zero-shot kind classification (requires CLIP image-encoder ONNX)
+zakira-replay analyze "<source>" --vision --vision-provider local --local-vision-mode clip --ocr
+
+# Heuristic + CLIP + BLIP captioning (default for the local provider)
+zakira-replay analyze "<source>" --vision --vision-provider local --ocr
+```
+
+Three selectable sub-modes via `--local-vision-mode`:
+
+| Mode | Models needed | Footprint | What it fills |
+|---|---|---|---|
+| `heuristic` | none | 0 MB | Structure from OCR: title, bullets, code blocks, UI elements. `kind` by token-scoring rules. `charts[]` empty. `freeText` = concatenated OCR. |
+| `clip` | CLIP image-encoder ONNX + pre-computed kind embeddings | ~150 MB | Above plus CLIP zero-shot classification for `kind`. |
+| `clip-blip` (default) | above + BLIP image-encoder + decoder + WordPiece vocab | ~550 MB | Above plus BLIP image captioning prefixed with `"Frame appears to show: ..."` filling `freeText`. |
+
+OCR is auto-enabled when `--vision-provider local` is passed without `--ocr` (the structured fields need it). The pipeline records `VISION_LOCAL_OCR_REQUIRED` (info) so orchestrators can see the implicit decision.
+
+### Bring your own ONNX models
+
+This release does not ship curated CLIP/BLIP download URLs. To use `clip` or `clip-blip` modes, export the models yourself (or grab community ONNX exports) and point Zakira.Replay at them:
+
+```bash
+# CLIP ViT-B/32 (~150 MB total)
+zakira-replay config set vision.local.clipImageEncoderPath /path/to/clip-image-encoder.onnx
+zakira-replay config set vision.local.clipKindEmbeddingsPath /path/to/clip-kind-embeddings.bin
+
+# BLIP-base captioning (~400 MB additional)
+zakira-replay config set vision.local.blipImageEncoderPath /path/to/blip-image-encoder.onnx
+zakira-replay config set vision.local.blipDecoderPath /path/to/blip-decoder.onnx
+zakira-replay config set vision.local.blipVocabPath /path/to/blip-vocab.txt
+```
+
+If model files are missing, the provider degrades gracefully (clip-blip → clip → heuristic) and records `VISION_LOCAL_MODE_DEGRADED` (warning) listing which files were not found so orchestrators can wire up the paths or pin to a different mode.
+
+### Honest limitations
+
+- **`charts[]` is always empty in local mode.** Detecting charts reliably needs a chart-aware model we do not ship; OCR-derived heuristics can't infer axes/series from text alone without false positives.
+- **BLIP captions are noisy.** The base BLIP captioner ("Frame appears to show: a slide with text on it") is significantly less accurate than a frontier vision LLM. The `freeText` always includes the literal OCR text after the caption so the agent has the trustworthy part to cite.
+- **Diagrams without labels and free-form scenes** (people, landscapes, generic photographs) get classified as `other` and produce empty structured fields.
+- **No language model in the structured-output loop.** This is the point. For tasks where the LLM path's free-form scene description matters (e.g. "describe what's happening visually"), prefer `--vision-provider copilot` or use `--llm-provider ollama` with a vision-capable local model.
+
+Warning codes specific to the local vision path:
+
+- `VISION_LOCAL_MODELS_MISSING` (warning) - one or more files the configured mode needs are absent. Lists the missing paths.
+- `VISION_LOCAL_INIT_FAILED` (error) - the provider could not initialise at all (bad ONNX, corrupt vocab, etc.).
+- `VISION_LOCAL_INFERENCE_FAILED` (warning, per-frame) - ONNX threw at runtime; frame skipped, run continues.
+- `VISION_LOCAL_MODE_DEGRADED` (warning) - actual mode was lower than requested (e.g. clip-blip → clip because BLIP files missing).
+- `VISION_LOCAL_OCR_REQUIRED` (info) - OCR was auto-enabled because `--vision-provider local` needs per-frame OCR. Pass `--ocr` explicitly to silence.
+- `VISION_UNKNOWN_PROVIDER` (error) - the `--vision-provider` value was not recognised; no vision ran.
+
 ## Auth Profiles (SSO-Gated Sources)
 
 Browser-based capture (`--capture-mode browser` or `--capture-mode auto` with a yt-dlp fallback) defaults to a fresh, anonymous browser context — fine for public sources but useless for SharePoint Stream, Microsoft Stream, internal corporate portals, or anything else gated behind SSO/cookies. Auth profiles are persisted Playwright `BrowserContext.StorageStateAsync` snapshots that the capture client loads before navigating.
@@ -497,6 +622,160 @@ Environment variables (override config): `ZAKIRA_REPLAY_WHISPER_MODEL_PATH`, `ZA
 Native runtimes: out of the box, `Whisper.net.Runtime` (CPU) ships with the dotnet tool. For GPU acceleration (CUDA/Vulkan/CoreML/OpenVINO), follow [Whisper.net's pluggable runtime docs](https://github.com/sandrohanea/whisper.net#multiple-runtimes-support) — the loader will pick up alternative native binaries placed under the conventional `runtimes/<rid>/native/` layout.
 
 Warning codes specific to local STT: `STT_LOCAL_MODEL_MISSING`, `STT_LOCAL_INIT_FAILED`, `STT_LOCAL_INFERENCE_FAILED`. Per-chunk failures still surface as `STT_CHUNK_FAILED`, the same way the cloud STT paths do.
+
+### Local LLM via Ollama (`--llm-provider ollama`)
+
+For fully-local chat and vision — no API key, no network egress — pick `ollama`. Zakira.Replay talks to a running [Ollama](https://ollama.com) daemon through [OllamaSharp](https://github.com/awaescher/OllamaSharp), which implements `Microsoft.Extensions.AI.IChatClient` natively. That makes Ollama the reference path for the `IChatClient` abstraction the codebase now exposes internally; the rest of the providers will migrate onto the same surface in subsequent releases.
+
+`ollama` is **chat / vision only**: it does not serve audio models. Audio attachments fail fast with a pointer to `local-whisper`. Combine `--llm-provider ollama` with `--ocr-provider local` (default) and `--llm-provider local-whisper` (configured separately for STT) for an end-to-end air-gapped pipeline.
+
+Setup (one-time, opt-in — Ollama itself is not bundled):
+
+```bash
+# 1. Install Ollama (https://ollama.com/download) — the daemon runs locally on port 11434.
+# 2. Pull a model:
+ollama pull qwen2.5:7b              # general chat (default)
+ollama pull llama3.2-vision:11b     # vision-capable for --ocr-provider copilot / --vision
+
+# 3. Point Zakira.Replay at it (defaults are usually fine):
+zakira-replay config set llm.ollama.endpoint http://localhost:11434
+zakira-replay config set llm.ollama.model qwen2.5:7b
+zakira-replay config set llm.ollama.visionModel llama3.2-vision:11b
+```
+
+Run analysis through Ollama:
+
+```bash
+zakira-replay analyze https://example.com/talk --ocr --vision --llm-provider ollama --ocr-provider copilot
+```
+
+Configuration keys:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `llm.ollama.endpoint` | `http://localhost:11434` | HTTP endpoint of the Ollama daemon |
+| `llm.ollama.model` | `qwen2.5:7b` | Chat model (matches `ollama pull` names) |
+| `llm.ollama.visionModel` | `null` | Vision-capable model used when image attachments are present; falls back to `model` when null |
+| `llm.ollama.timeoutSeconds` | `300` | Per-request timeout (local inference can be slow on CPU-only machines) |
+| `llm.ollama.endpointEnvVars` | `[ZAKIRA_REPLAY_OLLAMA_ENDPOINT, OLLAMA_HOST]` | Env-var names checked for the endpoint override |
+| `llm.ollama.modelEnvVars` | `[ZAKIRA_REPLAY_OLLAMA_MODEL]` | Env-var names checked for the chat-model override |
+| `llm.ollama.visionModelEnvVars` | `[ZAKIRA_REPLAY_OLLAMA_VISION_MODEL]` | Env-var names checked for the vision-model override |
+
+Environment variables: `ZAKIRA_REPLAY_OLLAMA_ENDPOINT`, `ZAKIRA_REPLAY_OLLAMA_MODEL`, `ZAKIRA_REPLAY_OLLAMA_VISION_MODEL`. `OLLAMA_HOST` (Ollama's own standard env var) is honoured as a secondary fallback for the endpoint.
+
+`zakira-replay doctor` probes the daemon with a 2-second `/api/tags` request and reports the result under the synthetic `ollama` dependency.
+
+### `IChatClient` (the LLM provider abstraction)
+
+OpenAI and Azure OpenAI providers now use `Microsoft.Extensions.AI.IChatClient` internally — the public `ILlmProvider` surface is unchanged but the underlying transport goes through the official `OpenAI` / `Azure.AI.OpenAI` SDKs and `Microsoft.Extensions.AI.OpenAI`. Ollama already implements `IChatClient` natively. Every `ILlmProvider` also exposes an `IChatClient` view via the `AsChatClient()` extension method (Ollama returns the native client; OpenAI/Azure/Copilot go through their own implementations). This is the migration seam for future providers (Anthropic, Gemini, vLLM, llama.cpp servers) — they plug into `IChatClient` and Zakira.Replay consumes them through the same surface.
+
+### OpenAI-compatible endpoints (OpenRouter, Together, Groq, vLLM, llama.cpp server, …)
+
+Any OpenAI-compatible endpoint can be used through `--llm-provider openai` by overriding the base URL. No dedicated provider needed:
+
+```bash
+# OpenRouter (Claude, Gemini, Mistral, Llama, Qwen, DeepSeek, 200+ models)
+export OPENAI_API_KEY=sk-or-v1-...
+export OPENAI_BASE_URL=https://openrouter.ai/api/v1
+zakira-replay analyze https://example.com/talk --llm-provider openai --model anthropic/claude-sonnet-4
+
+# Groq
+export OPENAI_API_KEY=gsk_...
+export OPENAI_BASE_URL=https://api.groq.com/openai/v1
+zakira-replay analyze https://example.com/talk --llm-provider openai --model llama-3.3-70b-versatile
+
+# Self-hosted vLLM / llama.cpp server
+export OPENAI_API_KEY=anything
+export OPENAI_BASE_URL=http://localhost:8000/v1
+zakira-replay analyze https://example.com/talk --llm-provider openai --model your-model-id
+```
+
+The `openai` provider routes everything through `Microsoft.Extensions.AI.OpenAI`'s `IChatClient`; the official OpenAI SDK respects `OpenAIClientOptions.Endpoint` exactly like it would for `api.openai.com`.
+
+### Local OCR Language Packs
+
+The local OCR provider (`--ocr-provider local`, the default) ships with the **latin** pack out of the box. RapidOCR PP-OCRv5 also publishes recognition models + dictionaries for nine other scripts; switch packs to extract non-Latin text from frames:
+
+```bash
+# Install a different pack (detection + classification are shared across packs — they download once):
+zakira-replay deps install ocr --language chinese
+zakira-replay deps install ocr --language korean
+zakira-replay deps install ocr --language arabic
+
+# Select which pack analysis runs use:
+zakira-replay config set ocr.local.languagePack chinese
+# Or per-process: ZAKIRA_REPLAY_OCR_LANGUAGE_PACK=chinese
+```
+
+Supported packs (all PP-OCRv5):
+
+| Pack | Aliases | Covers |
+|---|---|---|
+| `latin` (default) | `en`, `european`, `western`, `eu` | Latin script with diacritics — French, German, Spanish, Italian, Portuguese, Polish, Vietnamese, Indonesian, etc. |
+| `chinese` | `zh`, `cn`, `ch`, `simplified-chinese`, `simp`, `han` | Simplified Chinese (Han) |
+| `english` | `en-only` | English with denser dictionary than Latin |
+| `korean` | `ko`, `kr`, `hangul` | Korean (Hangul) |
+| `cyrillic` | `ru`, `russian`, `ukrainian`, `uk`, `be`, `bg`, `sr` | Cyrillic script (Russian, Ukrainian, Belarusian, Bulgarian, Serbian) |
+| `arabic` | `ar`, `fa`, `ur`, `persian`, `farsi`, `urdu` | Arabic script (Arabic, Persian, Urdu) |
+| `devanagari` | `hi`, `hindi`, `mr`, `marathi`, `ne`, `nepali`, `sa`, `sanskrit` | Devanagari script |
+| `greek` | `el`, `gr`, `ell` | Greek |
+| `telugu` | `te`, `telegu` | Telugu (South Indian) |
+| `tamil` | `ta`, `tamizh`, `tha` | Tamil (South Indian) |
+
+Multiple packs can live side-by-side under the OCR model directory (`portable/models/rapidocr-ppocrv5-latin/` by default); switching packs is a config change, not a re-download. The detection model and classification model are shared across all packs — installing a second pack only downloads its recognition `.onnx` (~12 MB) and dictionary `.txt`.
+
+Notes:
+- **Japanese, Thai, Traditional Chinese, Georgian, Kannada** are not yet in the PP-OCRv5 release. They exist for PP-OCRv4; if you need them, set the appropriate `ocr.local.recognitionModelPath` and `ocr.local.dictionaryPath` directly and point at a downloaded v4 model — Zakira.Replay will use whatever files you point it at, regardless of pack.
+- Each pack ships ~12 MB.
+- `zakira-replay doctor` reports the configured pack under the `ocr-models` row.
+
+### Local Speaker Diarization (`--diarize`)
+
+`--diarize` runs local [sherpa-onnx](https://github.com/k2-fsa/sherpa-onnx) speaker diarization over the audio that captions / STT already produced. The pipeline uses [pyannote-segmentation-3.0](https://huggingface.co/csukuangfj/sherpa-onnx-pyannote-segmentation-3-0) for speech / speaker-change detection and a 3D-Speaker (ERes2NetV2) embedding extractor + agglomerative clustering to label each transcript segment with a `SPEAKER_NN` cluster. Everything runs on the local machine via ONNX Runtime — no network at run-time after the models are installed.
+
+`--diarize` requires a transcript: it labels existing transcript segments, it does not transcribe. Combine with `--stt` (or rely on captions) to get speech first, then diarize on top.
+
+Setup (one-time, opt-in — ~32 MB of models):
+
+```bash
+zakira-replay deps install diarization
+```
+
+Use:
+
+```bash
+# Auto-detect the number of speakers (threshold-based clustering, default 0.5):
+zakira-replay analyze https://example.com/talk --stt --diarize
+
+# When you know how many speakers are present, pass --num-speakers to skip the threshold:
+zakira-replay analyze meeting.mp4 --stt --diarize --num-speakers 4
+
+# Tune the clustering cutoff (lower = more speakers):
+zakira-replay analyze podcast.mp4 --stt --diarize --diarize-threshold 0.35
+```
+
+After diarization, `transcript.md` is rewritten in place with `[SPEAKER_NN]` prefixes between the timestamp and the text. `TranscriptParser` picks the labels back up automatically on the next normalise pass, so the `speakers[]` registry in `evidence.json` plus the per-slide and per-chapter speaker rollups in `evidence-aligned/by-slide.json` and `by-chapter.json` are all populated without any schema changes.
+
+Configuration keys:
+
+| Key | Default | Purpose |
+|---|---|---|
+| `diarization.provider` | `sherpa-onnx` | Provider identifier; reserved for future plug-ins (pyannoteAI cloud, NeMo, etc.) |
+| `diarization.modelDirectory` | portable `models/diarization/` | Where `deps install` places models and where the resolver looks for them |
+| `diarization.segmentationModelPath` | derived | Explicit ONNX path; overrides the model directory |
+| `diarization.embeddingModelPath` | derived | Explicit ONNX path; overrides the model directory |
+| `diarization.numSpeakers` | `null` | Hard cluster count; when null, falls back to `threshold` |
+| `diarization.threshold` | `0.5` | Agglomerative-clustering cosine cutoff; lower → more speakers |
+| `diarization.minDurationOnSeconds` | `0.3` | Minimum speech segment duration emitted by pyannote-segmentation |
+| `diarization.minDurationOffSeconds` | `0.5` | Minimum silence gap between speech segments |
+| `diarization.threads` | `1` | Native thread count for sherpa-onnx inference |
+| `diarization.autoDownload` | `true` | First-run convenience; set false to require explicit `deps install diarization` |
+
+Environment variables: `ZAKIRA_REPLAY_DIARIZATION_PROVIDER`, `ZAKIRA_REPLAY_DIARIZATION_MODEL_DIRECTORY`, `ZAKIRA_REPLAY_DIARIZATION_SEGMENTATION_MODEL_PATH`, `ZAKIRA_REPLAY_DIARIZATION_EMBEDDING_MODEL_PATH`, `ZAKIRA_REPLAY_DIARIZATION_NUM_SPEAKERS`, `ZAKIRA_REPLAY_DIARIZATION_THRESHOLD`, `ZAKIRA_REPLAY_DIARIZATION_MIN_DURATION_ON`, `ZAKIRA_REPLAY_DIARIZATION_MIN_DURATION_OFF`, `ZAKIRA_REPLAY_DIARIZATION_THREADS`, `ZAKIRA_REPLAY_DIARIZATION_AUTODOWNLOAD`.
+
+`zakira-replay doctor` reports the resolved diarization model paths and clustering configuration under the synthetic `diarization-models` dependency.
+
+Warning codes specific to diarization: `DIARIZATION_NO_AUDIO` (no audio extracted — diarization needs the WAV the STT step uses), `DIARIZATION_NO_TRANSCRIPT` (no transcript to label), `DIARIZATION_MODELS_MISSING` (run `deps install diarization`), `DIARIZATION_INIT_FAILED` (native sherpa-onnx initialisation failed), `DIARIZATION_FAILED` (inference failed mid-run), `DIARIZATION_UNKNOWN_PROVIDER` (only `sherpa-onnx` is wired in this release). VTT `<v Speaker>` tags and SRT `Speaker:` prefixes that already labelled segments are preserved — diarization never overwrites explicit speaker attribution from captions.
 
 Secrets themselves should stay out of JSON config. The config can store secret environment variable names instead, so agents or humans can choose which variables Zakira.Replay reads without embedding keys on disk. For example, `llm.openai.apiKeyEnvVars=OPENAI_API_KEY,WORK_OPENAI_API_KEY` tells Zakira.Replay to try those variable names for the OpenAI API key. Built-in defaults are still appended, so standard names keep working.
 
@@ -636,7 +915,7 @@ Each analyzed video run writes a folder under `runs/` containing:
 
 - `request.json`: original source, instruction, transcript flag, frame count, and optional run ID.
 - `metadata.json`: source metadata resolved from the URL or local file, including `availableSubtitleLanguages` when the source advertises any.
-- `manifest.json`: stable index of produced artifacts and structured warnings.
+- `manifest.json`: stable index of produced artifacts, structured warnings, and per-stage wall-clock timings under `timings.totalSeconds` + `timings.stages.{probe,captions,audio,stt,diarization,frames,slides,ocr,vision,evidence,...}`.
 - `evidence.json`: structured evidence for downstream agents/orchestrators, including per-slide grouping, per-speaker registry, and structured warnings.
 - `transcript.md`: normalized timestamped transcript when captions or sidecar subtitles are available; `[Speaker Name]` prefixes are inserted when the source carries speaker tags.
 - `transcript/raw.md` and `transcript/raw.json`: raw parsed transcript before normalization.
@@ -674,6 +953,47 @@ JSON schemas for stable machine-readable artifacts are in `schemas/`:
 - `schemas/queue-run-result.schema.json`
 
 External orchestration can use these artifacts to build conference books, summaries, search indexes, vector stores, QA systems, clip workflows, or custom reports.
+
+## Run Timings
+
+Every run writes wall-clock timings to `manifest.timings`:
+
+```json
+{
+  "timings": {
+    "totalSeconds": 47.832,
+    "stages": {
+      "probe": 0.412,
+      "captions": 0.821,
+      "stt": 12.155,
+      "diarization": 5.673,
+      "frames": 8.214,
+      "slides": 0.087,
+      "ocr": 6.502,
+      "vision": 13.819,
+      "evidence": 0.089
+    }
+  }
+}
+```
+
+Stage names are open (orchestrators must tolerate new keys); the canonical set lives in
+`RunTimingStages` and is documented in `CHANGELOG.md`. Stages absent from the map did not run.
+Values are wall-clock seconds rounded to milliseconds. Use these to flag slow stages, build a
+"taking longer than usual" alert, or compare end-to-end runtimes across configurations (CPU
+vs GPU Whisper, local-whisper vs cloud STT, etc.).
+
+## Pre-flight: `info --json`
+
+```bash
+zakira-replay info --json
+```
+
+Returns a single JSON document covering the configured LLM provider, default model, every
+schema name, plus the new `resolvedDependencies` (portable directory, OCR pack, Whisper /
+Ollama / diarization paths) and `capabilities` (booleans: `localOcrReady`, `localWhisperReady`,
+`diarizationReady`, `ytDlpAvailable`, `ffmpegAvailable`). Orchestrators can call this once at
+startup to know which optional features are wired up before issuing analysis requests.
 
 ## Development
 

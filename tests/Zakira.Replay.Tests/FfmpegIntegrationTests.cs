@@ -173,6 +173,100 @@ public sealed class FfmpegIntegrationTests
         Assert.Equal(["frame-001", "frame-002", "frame-003"], frames.Select(frame => frame.Id).ToArray());
     }
 
+    [SkippableFact]
+    public async Task FfmpegClientExtractsFramesAtSuppliedTimestamps()
+    {
+        using var temp = new TestTempDirectory();
+        var dependencies = new DependencyResolver();
+        var ffmpegStatus = dependencies.GetFfmpegStatus();
+        Skip.If(!ffmpegStatus.IsFound || string.IsNullOrWhiteSpace(ffmpegStatus.Path), "ffmpeg is not configured.");
+
+        var runner = new ProcessRunner();
+        await SkipIfNotRunnableAsync(runner, ffmpegStatus.Path!, "ffmpeg is not runnable.");
+
+        var fixturePath = temp.GetPath("fixture.mp4");
+        var createFixture = await runner.RunAsync(
+            ffmpegStatus.Path!,
+            [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-f", "lavfi",
+                "-i", "testsrc=size=320x240:rate=10:duration=5",
+                "-pix_fmt", "yuv420p",
+                "-y",
+                fixturePath
+            ],
+            timeout: TimeSpan.FromSeconds(30),
+            cancellationToken: CancellationToken.None);
+        Skip.If(createFixture.ExitCode != 0 || !File.Exists(fixturePath), "ffmpeg could not generate the test fixture.");
+
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var run = store.CreateRun(fixturePath, "ffmpeg-at-fixture");
+        var client = new FfmpegClient(dependencies, runner);
+
+        var requested = new[] { TimeSpan.FromSeconds(0.5), TimeSpan.FromSeconds(2.0), TimeSpan.FromSeconds(4.25) };
+        var frames = await client.ExtractFramesAtAsync(fixturePath, run, requested, new FrameCaptureOptions(MaxLongEdgePixels: 160, JpegQuality: 80), CancellationToken.None);
+
+        Assert.Equal(3, frames.Count);
+        Assert.Equal(["frame-001", "frame-002", "frame-003"], frames.Select(f => f.Id).ToArray());
+        Assert.All(frames, frame => Assert.True(File.Exists(run.GetPath(frame.Path))));
+        // Each requested timestamp should round-trip without modification (within ms).
+        var actualSeconds = frames.Select(f => f.TimestampSeconds).ToArray();
+        for (var i = 0; i < requested.Length; i++)
+        {
+            Assert.InRange(actualSeconds[i], requested[i].TotalSeconds - 0.01, requested[i].TotalSeconds + 0.01);
+        }
+    }
+
+    [SkippableFact]
+    public async Task FfmpegClientExtractsSceneFramesInRangeReturnsAbsoluteTimestamps()
+    {
+        using var temp = new TestTempDirectory();
+        var dependencies = new DependencyResolver();
+        var ffmpegStatus = dependencies.GetFfmpegStatus();
+        Skip.If(!ffmpegStatus.IsFound || string.IsNullOrWhiteSpace(ffmpegStatus.Path), "ffmpeg is not configured.");
+
+        var runner = new ProcessRunner();
+        await SkipIfNotRunnableAsync(runner, ffmpegStatus.Path!, "ffmpeg is not runnable.");
+
+        var fixturePath = temp.GetPath("fixture.mp4");
+        // Two distinct test patterns concatenated produce a sharp scene cut somewhere near the join.
+        var createFixture = await runner.RunAsync(
+            ffmpegStatus.Path!,
+            [
+                "-hide_banner",
+                "-loglevel", "error",
+                "-f", "lavfi",
+                "-i", "color=color=red:size=160x120:rate=5:duration=2",
+                "-f", "lavfi",
+                "-i", "color=color=blue:size=160x120:rate=5:duration=2",
+                "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]",
+                "-map", "[v]",
+                "-pix_fmt", "yuv420p",
+                "-y",
+                fixturePath
+            ],
+            timeout: TimeSpan.FromSeconds(30),
+            cancellationToken: CancellationToken.None);
+        Skip.If(createFixture.ExitCode != 0 || !File.Exists(fixturePath), "ffmpeg could not generate the test fixture.");
+
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var run = store.CreateRun(fixturePath, "ffmpeg-range-scene-fixture");
+        var client = new FfmpegClient(dependencies, runner);
+
+        var frames = await client.ExtractSceneFramesInRangeAsync(
+            fixturePath,
+            run,
+            TimeSpan.FromSeconds(1),
+            TimeSpan.FromSeconds(3),
+            sceneSafetyCap: 10,
+            new FrameCaptureOptions(),
+            CancellationToken.None);
+
+        Assert.All(frames, frame => Assert.InRange(frame.TimestampSeconds, 1.0 - 0.1, 3.0 + 0.1));
+        Assert.All(frames, frame => Assert.True(File.Exists(run.GetPath(frame.Path))));
+    }
+
     private static async Task SkipIfNotRunnableAsync(ProcessRunner runner, string executablePath, string reason)
     {
         try

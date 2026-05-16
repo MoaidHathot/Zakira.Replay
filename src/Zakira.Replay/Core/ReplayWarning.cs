@@ -63,6 +63,18 @@ public static class ReplayWarningCodes
 
     public const string VisionParseFallback = "VISION_PARSE_FALLBACK";
 
+    public const string VisionLocalModelsMissing = "VISION_LOCAL_MODELS_MISSING";
+
+    public const string VisionLocalInitFailed = "VISION_LOCAL_INIT_FAILED";
+
+    public const string VisionLocalInferenceFailed = "VISION_LOCAL_INFERENCE_FAILED";
+
+    public const string VisionUnknownProvider = "VISION_UNKNOWN_PROVIDER";
+
+    public const string VisionLocalOcrRequired = "VISION_LOCAL_OCR_REQUIRED";
+
+    public const string VisionLocalModeDegraded = "VISION_LOCAL_MODE_DEGRADED";
+
     public const string PerceptualHashFailed = "PERCEPTUAL_HASH_FAILED";
 
     public const string CropImageDecodeFailed = "CROP_IMAGE_DECODE_FAILED";
@@ -100,6 +112,30 @@ public static class ReplayWarningCodes
     public const string AuthProfileLoadFailed = "AUTH_PROFILE_LOAD_FAILED";
 
     public const string ClipMediaUrlUnresolved = "CLIP_MEDIA_URL_UNRESOLVED";
+
+    public const string FrameCaptureMediaUrlUnresolved = "FRAME_CAPTURE_MEDIA_URL_UNRESOLVED";
+
+    public const string FrameCaptureTimestampOutOfRange = "FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE";
+
+    public const string FrameCaptureRangeOutOfBounds = "FRAME_CAPTURE_RANGE_OUT_OF_BOUNDS";
+
+    public const string FrameCaptureTooManyTimestamps = "FRAME_CAPTURE_TOO_MANY_TIMESTAMPS";
+
+    public const string FrameCaptureNoFrames = "FRAME_CAPTURE_NO_FRAMES";
+
+    public const string FrameCaptureSceneCapReached = "FRAME_CAPTURE_SCENE_CAP_REACHED";
+
+    public const string DiarizationNoAudio = "DIARIZATION_NO_AUDIO";
+
+    public const string DiarizationNoTranscript = "DIARIZATION_NO_TRANSCRIPT";
+
+    public const string DiarizationModelsMissing = "DIARIZATION_MODELS_MISSING";
+
+    public const string DiarizationInitFailed = "DIARIZATION_INIT_FAILED";
+
+    public const string DiarizationFailed = "DIARIZATION_FAILED";
+
+    public const string DiarizationUnknownProvider = "DIARIZATION_UNKNOWN_PROVIDER";
 }
 
 /// <summary>

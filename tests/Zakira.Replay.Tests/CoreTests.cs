@@ -933,6 +933,12 @@ public sealed class CoreTests
         public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken)
             => Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
 
+        public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(string mediaSource, VideoRun run, IReadOnlyList<TimeSpan> timestamps, FrameCaptureOptions options, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+
+        public Task<IReadOnlyList<FrameArtifact>> ExtractSceneFramesInRangeAsync(string mediaSource, VideoRun run, TimeSpan rangeStart, TimeSpan rangeEnd, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+            => Task.FromResult<IReadOnlyList<FrameArtifact>>([]);
+
         public Task<string> ExtractAudioAsync(string mediaSource, VideoRun run, CancellationToken cancellationToken) => Task.FromResult("audio/audio.wav");
 
         public Task<string> ExtractClipAsync(string mediaSource, VideoRun run, TimeSpan start, TimeSpan end, string? outputName, CancellationToken cancellationToken) => Task.FromResult("clips/clip.mp4");
@@ -951,6 +957,11 @@ public sealed class CoreTests
             Directory.CreateDirectory(System.IO.Path.GetDirectoryName(outputPath)!);
             File.WriteAllText(outputPath, $"chunk start={start.TotalSeconds:F3} duration={duration.TotalSeconds:F3}");
             return Task.CompletedTask;
+        }
+
+        public Task<byte[]?> PreprocessImageRgb24Async(string imagePath, int width, int height, CancellationToken cancellationToken)
+        {
+            return Task.FromResult<byte[]?>(null);
         }
 
         public Task<string?> ComputePerceptualHashAsync(string imagePath, CancellationToken cancellationToken)
@@ -1292,7 +1303,10 @@ public sealed class CoreTests
         var llm = new CapturingLlmProvider();
         var provider = new CopilotVisionProvider(llm, "test-model");
 
-        await provider.DescribeAsync("frame.jpg", string.Empty, CancellationToken.None);
+        await provider.DescribeAsync(new VisionRequest(
+            ImagePath: "frame.jpg",
+            Instruction: string.Empty,
+            Frame: new FrameArtifact("frame-001", "frames/frame.jpg", 0, "00:00")), CancellationToken.None);
 
         var prompt = Assert.Single(llm.Captured).Prompt;
         Assert.DoesNotContain("Additional focus from the orchestrator", prompt, StringComparison.Ordinal);
@@ -1305,7 +1319,10 @@ public sealed class CoreTests
         var llm = new CapturingLlmProvider();
         var provider = new CopilotVisionProvider(llm, "test-model");
 
-        await provider.DescribeAsync("frame.jpg", "Focus on slide titles and code blocks.", CancellationToken.None);
+        await provider.DescribeAsync(new VisionRequest(
+            ImagePath: "frame.jpg",
+            Instruction: "Focus on slide titles and code blocks.",
+            Frame: new FrameArtifact("frame-001", "frames/frame.jpg", 0, "00:00")), CancellationToken.None);
 
         var prompt = Assert.Single(llm.Captured).Prompt;
         Assert.Contains("Additional focus from the orchestrator: Focus on slide titles and code blocks.", prompt, StringComparison.Ordinal);

@@ -160,6 +160,10 @@
             { "type": "null" },
             { "$ref": "#/$defs/visionStructured" }
           ]
+        },
+        "provider": {
+          "description": "Vision provider that produced this result. `copilot` (LLM-backed) or `local` (LocalOnnxVisionProvider). Older runs may omit the field.",
+          "type": ["string", "null"]
         }
       }
     },

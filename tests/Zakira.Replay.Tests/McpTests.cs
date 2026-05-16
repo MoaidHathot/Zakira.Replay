@@ -29,6 +29,32 @@ public sealed class McpTests
         Assert.Contains("run_analysis_queue", names);
         Assert.Contains("get_analysis_queue_status", names);
         Assert.Contains("build_chapters", names);
+        Assert.Contains("extract_frames", names);
+    }
+
+    [Fact]
+    public async Task ExtractFramesToolDeclaresMutuallyExclusiveInputs()
+    {
+        using var stdout = new StringWriter();
+        using var stderr = new StringWriter();
+        var server = new McpServer(() => throw new InvalidOperationException("Pipeline should not be created for tools/list."), stdout, stderr);
+
+        await server.RunAsync(new StringReader("{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}" + Environment.NewLine), CancellationToken.None);
+
+        using var document = JsonDocument.Parse(stdout.ToString());
+        var extractFrames = document.RootElement.GetProperty("result").GetProperty("tools")
+            .EnumerateArray()
+            .Single(tool => tool.GetProperty("name").GetString() == "extract_frames");
+
+        var properties = extractFrames.GetProperty("inputSchema").GetProperty("properties");
+        Assert.True(properties.TryGetProperty("at", out _));
+        Assert.True(properties.TryGetProperty("from", out _));
+        Assert.True(properties.TryGetProperty("to", out _));
+        Assert.True(properties.TryGetProperty("count", out _));
+        Assert.True(properties.TryGetProperty("strategy", out _));
+        Assert.True(properties.TryGetProperty("maxLongEdgePixels", out _));
+        Assert.True(properties.TryGetProperty("jpegQuality", out _));
+        Assert.True(properties.TryGetProperty("computePerceptualHash", out _));
     }
 
     [Fact]

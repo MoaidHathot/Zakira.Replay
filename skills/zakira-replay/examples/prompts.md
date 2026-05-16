@@ -225,3 +225,91 @@ Agent behavior:
 ## When LLM-Backed OCR Hangs
 
 If an `ocr: true` run with the default `ocrProvider: "copilot"` repeatedly times out (the GitHub Copilot stdio session can stall as an SWE agent loop on image attachments), recommend the user retry with `ocrProvider: "local"`. The RapidOCR path has no LLM session, no agent loop, and no per-frame timeout risk.
+
+## Fully Offline Analysis (No LLM Anywhere)
+
+User prompt:
+
+```text
+Analyze this internal training video without contacting any cloud service or LLM.
+```
+
+Agent behavior:
+
+- Combine four "local" surfaces: STT via `local-whisper`, OCR via `local`, vision via the new `local` provider, and (optionally) speaker diarization via local sherpa-onnx.
+- `--ocr-provider local` is already the default. Add `--vision-provider local` to keep vision off the LLM as well.
+- The local vision provider auto-enables OCR when omitted; emits `VISION_LOCAL_OCR_REQUIRED` (info) so the orchestrator can see the implicit decision. Pass `--ocr` explicitly to silence.
+- `--local-vision-mode heuristic` (zero models) works out of the box. `clip` and `clip-blip` require user-supplied ONNX files configured via `vision.local.clip*Path` / `vision.local.blip*Path`. Source: `openai/clip-vit-base-patch32` ONNX export + `Salesforce/blip-image-captioning-base` ONNX export. Missing files cause graceful degradation (`clip-blip` → `clip` → `heuristic`) with `VISION_LOCAL_MODE_DEGRADED` warnings.
+
+```json
+{
+  "name": "create_analysis_job",
+  "arguments": {
+    "source": "C:/corp/training/onboarding.mp4",
+    "visionInstruction": "Extract slide content from this internal training video.",
+    "frames": 12,
+    "frameStrategy": "scene",
+    "stt": true,
+    "llmProvider": "local-whisper",
+    "ocr": true,
+    "ocrProvider": "local",
+    "vision": true,
+    "visionProvider": "local",
+    "localVisionMode": "heuristic",
+    "cache": true
+  }
+}
+```
+
+Tradeoffs to mention up front:
+
+- `charts[]` is always empty in local vision mode (no chart-aware model ships).
+- BLIP captions are noisier than a frontier vision LLM's; the `freeText` always includes the literal OCR text after the caption so the trustworthy part is preserved for citation.
+- Diagrams without labels and generic photographic frames classify as `other` with empty structured fields.
+- For tasks where the LLM path's free-form scene description matters (e.g. "describe what's happening visually"), suggest the user retry with `visionProvider: "copilot"` or `--llm-provider ollama` with a vision-capable local model.
+
+## Ad-hoc Frame Capture After A Full Analyze
+
+User prompt:
+
+```text
+Turn this cooking video into a recipe card with photos for each major step:
+https://example.com/recipe-video
+```
+
+Agent behavior:
+
+- Step 1: full `analyze_video` (or `create_analysis_job`) with `frames: 0` to get the transcript and chapter material cheaply, then `build_chapters` so each step in the recipe has a timestamp.
+- Step 2: read `transcript.md` + `chapters/chapters.json` and identify a meaningful timestamp for each step (e.g. "deglaze the pan" at 04:12, "add the cream" at 06:35).
+- Step 3: call `extract_frames` with the chosen timestamps. The full pipeline does not need to re-run; this captures stills only.
+
+```json
+{
+  "name": "extract_frames",
+  "arguments": {
+    "source": "https://example.com/recipe-video",
+    "at": ["02:45", "04:12", "06:35", "08:50", "11:20"],
+    "maxLongEdgePixels": 1024,
+    "jpegQuality": 85
+  }
+}
+```
+
+- Step 4: synthesize the recipe Markdown yourself, embedding the absolute frame paths returned by `extract_frames` (`path` field) as image references next to each step's transcript-derived prose.
+
+When you only know the rough window and want a few frames inside it — for example, "the speaker shows the final plate somewhere around 10:00-12:00" — use the range mode instead:
+
+```json
+{
+  "name": "extract_frames",
+  "arguments": {
+    "source": "https://example.com/recipe-video",
+    "from": "10:00",
+    "to": "12:00",
+    "count": 3,
+    "strategy": "scene"
+  }
+}
+```
+
+The scene strategy returns ffmpeg's scene-cut frames inside the window; the interval strategy returns evenly spaced timestamps. Neither runs slide grouping / OCR / vision, so the call is fast and repeatable.

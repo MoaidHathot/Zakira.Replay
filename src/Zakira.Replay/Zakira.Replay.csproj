@@ -14,7 +14,7 @@
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>zakira-replay</ToolCommandName>
     <PackageId>Zakira.Replay</PackageId>
-    <Version>0.3.0</Version>
+    <Version>0.7.0</Version>
     <Authors>Moaid Hathot</Authors>
     <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
     <Description>Turn video sources into replayable, timestamped evidence for LLM agents. Part of the Zakira agent-cognition family (Imprint, Recall, Exchange, Replay).</Description>
@@ -22,7 +22,7 @@
     <PackageLicenseExpression>MIT</PackageLicenseExpression>
     <PackageProjectUrl>https://github.com/MoaidHathot/Zakira.Replay</PackageProjectUrl>
     <PackageTags>video llm agent mcp transcription evidence ffmpeg yt-dlp cli dotnet-tool zakira</PackageTags>
-    <PackageReleaseNotes>0.3.0 adds the `local-whisper` STT provider — fully-local, opt-in speech-to-text via Whisper.net (whisper.cpp bindings). Select with `--llm-provider local-whisper`; install models with `zakira-replay deps install whisper-model [tiny|base|small|medium|large-v3|large-v3-turbo]` (default `small`). Closes the only mandatory-cloud step in the pipeline: caption-less sources can now be transcribed without leaving the machine. New env vars: ZAKIRA_REPLAY_WHISPER_MODEL_PATH, ZAKIRA_REPLAY_WHISPER_LANGUAGE, ZAKIRA_REPLAY_WHISPER_MODEL_DIRECTORY, ZAKIRA_REPLAY_WHISPER_MODEL_SIZE. New config keys under `llm.localWhisper.*` and dependency target `whisper-model`. 0.2.0 baseline: CLI and MCP server entrypoints; multi-language captions; speaker attribution from VTT/SRT tags with per-speaker registry; silence-chunked STT for long audio; perceptual-hash slide grouping with first/last visible timestamps; structured OCR and vision JSON with comprehensive baselines and optional focus instructions (visionInstruction, ocrInstruction); duration-aware frame budgeting (framesPerMinute, sceneSafetyCap) with under-sampling warnings; cross-modal alignment views (by-chapter, by-slide); search, chapter, and clip artifacts; persistent queue worker; deps doctor. Zakira.Replay produces facts for external orchestrators; it does not synthesize summaries or insights.</PackageReleaseNotes>
+    <PackageReleaseNotes>0.7.0 — Production hardening. Every analysis run now emits per-stage wall-clock timings on `manifest.timings` (probe / captions / audio / stt / diarization / frames / slides / ocr / vision / evidence) for orchestrator branching. `info --json` extended with `resolvedDependencies` (portable directories, OCR pack, Whisper / Ollama / diarization paths) and `capabilities` (booleans for local-ocr, local-whisper, diarization, yt-dlp, ffmpeg readiness) so callers can pre-flight optional features without separately running `doctor`. New retroactive CHANGELOG.md covers 0.2.0 -> 0.7.0. CI now runs the test suite on Windows + Linux + macOS for every push and PR. Additive `manifest.timings` schema; `schemaVersion` stays at 0.8; no breaking changes. See CHANGELOG.md for the full version history. 0.6.0 baseline: IChatClient migration for OpenAI/Azure + OCR language packs. 0.5.0: sherpa-onnx diarization. 0.4.0: Ollama + IChatClient. 0.3.0: local-whisper STT.</PackageReleaseNotes>
     <RepositoryUrl>https://github.com/MoaidHathot/Zakira.Replay</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
   </PropertyGroup>
@@ -38,11 +38,26 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
     <PackageReference Include="GitHub.Copilot.SDK" Version="0.3.0" />
     <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.5.2" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.2" />
     <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
     <PackageReference Include="Microsoft.Playwright" Version="1.59.0" />
     <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
+    <!--
+      OllamaSharp implements Microsoft.Extensions.AI.IChatClient natively, which makes it the
+      reference path for the IChatClient surface we expose internally; future providers
+      (Anthropic, Gemini, vLLM, llama-cpp-server, …) plug in via the same abstraction.
+    -->
+    <PackageReference Include="OllamaSharp" Version="5.4.25" />
+    <!--
+      sherpa-onnx provides local speaker diarization (pyannote segmentation + 3D-Speaker
+      embedding + clustering) for the diarize flag. The package pulls every RID-specific
+      runtime; the TrimUnusedRuntimes target below strips ones we don't target.
+    -->
+    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.1" />
     <PackageReference Include="RapidOcrNet" Version="1.0.2" />
     <!--
       Whisper.net brings the managed bindings for whisper.cpp; Whisper.net.Runtime ships the
@@ -62,6 +77,7 @@
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+    <None Include="..\..\CHANGELOG.md" Pack="true" PackagePath="\" />
     <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
     <None Include="..\..\docs\*.md" Pack="true" PackagePath="docs\" />
     <None Include="..\..\schemas\*.schema.json" Pack="true" PackagePath="schemas\" />

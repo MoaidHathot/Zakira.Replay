@@ -2,9 +2,6 @@
 
   <PropertyGroup>
     <OutputType>Exe</OutputType>
-    <TargetFramework>net10.0</TargetFramework>
-    <ImplicitUsings>enable</ImplicitUsings>
-    <Nullable>enable</Nullable>
     <RootNamespace>Zakira.Replay</RootNamespace>
     <AssemblyName>Zakira.Replay</AssemblyName>
     <NoWarn>$(NoWarn);NU5111;NU5100;NU5118</NoWarn>
@@ -13,52 +10,36 @@
   <PropertyGroup>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>zakira-replay</ToolCommandName>
+    <RollForward>LatestMajor</RollForward>
     <PackageId>Zakira.Replay</PackageId>
-    <Version>0.7.0</Version>
-    <Authors>Moaid Hathot</Authors>
-    <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
     <Description>Turn video sources into replayable, timestamped evidence for LLM agents. Part of the Zakira agent-cognition family (Imprint, Recall, Exchange, Replay).</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <PackageLicenseExpression>MIT</PackageLicenseExpression>
-    <PackageProjectUrl>https://github.com/MoaidHathot/Zakira.Replay</PackageProjectUrl>
     <PackageTags>video llm agent mcp transcription evidence ffmpeg yt-dlp cli dotnet-tool zakira</PackageTags>
     <PackageReleaseNotes>0.7.0 — Production hardening. Every analysis run now emits per-stage wall-clock timings on `manifest.timings` (probe / captions / audio / stt / diarization / frames / slides / ocr / vision / evidence) for orchestrator branching. `info --json` extended with `resolvedDependencies` (portable directories, OCR pack, Whisper / Ollama / diarization paths) and `capabilities` (booleans for local-ocr, local-whisper, diarization, yt-dlp, ffmpeg readiness) so callers can pre-flight optional features without separately running `doctor`. New retroactive CHANGELOG.md covers 0.2.0 -> 0.7.0. CI now runs the test suite on Windows + Linux + macOS for every push and PR. Additive `manifest.timings` schema; `schemaVersion` stays at 0.8; no breaking changes. See CHANGELOG.md for the full version history. 0.6.0 baseline: IChatClient migration for OpenAI/Azure + OCR language packs. 0.5.0: sherpa-onnx diarization. 0.4.0: Ollama + IChatClient. 0.3.0: local-whisper STT.</PackageReleaseNotes>
-    <RepositoryUrl>https://github.com/MoaidHathot/Zakira.Replay</RepositoryUrl>
-    <RepositoryType>git</RepositoryType>
-  </PropertyGroup>
-
-  <PropertyGroup>
-    <PublishRepositoryUrl>true</PublishRepositoryUrl>
-    <EmbedUntrackedSources>true</EmbedUntrackedSources>
-    <IncludeSymbols>true</IncludeSymbols>
-    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
-    <DebugType>portable</DebugType>
-    <Deterministic>true</Deterministic>
-    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Azure.AI.OpenAI" Version="2.1.0" />
-    <PackageReference Include="GitHub.Copilot.SDK" Version="0.3.0" />
-    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.7" />
-    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" Version="10.5.2" />
-    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.2" />
-    <PackageReference Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
-    <PackageReference Include="Microsoft.Playwright" Version="1.59.0" />
-    <PackageReference Include="Nerdbank.MessagePack" Version="1.1.62" />
+    <PackageReference Include="Azure.AI.OpenAI" />
+    <PackageReference Include="GitHub.Copilot.SDK" />
+    <PackageReference Include="Microsoft.Data.Sqlite" />
+    <PackageReference Include="Microsoft.Extensions.AI.Abstractions" />
+    <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+    <PackageReference Include="Microsoft.ML.OnnxRuntime" />
+    <PackageReference Include="Microsoft.Playwright" />
+    <PackageReference Include="Nerdbank.MessagePack" />
     <!--
       OllamaSharp implements Microsoft.Extensions.AI.IChatClient natively, which makes it the
       reference path for the IChatClient surface we expose internally; future providers
       (Anthropic, Gemini, vLLM, llama-cpp-server, …) plug in via the same abstraction.
     -->
-    <PackageReference Include="OllamaSharp" Version="5.4.25" />
+    <PackageReference Include="OllamaSharp" />
     <!--
       sherpa-onnx provides local speaker diarization (pyannote segmentation + 3D-Speaker
       embedding + clustering) for the diarize flag. The package pulls every RID-specific
       runtime; the TrimUnusedRuntimes target below strips ones we don't target.
     -->
-    <PackageReference Include="org.k2fsa.sherpa.onnx" Version="1.13.1" />
-    <PackageReference Include="RapidOcrNet" Version="1.0.2" />
+    <PackageReference Include="org.k2fsa.sherpa.onnx" />
+    <PackageReference Include="RapidOcrNet" />
     <!--
       Whisper.net brings the managed bindings for whisper.cpp; Whisper.net.Runtime ships the
       native CPU binaries per RID. Both are required for the `local-whisper` STT provider; users
@@ -66,9 +47,9 @@
       For GPU acceleration, advanced users can swap Whisper.net.Runtime for one of the
       Whisper.net.Runtime.{Cuda,Cuda12,Vulkan,CoreML,OpenVino} packages in their own build.
     -->
-    <PackageReference Include="Whisper.net" Version="1.9.0" />
-    <PackageReference Include="Whisper.net.Runtime" Version="1.9.0" />
-    <PackageReference Include="Microsoft.SourceLink.GitHub" Version="10.0.203" PrivateAssets="all" />
+    <PackageReference Include="Whisper.net" />
+    <PackageReference Include="Whisper.net.Runtime" />
+    <PackageReference Include="Microsoft.SourceLink.GitHub" PrivateAssets="all" />
   </ItemGroup>
 
   <ItemGroup>
@@ -87,24 +68,61 @@
   </ItemGroup>
 
   <!--
-    Trim native runtime folders that a CLI / MCP server tool will never use.
-    Microsoft.ML.OnnxRuntime ships Android (.aar, ~43 MB) and iOS (xcframework.zip, ~51 MB),
-    and Microsoft.Data.Sqlite ships native libraries for many exotic RIDs. Removing these
-    from the publish output before pack drops the nupkg by ~100 MB without affecting
-    Windows / macOS / Linux desktop or container scenarios (including Alpine via musl).
+    Trim native runtime folders a desktop CLI / MCP server tool will never use.
+
+    Microsoft.ML.OnnxRuntime, sherpa-onnx, Whisper.net.Runtime, Microsoft.Data.Sqlite, and
+    SkiaSharp each ship a wide RID fanout. We ship the tool as a regular dotnet tool nupkg
+    (one payload for all OSes), so every RID we don't explicitly support is dead weight in
+    the package the user has to download.
+
+    Policy: keep mainstream desktop / server / container RIDs; drop mobile, browser, 32-bit,
+    and niche architectures. Roughly ~44 MB compressed savings on the nupkg.
+
+    Kept (do NOT add to this list):
+      linux-x64, linux-arm64, linux-musl-x64, linux-musl-arm64
+      osx-x64, osx-arm64, osx (SkiaSharp universal), macos-x64, macos-arm64 (Whisper.net)
+      win-x64, win-arm64
+
+    Dropped:
+      Mobile / non-desktop: android, android-arm64, ios, maccatalyst-*, browser-wasm
+      32-bit: linux-arm, linux-musl-arm, linux-x86, win-arm, win-x86
+      Niche / exotic CPU archs: linux-armel, linux-mips64, linux-ppc64le, linux-riscv64,
+        linux-s390x, linux-loongarch64, linux-musl-riscv64, linux-musl-s390x,
+        linux-musl-loongarch64
   -->
   <Target Name="TrimUnusedRuntimes" AfterTargets="Publish" BeforeTargets="GenerateNuspec;_GetPackageFiles">
     <ItemGroup>
+      <!-- Mobile / non-desktop. -->
       <_UnusedRid Include="android" />
+      <_UnusedRid Include="android-arm" />
+      <_UnusedRid Include="android-arm64" />
+      <_UnusedRid Include="android-x64" />
+      <_UnusedRid Include="android-x86" />
       <_UnusedRid Include="ios" />
+      <_UnusedRid Include="ios-arm64" />
+      <_UnusedRid Include="iossimulator-arm64" />
+      <_UnusedRid Include="iossimulator-x64" />
       <_UnusedRid Include="maccatalyst-x64" />
       <_UnusedRid Include="maccatalyst-arm64" />
+      <_UnusedRid Include="tvos-arm64" />
       <_UnusedRid Include="browser-wasm" />
+      <_UnusedRid Include="wasi-wasm" />
+
+      <!-- 32-bit (legacy). -->
+      <_UnusedRid Include="linux-arm" />
       <_UnusedRid Include="linux-armel" />
+      <_UnusedRid Include="linux-musl-arm" />
+      <_UnusedRid Include="linux-x86" />
+      <_UnusedRid Include="win-arm" />
+      <_UnusedRid Include="win-x86" />
+
+      <!-- Niche / exotic CPU archs. -->
+      <_UnusedRid Include="linux-loongarch64" />
       <_UnusedRid Include="linux-mips64" />
       <_UnusedRid Include="linux-ppc64le" />
       <_UnusedRid Include="linux-riscv64" />
       <_UnusedRid Include="linux-s390x" />
+      <_UnusedRid Include="linux-musl-loongarch64" />
       <_UnusedRid Include="linux-musl-riscv64" />
       <_UnusedRid Include="linux-musl-s390x" />
     </ItemGroup>

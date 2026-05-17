@@ -1,0 +1,8 @@
+<Project>
+
+  <!--
+    Repo-wide MSBuild target overrides. Empty placeholder for now; leaf csprojs own
+    project-specific targets (e.g., TrimUnusedRuntimes in src/Zakira.Replay).
+  -->
+
+</Project>

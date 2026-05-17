@@ -1,0 +1,45 @@
+<Project>
+
+  <!--
+    Repo-wide MSBuild defaults for Zakira.Replay.
+    Project-specific metadata (PackageId, Description, PackageReleaseNotes, PackAsTool,
+    ToolCommandName, RootNamespace, AssemblyName, OutputType) stays in each leaf csproj.
+  -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>false</EnforceCodeStyleInBuild>
+  </PropertyGroup>
+
+  <!-- Single source of truth for the package version. -->
+  <PropertyGroup>
+    <VersionPrefix>0.7.0</VersionPrefix>
+  </PropertyGroup>
+
+  <!-- Shared pack / repo metadata. Leaf csprojs add PackageId / Description / PackageReleaseNotes. -->
+  <PropertyGroup>
+    <Authors>Moaid Hathot</Authors>
+    <Company>Moaid Hathot</Company>
+    <Copyright>Copyright (c) 2026 Moaid Hathot</Copyright>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageProjectUrl>https://github.com/MoaidHathot/Zakira.Replay</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/MoaidHathot/Zakira.Replay</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <!-- SourceLink + deterministic build switches. Harmless for non-packable projects. -->
+  <PropertyGroup>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <EmbedUntrackedSources>true</EmbedUntrackedSources>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
+    <DebugType>portable</DebugType>
+    <Deterministic>true</Deterministic>
+    <ContinuousIntegrationBuild Condition="'$(GITHUB_ACTIONS)' == 'true'">true</ContinuousIntegrationBuild>
+  </PropertyGroup>
+
+</Project>

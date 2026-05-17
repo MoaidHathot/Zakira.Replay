@@ -458,197 +458,95 @@ Warning codes specific to browser caption capture:
 - `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED` — a single caption response failed to download (timeout, oversize body, transient Playwright error). Other captures continue.
 - `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED` — a captured caption file could not be parsed as VTT/SRT or parsed to zero segments. Pipeline continues with no transcript fill.
 
-## Ad-hoc Frame Capture
+### Browser-captured media for STT fallback
 
-`zakira-replay frames` and the MCP `extract_frames` tool are designed for the "I already watched this and just want a few specific stills" use case: an agent that ran `analyze` on a cooking video and now wants the frame at 02:34 to drop into a recipe card, or a CI step that needs three thumbnails inside a known QA reproduction window.
+When `--stt` is requested AND no inline captions were intercepted, browser capture additionally observes media-shaped responses (`video/*`, `audio/*`, HLS / DASH manifests) during playback. After the existing capture finishes, it picks the largest candidate URL and re-downloads it via the authenticated Playwright context (so SharePoint Stream's SAS-token cookies travel with the request). The downloaded file lands at `media/browser-fetched.<ext>` in the run dir; ffmpeg then extracts an audio track and Whisper STT runs as if the audio had come from yt-dlp.
 
-Both surfaces accept **either** an explicit list of timestamps **or** a window plus a small frame budget — never both. The capture path deliberately skips slide grouping, hashing, OCR, vision, and chapter synthesis so it is cheap to call repeatedly. Frames land in a new `runs/<id>/frames/` folder alongside a minimal `frame-capture.json` manifest (schema: `frame-capture.schema.json`, `kind: "frame-capture"`).
+This is a "fit-for-purpose" fallback, not a general media downloader:
+
+- **Works** for sites that hand back a single addressable media URL (typical SharePoint Stream pattern when the recording was uploaded as a single MP4).
+- **Does NOT work** for HLS / DASH chunked streams: audio is split across hundreds of small `.m4s` fragments with no single addressable URL. Manifest parsing + segment reassembly is out of scope for now.
+- **Does NOT work** for DRM-protected streams (rare for internal corporate recordings).
+
+The media-collection side-channel is **off by default** and only activates when:
+- `--stt` was requested (`request.UseSpeechToText == true`), AND
+- The transcript step found no captions/subtitles, AND
+- No audio was otherwise resolved (no yt-dlp media URL, no sidecar)
+
+When the fallback runs but no candidate URL is observed, a `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) tells the orchestrator STT was skipped because the player streamed in fragments. When a candidate is found but the authenticated re-download fails (HTTP error, oversize, timeout), `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) fires.
+
+Warning codes specific to browser media capture:
+
+- `CAPTURE_BROWSER_MEDIA_DOWNLOADED` (info) — media file downloaded successfully; STT will run against it.
+- `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) — no single-file media URL was observed (chunked stream); STT will be skipped.
+- `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) — authenticated re-download failed; STT will be skipped.
+
+### Diagnostic capture (`--capture-debug`)
+
+For reverse-engineering a vendor-specific player, pass `--capture-debug` to `analyze` (or `zakira-replay config set capture.browser.debug true` for a persistent default). During the existing browser-capture session, this writes a side-channel diagnostic dump under `runs/<run-id>/debug/`:
+
+```text
+runs/<run-id>/debug/
+\u251c\u2500\u2500 network.log                          # JSONL: one row per response
+\u251c\u2500\u2500 network.har                          # Playwright-recorded HAR (load into DevTools)
+\u251c\u2500\u2500 texttracks-state.json                # snapshot of <video>.textTracks post-activation
+\u2514\u2500\u2500 metadata-responses/
+    \u251c\u2500\u2500 0042-3a9b2f17.json               # full body of every JSON/XML/text response
+    \u251c\u2500\u2500 \u2026                                #  under `capture.browser.debugMaxBodyBytes` (default 1 MB)
+    \u2514\u2500\u2500 index.json                       # URL \u2192 body file map with SHA-256s
+```
+
+The recorder doesn't affect capture behaviour \u2014 strictly side-channel, dropped silently if any individual body fails to fetch. Binary bodies (video/audio/octet-stream) are logged but not persisted to disk to keep the dump compact. Configurable cap:
 
 ```bash
-# Exact timestamps (comma-separated; accepts seconds, MM:SS, HH:MM:SS)
-zakira-replay frames "./cooking.mp4" --at 02:34,03:10,04:55 --max-edge 1024 --quality 85
-
-# Window with N evenly spaced frames (endpoints inclusive)
-zakira-replay frames "https://example.com/video" --from 02:00 --to 03:00 --count 5
-
-# Window with ffmpeg scene-cut detection scoped to the window
-zakira-replay frames "./demo.mp4" --from 02:00 --to 03:00 --strategy scene --scene-safety-cap 20
-
-# JSON output (same shape returned by the extract_frames MCP tool)
-zakira-replay frames "./demo.mp4" --at 02:34 --json
+zakira-replay config set capture.browser.debug true
+zakira-replay config set capture.browser.debugMaxBodyBytes 5242880   # 5 MB per body
 ```
 
-MCP equivalent:
+Useful when adding support for a new player: you can capture once, then offline-inspect what URLs the player fetches, where caption data lives in the metadata responses, and what shape it takes (inline cues, external `.vtt` URLs at a non-standard path, TTML, JSON, etc.).
 
-```jsonc
-// tools/call payload
-{
-  "name": "extract_frames",
-  "arguments": {
-    "source": "./cooking.mp4",
-    "at": ["02:34", "03:10", "04:55"],   // or a single comma-separated string
-    "maxLongEdgePixels": 1024,
-    "jpegQuality": 85,
-    "computePerceptualHash": false
-  }
-}
-```
+## SharePoint Stream / Microsoft Stream transcripts
 
-Validation and clamping rules — applied in this order, with warnings written into the manifest:
+SharePoint Stream's player (StreamWebApp / OnePlayer) is more involved than a generic HTML5 video player and warrants a dedicated note. Three things are non-standard:
 
-- Up to **64 timestamps per request**; excess entries are dropped with `FRAME_CAPTURE_TOO_MANY_TIMESTAMPS`.
-- Negative timestamps and timestamps past the source duration are dropped with `FRAME_CAPTURE_TIMESTAMP_OUT_OF_RANGE`.
-- Range mode clamps `--to` to the source duration with `FRAME_CAPTURE_RANGE_OUT_OF_BOUNDS` and requires `--to > --from`.
-- `--strategy scene` runs ffmpeg's scene-cut filter scoped to the window via output-side `-ss`/`-to`; timestamps reported in the manifest are normalised back to the absolute source timeline. When the safety cap is hit a `FRAME_CAPTURE_SCENE_CAP_REACHED` warning is added.
-- When ffmpeg returns zero frames, the request still produces a manifest (with `FRAME_CAPTURE_NO_FRAMES`) so consumers always have a stable artifact to inspect.
+1. **Captions aren't stored in `textTracks`.** Setting `track.mode = "showing"` does nothing useful because the entries on `<video>.textTracks` are UI stubs whose `cues` arrays never populate — the actual captions live in Stream's React/SPA state.
+2. **Captions aren't fetched as `.vtt`/`.srt` URLs.** The standard network interceptor sees nothing matching that pattern even when transcripts exist.
+3. **Media is served as DASH-style fragmented MP4 with AES-128-CBC encryption.** Direct download of the audio is non-trivial; the existing `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` warning fires because no single-file media URL ever appears on the wire.
 
-When neither `--at` nor `--from`/`--to` is passed, `zakira-replay frames` falls back to the legacy "full analyze, frames-only" pipeline (`--count <n>` controls how many) for backward compatibility.
-
-## Watching Videos Without an LLM
-
-Zakira.Replay ships an LLM-free path end-to-end. Captions/sidecars handle transcripts when present; `--llm-provider local-whisper` fills in STT via on-device Whisper.net; `--ocr-provider local` (the default) runs RapidOCR via ONNX; `--diarize` runs sherpa-onnx for speaker diarization; chapters / search-index / evidence alignment are pure C# with no model calls. Only **vision** previously required an LLM.
-
-### `--vision-provider local`
-
-The local vision provider (`LocalOnnxVisionProvider`) produces the same `VisionFrameStructured` JSON shape as the LLM path - `kind`, `title`, `bullets[]`, `codeBlocks[]`, `charts[]`, `uiElements[]`, `freeText` - without ever calling an LLM. It piggybacks on the OCR result for the same frame to populate the structured fields and optionally adds a CLIP zero-shot classifier and a Florence-2 image captioner on top.
-
-```bash
-# Fully air-gapped: local STT, local OCR, local vision (heuristic mode is zero-model)
-zakira-replay analyze "<source>" --stt --llm-provider local-whisper \
-    --ocr --ocr-provider local \
-    --vision --vision-provider local --local-vision-mode heuristic --cache
-
-# Heuristic + CLIP zero-shot kind classification (~150 MB downloaded models)
-zakira-replay analyze "<source>" --vision --vision-provider local --local-vision-mode clip --ocr
-
-# Heuristic + CLIP + Florence-2 captioning (default for the local provider; ~410 MB total)
-zakira-replay analyze "<source>" --vision --vision-provider local --ocr
-```
-
-Three selectable sub-modes via `--local-vision-mode`:
-
-| Mode | Models needed | Footprint | What it fills |
-|---|---|---|---|
-| `heuristic` | none | 0 MB | Structure from OCR: title, bullets, code blocks, UI elements. `kind` by token-scoring rules. `charts[]` empty. `freeText` = concatenated OCR. |
-| `clip` | CLIP image-encoder ONNX + pre-computed kind embeddings | ~150 MB | Above plus CLIP zero-shot classification for `kind`. |
-| `clip-caption` (default) | above + Florence-2 vision_encoder + encoder + decoder + embed_tokens + BART BPE tokenizer | ~410 MB total | Above plus Florence-2-base-ft image captioning prefixed with `"Frame appears to show: ..."` filling `freeText` with a natural-language scene description (and the literal OCR text after the caption for cross-reference). |
-
-The deprecated string `clip-blip` is still accepted by `--local-vision-mode` and config files; it maps to `clip-caption` for back-compat with 0.7.x.
-
-OCR is auto-enabled when `--vision-provider local` is passed without `--ocr` (the structured fields need it). The pipeline records `VISION_LOCAL_OCR_REQUIRED` (info) so orchestrators can see the implicit decision.
-
-### Installing the local vision models
-
-```bash
-# Download CLIP ViT-B/32 ONNX + tokenizer (~150 MB) and Florence-2-base-ft ONNX (~260 MB)
-zakira-replay deps install vision --mode clip-caption
-
-# (Required after `deps install vision`, for clip / clip-caption modes:)
-# Run the 7 CLIP kind prompts through the text encoder once; writes clip-kind-embeddings.bin (14336 bytes)
-zakira-replay vision generate-clip-embeddings
-
-# Confirm doctor reports vision-models: found
-zakira-replay doctor
-```
-
-For `clip` mode only (no Florence-2 captioner), use `--mode clip` instead — saves ~260 MB.
-
-The files land under `<portable-dir>/models/vision/` (defaults to `%LOCALAPPDATA%\Zakira.Replay\portable\models\vision` on Windows, `~/.local/share/Zakira.Replay/portable/models/vision` on Linux). Override per-file paths with `vision.local.clip*Path` and `vision.local.florence*Path` config keys when you want to point at a custom export.
-
-Quantization is configurable via `vision.local.florenceQuantization` (or env var `ZAKIRA_REPLAY_VISION_FLORENCE_QUANTIZATION`). Default is `quantized` (int8); other supported values: `fp16`, `q4`, `q4f16`, `bnb4`, `int8`, `uint8`, `full`. Higher quality = larger download.
-
-Hugging Face downloads track the `main` branch of `Xenova/clip-vit-base-patch32` and `onnx-community/Florence-2-base-ft`. If upstream changes the export, downloads keep succeeding but inference might fail — the provider then surfaces `VISION_LOCAL_INIT_FAILED` with the exception so the orchestrator can branch.
-
-### Honest limitations
-
-- **`charts[]` is always empty in local mode.** Detecting charts reliably needs a chart-aware model we do not ship; OCR-derived heuristics can't infer axes/series from text alone without false positives.
-- **Florence-2-base captions are smaller-model captions.** They're useful and grammatical but less detailed than a frontier vision LLM. The provider always appends the literal OCR text (`"Visible text: ..."`) after the model-derived description so the trustworthy part is preserved.
-- **Diagrams without labels and free-form scenes** sometimes generate generic captions ("In this image we can see a person...") that don't carry the specific information OCR would have caught. The OCR text in `freeText` covers this.
-- **No language model in the structured-output loop.** This is the point. For tasks where the LLM path's free-form scene description matters (e.g. "describe what's happening visually"), prefer `--vision-provider copilot` or use `--llm-provider ollama` with a vision-capable local model.
-- **KV-cache decoding is on but the speedup is modest.** Florence-2's `decoder_model_merged.onnx` is invoked with `use_cache_branch=true` after step 0, encoder cross-attention K/V are captured once and reused, decoder self-attention K/V are threaded forward each step. A 3-frame microbenchmark on the int8 quantized models shows ~12% wall-clock improvement (2.76 → 2.42 s/frame) because the decoder loop is only ~12% of total per-frame time. The vision encoder and image preprocessing subprocess dominate, neither of which KV-cache affects. Cached and uncached paths can produce slightly different captions on the same input (different word choices, same described scene) because int8 op fusion differs between the two branches of the merged graph and greedy decoding amplifies tiny logit differences.
-
-Warning codes specific to the local vision path:
-
-- `VISION_LOCAL_MODELS_MISSING` (warning) - one or more files the configured mode needs are absent. Lists the missing paths.
-- `VISION_LOCAL_INIT_FAILED` (error) - the provider could not initialise at all (bad ONNX, corrupt vocab, etc.).
-- `VISION_LOCAL_INFERENCE_FAILED` (warning, per-frame) - ONNX threw at runtime; frame skipped, run continues.
-- `VISION_LOCAL_MODE_DEGRADED` (warning) - actual mode was lower than requested (e.g. clip-caption → clip because Florence files missing).
-- `VISION_LOCAL_OCR_REQUIRED` (info) - OCR was auto-enabled because `--vision-provider local` needs per-frame OCR. Pass `--ocr` explicitly to silence.
-- `VISION_UNKNOWN_PROVIDER` (error) - the `--vision-provider` value was not recognised; no vision ran.
-
-## Auth Profiles (SSO-Gated Sources)
-
-Browser-based capture (`--capture-mode browser` or `--capture-mode auto` with a yt-dlp fallback) defaults to a fresh, anonymous browser context — fine for public sources but useless for SharePoint Stream, Microsoft Stream, internal corporate portals, or anything else gated behind SSO/cookies. Auth profiles are persisted Playwright `BrowserContext.StorageStateAsync` snapshots that the capture client loads before navigating.
-
-### Creating a profile
-
-```bash
-zakira-replay auth login ignite-2026 --url https://medius.studios.ms/
-```
-
-This launches Edge in **non-headless** mode (you can see the window), optionally navigates to a starting URL, and waits. Sign in normally; when the page shows you are signed in, return to the terminal and press Enter. Zakira.Replay calls `BrowserContext.StorageStateAsync` to persist cookies + localStorage + sessionStorage to:
+Zakira works around all three by recognising the Stream player's transcripts-metadata API call:
 
 ```
-<config-dir>/auth/ignite-2026.json
+GET /personal/{upn}/_api/v2.X/drives/{drive-id}/items/{item-id}?select=media/transcripts,audioTracks&$expand=media/transcripts,media/audioTracks
 ```
 
-The profile name is slugified before it touches the filesystem, so `"Microsoft Ignite 2026"` and `"microsoft ignite 2026"` both map to `microsoft-ignite-2026.json`.
+The JSON response lists every transcript attached to the recording with a `temporaryDownloadUrl` per transcript. Zakira follows each URL via the authenticated Playwright context (Edge profile cookies), and tries multiple URL variants in priority order to coax out the richest format:
 
-If a profile by that slug already exists, it is loaded into the new context first (top-up login) so existing cookies for unrelated sites are preserved.
+1. `?isformatjson=true&transcriptkey=<id>` — the exact query the Stream player itself uses. Returns the **full Microsoft Teams transcript JSON** (`$schema:transcript.json`) with `speakerDisplayName`, `speakerId`, `confidence`, `roomId`, and ISO 8601 `startOffset`/`endOffset` per entry. This is the one with speakers.
+2. `?$format=json` — OData content-negotiation hint.
+3. `?format=json` — non-OData fallback.
+4. Plain URL — last resort, returns a stripped public WebVTT (no speakers).
 
-### Using a profile
+When the rich JSON is obtained, Zakira converts to standard WebVTT with proper `<v Speaker>` voice spans, preserving speaker attribution through to `SubtitleConverter`. Output:
 
-```bash
-zakira-replay analyze "https://medius.studios.ms/Embed/video-12345" --capture-mode browser --auth-profile ignite-2026 --frames 10 --ocr --ocr-provider local --cache
+```
+[00:00:06.372 - 00:00:09.572] [Liad Shiran] Hello, good morning, everyone.
+[00:00:11.112 - 00:00:17.912] [Boris Forzun] Let's get started.
 ```
 
-The pipeline resolves `--auth-profile <name>` to a path via the `AuthProfileStore`, passes it as `BrowserNewContextOptions.StorageStatePath`, and the page loads with the cookies you saved during `auth login`. Browser-discovered captions, smart-crop, OCR, and everything else downstream work normally.
+If the player happens not to make the transcripts-metadata API call itself during automation (observed varying by recording), Zakira **proactively** queries it using the `(drive-id, item-id)` harvested from any other SharePoint REST call observed on the same item (`labelPolicies`, `analytics/allTime`, etc.) — so Stream support works regardless of player behaviour.
 
-### Inspecting and managing profiles
+This activates automatically — no flag needed. As long as you've initialised an Edge profile via `auth init-edge-profile` and signed into SharePoint, browser-capture against any `*.sharepoint.com/.../stream.aspx?id=...` URL produces a real, speaker-attributed transcript when one exists.
 
-```bash
-zakira-replay auth list                   # list profiles + ages + staleness
-zakira-replay auth show <profile-name>    # full metadata for one profile
-zakira-replay auth clear <profile-name>   # delete a profile
-zakira-replay auth path                   # print the auth directory
-zakira-replay auth path <profile-name>    # print the absolute path of one profile file
-```
+Both auto-generated Teams captions and manually uploaded transcripts work. If multiple transcripts are attached (e.g., English + machine-translated French), all are downloaded; the existing transcript-fill logic picks the best-language match for `transcript.md`.
 
-### Configuration
+Warning codes specific to Stream:
 
-```bash
-zakira-replay config set auth.directory C:\secrets\zakira-auth      # default: <config-dir>/auth
-zakira-replay config set auth.staleThresholdMinutes 120             # default: 60
-```
+- `CAPTURE_STREAM_TRANSCRIPT_DISCOVERED` (info) — metadata response observed, N transcripts listed.
+- `CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED` (info) — per-transcript download succeeded.
+- `CAPTURE_STREAM_METADATA_PARSE_FAILED` (warning) — response body wasn't recognisable JSON / `media.transcripts[]` shape.
+- `CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED` (warning) — transcript body downloaded but didn't convert to WebVTT (unknown shape); raw body kept under `captions/`.
 
-Or override at runtime via `ZAKIRA_REPLAY_AUTH_DIRECTORY`.
-
-### Staleness
-
-SSO sessions, OAuth refresh tokens, and CDN cookies all expire — typically within 1-2 hours for Microsoft properties. When the resolved profile file is older than `auth.staleThresholdMinutes`, the pipeline emits an `AUTH_PROFILE_STALE` (severity `info`) warning that names the profile and tells the user how to refresh it. **The warning does not block analysis** — capture proceeds with the (possibly expired) cookies. If the cookies have already expired the page itself will redirect to the login screen, and downstream stages will see the login HTML instead of the video; in that case re-run `auth login` and try again.
-
-### Warning codes
-
-- `AUTH_PROFILE_NOT_FOUND` (severity `error`) — `--auth-profile` named a profile with no on-disk file. Browser capture proceeds without storage state.
-- `AUTH_PROFILE_STALE` (severity `info`) — profile is older than `auth.staleThresholdMinutes`. Capture proceeds; the orchestrator should suggest `auth login` if downstream extraction looks empty/wrong.
-- `AUTH_PROFILE_LOAD_FAILED` (severity `error`) — the profile file existed but could not be inspected (file lock, permissions, etc.). Browser capture proceeds without storage state.
-
-### Security notes
-
-- Profile files contain raw session cookies and tokens. They are equivalent to the user being logged in. **Treat them like passwords**: keep them out of source control, network shares, and shared workstations.
-- The default location (`<config-dir>/auth/`) is per-user; on Windows that resolves under `%APPDATA%\Zakira.Replay\auth\` by default. Override `auth.directory` to put profiles on encrypted storage (BitLocker volume, encrypted home directory).
-- `zakira-replay auth login` is the **only** Zakira.Replay code path that ever launches Playwright with `Headless = false`. The analysis pipeline always reuses a previously-saved profile in headless mode; it never opens a visible browser.
-- Profiles are not encrypted at rest. If you need at-rest encryption, store the auth directory on encrypted storage and restrict file permissions to your user.
-
-Warning codes emitted by browser capture:
-
-- `CAPTURE_BROWSER_UNAVAILABLE` — Edge / Playwright could not launch.
-- `CAPTURE_BROWSER_FALLBACK` — `auto` mode escalated from yt-dlp to browser capture.
-- `CAPTURE_PLAY_BUTTON_NOT_FOUND` — the configured selector did not match; the client fell back to `video.play()` / aria-label heuristics.
-- `CAPTURE_DURATION_UNRESOLVED` — `video.duration` did not become a finite number within `durationProbeTimeoutSeconds`; the video may not have started playing.
-- `CAPTURE_SEEK_FAILED` — at least one `video.currentTime` assignment threw.
-- `CAPTURE_SCREENSHOT_FAILED` — at least one screenshot threw; the run continues with remaining frames.
-- `CAPTURE_UNKNOWN_MODE` — the requested mode name is not `auto`/`ytdlp`/`browser`; falls back to `ytdlp`.
+If a recording has no transcript at all (auto-captioning was disabled for the meeting, or it's not a Teams recording), STT fallback would be the next step — but Stream's audio is DRM-encrypted (DASH `urn:mpeg:dash:sea:aes128-cbc:2013`), so audio-only download requires decryption that Zakira doesn't currently ship. The `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` warning makes the gap clear and the diagnostic dump captures the DASH manifest if you want to investigate further.
 
 ## Reusing a Dedicated Edge Profile (Persistent Context)
 

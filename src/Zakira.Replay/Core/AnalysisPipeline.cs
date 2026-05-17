@@ -260,12 +260,21 @@ public sealed class AnalysisPipeline
         if (requestedFrameCount > 0 || isSceneStrategy)
         {
             using var framesScope = timings.Measure(RunTimingStages.Frames);
+            // STT-fallback decision: enable browser-side media URL collection only when we
+            // need audio AND none has been resolved yet (i.e. the StorageState / yt-dlp paths
+            // didn't produce one). Anything that already has an audio source skips the side-
+            // channel collection so we don't waste bandwidth on routine runs.
+            var needsBrowserMediaForStt = request.UseSpeechToText && transcript is null && audioPath is null;
             if (captureMode == CaptureModes.Browser && !isLocalFile)
             {
                 browserCaptureAttempted = true;
-                var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                 frames = browserFrames;
                 browserDiscoveredCaptions.AddRange(browserCaptions);
+                if (browserAudio is not null && audioPath is null)
+                {
+                    audioPath = browserAudio;
+                }
             }
             else if (mediaSource is null)
             {
@@ -277,9 +286,13 @@ public sealed class AnalysisPipeline
                         "yt-dlp could not resolve a direct media URL; falling back to browser-based capture.",
                         Source: "playwright",
                         Severity: ReplayWarningSeverities.Info));
-                    var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                    var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                     frames = browserFrames;
                     browserDiscoveredCaptions.AddRange(browserCaptions);
+                    if (browserAudio is not null && audioPath is null)
+                    {
+                        audioPath = browserAudio;
+                    }
                 }
                 else
                 {
@@ -317,9 +330,13 @@ public sealed class AnalysisPipeline
                                 "Falling back to browser-based capture after ffmpeg and yt-dlp download both failed.",
                                 Source: "playwright",
                                 Severity: ReplayWarningSeverities.Info));
-                            var (browserFrames, browserCaptions) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+                            var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                             frames = browserFrames;
                             browserDiscoveredCaptions.AddRange(browserCaptions);
+                            if (browserAudio is not null && audioPath is null)
+                            {
+                                audioPath = browserAudio;
+                            }
                         }
                         else
                         {
@@ -1267,15 +1284,16 @@ public sealed class AnalysisPipeline
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        var (frames, _) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, frameCount, info, warnings, progress, cancellationToken).ConfigureAwait(false);
+        var (frames, _, _) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, frameCount, info, needsAudioForStt: false, warnings, progress, cancellationToken).ConfigureAwait(false);
         return frames;
     }
 
-    private async Task<(IReadOnlyList<FrameArtifact> Frames, IReadOnlyList<BrowserCapturedCaption> Captions)> CaptureFramesAndCaptionsWithBrowserAsync(
+    private async Task<(IReadOnlyList<FrameArtifact> Frames, IReadOnlyList<BrowserCapturedCaption> Captions, string? AudioPath)> CaptureFramesAndCaptionsWithBrowserAsync(
         AnalyzeRequest request,
         VideoRun run,
         int frameCount,
         YtDlpInfo info,
+        bool needsAudioForStt,
         List<ReplayWarning> warnings,
         IProgress<string>? progress,
         CancellationToken cancellationToken)
@@ -1287,7 +1305,7 @@ public sealed class AnalysisPipeline
                 "Browser-capture mode was requested but no IBrowserVideoCaptureClient was provided. The CLI auto-wires PlaywrightVideoCaptureClient; tests must inject one explicitly.",
                 Source: "playwright",
                 Severity: ReplayWarningSeverities.Error));
-            return ([], []);
+            return ([], [], null);
         }
 
         var config = new ConfigStore().Load();
@@ -1347,7 +1365,20 @@ public sealed class AnalysisPipeline
             MaxCaptionBytes: config.Capture.Browser.MaxCaptionBytes,
             AuthStorageStatePath: authStoragePath,
             EdgeUserDataDir: edgeUserDataDir,
-            EdgeProfileDirectory: edgeProfileDirectory);
+            EdgeProfileDirectory: edgeProfileDirectory,
+            // Only enable media-URL collection when STT is requested AND there's no other audio
+            // source available. Avoids wasting bandwidth on routine browser-capture-without-STT
+            // runs.
+            CaptureMediaForStt: needsAudioForStt,
+            // 4 GB safety cap; SharePoint Stream meeting recordings of typical length stay well
+            // below this. Anything larger is almost certainly an HLS playlist mis-classified as
+            // a media file.
+            MaxMediaBytes: 4L * 1024 * 1024 * 1024,
+            // Diagnostic capture: dumps network.log + JSON response bodies + texttracks state +
+            // HAR to runs/<id>/debug/. Off by default; opt in per-run via --capture-debug or
+            // persistently via `config set capture.browser.debug true`.
+            Debug: request.CaptureDebug ?? config.Capture.Browser.Debug,
+            DebugMaxBodyBytes: config.Capture.Browser.DebugMaxBodyBytes);
 
         var result = await browserCaptureClient.CaptureAsync(browserCaptureRequest, progress, cancellationToken).ConfigureAwait(false);
         foreach (var warning in result.Warnings)
@@ -1360,7 +1391,29 @@ public sealed class AnalysisPipeline
             info.DurationSeconds = duration;
         }
 
-        return (result.Frames, result.Captions);
+        // If the browser downloaded a media file as STT fallback, extract audio from it now.
+        // Doing the extraction here keeps the call sites simple (they just get back a ready-to-
+        // use audio path) and lets us emit the same AUDIO_DOWNLOAD_FAILED warning code the
+        // ffmpeg paths use on extraction failure.
+        string? audioPath = null;
+        if (!string.IsNullOrWhiteSpace(result.DownloadedMediaPath))
+        {
+            try
+            {
+                progress?.Report("Extracting audio from browser-downloaded media...");
+                audioPath = await ffmpeg.ExtractAudioAsync(result.DownloadedMediaPath, run, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ReplayException ex)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.AudioDownloadFailed,
+                    $"Browser-downloaded media at {result.DownloadedMediaPath} could not be transcoded to audio by ffmpeg: {ex.Message}",
+                    Source: "ffmpeg",
+                    Severity: ReplayWarningSeverities.Warning));
+            }
+        }
+
+        return (result.Frames, result.Captions, audioPath);
     }
 
     private static string? ResolveAuthProfilePath(AnalyzeRequest request, ReplayConfig config, List<ReplayWarning> warnings)
@@ -1926,7 +1979,8 @@ public sealed record AnalyzeRequest(
     int? NumSpeakers = null,
     float? DiarizationThreshold = null,
     string VisionProvider = VisionProviders.Copilot,
-    string? LocalVisionMode = null);
+    string? LocalVisionMode = null,
+    bool? CaptureDebug = null);
 
 public static class FrameSelectionStrategies
 {

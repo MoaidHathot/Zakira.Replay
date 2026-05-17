@@ -204,6 +204,23 @@ public sealed class BrowserCaptureConfig
     public string? EdgeProfileDirectory { get; set; }
 
     /// <summary>
+    /// When true, the browser-capture client additionally writes a diagnostic dump under
+    /// <c>runs/&lt;id&gt;/debug/</c>: <c>network.log</c> (JSONL of every response), JSON / XML
+    /// response bodies under <see cref="DebugMaxBodyBytes"/>, a <c>texttracks-state.json</c>
+    /// snapshot, and a Playwright HAR file at <c>network.har</c>. Cheap-but-not-free: each
+    /// response is hashed and (when eligible) persisted, so very large pages may produce
+    /// hundreds of MB of debug output. Default false; toggle via <c>--capture-debug</c>.
+    /// </summary>
+    public bool Debug { get; set; }
+
+    /// <summary>
+    /// Maximum body size (bytes) for any single response that <see cref="Debug"/> dumps to
+    /// disk. Bodies larger than this are recorded in <c>network.log</c> with their headers
+    /// but not persisted to <c>debug/metadata-responses/</c>. Defaults to 1 MB.
+    /// </summary>
+    public long DebugMaxBodyBytes { get; set; } = 1L * 1024 * 1024;
+
+    /// <summary>
     /// Resolves <see cref="EdgeUserDataDir"/> to an absolute filesystem path, expanding any
     /// environment-variable references (e.g. <c>%LOCALAPPDATA%</c>) against the current
     /// machine's environment. When the configured value is null or whitespace, returns the
@@ -1295,6 +1312,13 @@ public sealed class ConfigStore
             case "capture.browser.edge-profile-directory":
                 config.Capture.Browser.EdgeProfileDirectory = NormalizeNonEmpty(value, key);
                 break;
+            case "capture.browser.debug":
+                config.Capture.Browser.Debug = ParseBool(value, key);
+                break;
+            case "capture.browser.debugmaxbodybytes":
+            case "capture.browser.debug-max-body-bytes":
+                config.Capture.Browser.DebugMaxBodyBytes = ParsePositiveInt(value, key);
+                break;
             case "auth.directory":
                 config.Auth.Directory = NormalizeDirectoryPath(value);
                 break;
@@ -1435,6 +1459,8 @@ public sealed class ConfigStore
             "capture.browser.maxcaptionbytes" or "capture.browser.max-caption-bytes" => config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
             "capture.browser.edgeuserdatadir" or "capture.browser.edge-user-data-dir" => config.Capture.Browser.EdgeUserDataDir,
             "capture.browser.edgeprofiledirectory" or "capture.browser.edge-profile-directory" => config.Capture.Browser.EdgeProfileDirectory,
+            "capture.browser.debug" => config.Capture.Browser.Debug.ToString(),
+            "capture.browser.debugmaxbodybytes" or "capture.browser.debug-max-body-bytes" => config.Capture.Browser.DebugMaxBodyBytes.ToString(CultureInfo.InvariantCulture),
             "auth.directory" => config.Auth.Directory,
             "auth.stalethresholdminutes" or "auth.stale-threshold-minutes" => config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
             "diarization.provider" => config.Diarization.Provider,
@@ -1539,6 +1565,8 @@ public sealed class ConfigStore
             ["capture.browser.maxCaptionBytes"] = config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
             ["capture.browser.edgeUserDataDir"] = config.Capture.Browser.EdgeUserDataDir,
             ["capture.browser.edgeProfileDirectory"] = config.Capture.Browser.EdgeProfileDirectory,
+            ["capture.browser.debug"] = config.Capture.Browser.Debug.ToString(),
+            ["capture.browser.debugMaxBodyBytes"] = config.Capture.Browser.DebugMaxBodyBytes.ToString(CultureInfo.InvariantCulture),
             ["auth.directory"] = config.Auth.Directory,
             ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
             ["diarization.provider"] = config.Diarization.Provider,

@@ -32,9 +32,78 @@ warning codes, env vars, config keys) so orchestrators can plan migrations.
   canonical Microsoft / OAuth / SAML sign-in domains and probes for Entra ID MFA challenge
   selectors before duration probing. Replaces the misleading `CAPTURE_DURATION_UNRESOLVED`
   timeout that previously hid expired sessions.
+- **Browser-captured media for STT fallback** — when `--stt` is requested AND no inline
+  captions were intercepted AND no audio was otherwise resolved, browser capture observes
+  media-shaped responses (`video/*`, `audio/*`, HLS / DASH manifests) during playback, picks
+  the largest single-file candidate, and re-downloads it via the authenticated Playwright
+  context. The downloaded file lands at `media/browser-fetched.<ext>`; ffmpeg extracts audio
+  and Whisper STT runs against it. Side-channel is off by default — only activates when STT
+  needs audio and no other source is available, so routine browser-capture runs pay zero
+  bandwidth cost. Works for single-file MP4 patterns (typical SharePoint Stream upload);
+  does NOT handle HLS / DASH chunked streams (audio split across fragments) or DRM-protected
+  streams — those emit `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` and STT is skipped with a clear
+  reason. URL filter actively skips DASH / fMP4 fragment patterns (`part=mediasegment`,
+  `segmentTime=`, `.m4s`) so we don't waste an authenticated download on a single segment
+  ffmpeg can't decode.
+- **Caption-track activation** — after `video.play()`, browser capture now walks
+  `videoElement.textTracks` and sets each captions/subtitles track to `mode = "showing"`,
+  forcing the player to fetch its cue source. Most players (SharePoint Stream, Microsoft
+  Stream, YouTube embedded, generic HTML5) advertise tracks in metadata but only load the
+  underlying `.vtt`/`.srt` when CC is toggled \u2014 without this nudge, the existing
+  `CaptionResponseCollector` would never see any caption responses. Fallback heuristic also
+  tries clicking common CC-labelled buttons (`button[aria-label*="caption" i]` etc.) when
+  the textTracks API path doesn't activate anything. Emits
+  `CAPTURE_BROWSER_CAPTIONS_ACTIVATED` (info) when one or more tracks were activated, so
+  orchestrators can see the activation path was used.
+- **Direct cue harvest from `textTracks`** — for players that build caption cues client-side
+  via `track.addCue()` rather than fetching a `.vtt` (no network response for the existing
+  interceptor to catch), browser capture now reads cues directly out of the
+  `videoElement.textTracks[i].cues` arrays after activation. Serialises them to standard
+  WebVTT and saves under `captions/texttrack-NNNN-<lang>.vtt`. The existing transcript-fill
+  logic picks them up unchanged. Emits `CAPTURE_BROWSER_CAPTIONS_HARVESTED_FROM_DOM` (info)
+  with cue and track counts.
+- **Diagnostic capture (`--capture-debug`)** \u2014 opt-in flag (also `capture.browser.debug=true`
+  in config) that, during the existing browser-capture session, writes a diagnostic dump
+  under `runs/<id>/debug/`: `network.log` (JSONL of every response with URL, status,
+  content-type, size, headers, timestamp), `metadata-responses/<seq>-<sha8>.<ext>` (full
+  bodies for JSON / XML / text / JavaScript responses under `capture.browser.debugMaxBodyBytes`,
+  default 1 MB), `metadata-responses/index.json` (URL \u2192 body file mapping with SHA-256s),
+  `texttracks-state.json` (snapshot of `<video>.textTracks` post-activation), and
+  `network.har` (standard HAR file via Playwright's `RecordHarPath`). Designed for
+  reverse-engineering vendor-specific players (SharePoint Stream, Vimeo, Wistia, internal
+  portals) without affecting capture behaviour \u2014 strictly side-channel.
+- **`scripts/probe-graph-availability.ps1`** \u2014 standalone PowerShell 7+ script that probes
+  whether your Entra ID tenant accepts the Microsoft Graph PowerShell SDK's public client ID
+  (`14d82eec-204b-4c2f-b7e8-296a70dab67e`). Optionally resolves a Stream URL to a drive
+  item and tests the transcripts endpoint. Writes a structured JSON report and a one-line
+  summary. Pre-flight for any future Graph fast-path integration; runs read-only against
+  the tenant.
+- **SharePoint Stream / Microsoft Stream native transcript support** \u2014 new
+  `SharePointStreamInterceptor` recognises the Stream player's transcripts-metadata API
+  call (`_api/v2.X/drives/{drive-id}/items/{item-id}?...media/transcripts`), parses the
+  JSON for `media.transcripts[]`, and follows each entry's `temporaryDownloadUrl` via the
+  authenticated Playwright context (Edge profile cookies) to download the transcript file.
+  Tries multiple URL variants in priority order to coax out the richest format: first the
+  `?isformatjson=true&transcriptkey=<id>` query the Stream player itself uses (which
+  returns the full Microsoft Teams transcript JSON, `$schema:transcript.json`, with
+  `speakerDisplayName`, `speakerId`, `confidence`, `roomId`, ISO 8601 `startOffset` /
+  `endOffset` per entry), falling back through `$format=json`, `format=json`, and finally
+  the plain URL (which returns a stripped public WebVTT without speakers). When the rich
+  JSON is obtained, the converter emits proper VTT `<v Speaker>` voice spans so the
+  existing `SubtitleConverter` picks up speaker attribution. Wired as the third
+  caption-source layer after network-`.vtt` interception and textTracks-cue harvest;
+  activates automatically for Stream URLs with zero configuration. Also includes a
+  proactive metadata-fetch fallback: when the player happens not to query the
+  transcripts-metadata endpoint during automation (observed varying by recording),
+  Zakira queries it itself using the `(drive-id, item-id)` harvested from any other
+  SharePoint REST call (`labelPolicies`, `analytics/allTime`, etc.) observed on the same
+  item. Raw response bodies are persisted alongside the converted VTT under
+  `captions/stream-NNNN-<lang>.{vtt,json}` for audit.
 - **`edge-profile` synthetic dependency** in `doctor` output — reports `ready` / `not
   initialized` / `locked` / `missing` for the configured Edge user-data-dir, mirroring the
   existing `whisper-model`, `ocr-models`, `vision-models` entries.
+- **`ZAKIRA_REPLAY_EDGE_USER_DATA_DIR`** env var override for the Edge profile path, mirroring
+  the existing `ZAKIRA_REPLAY_AUTH_DIRECTORY` pattern.
 
 ### Warning codes added
 - `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED` (info) — Edge profile dir has no Cookies file
@@ -52,10 +121,25 @@ warning codes, env vars, config keys) so orchestrators can plan migrations.
   selector that headless capture cannot satisfy. Re-init interactively.
 - `CAPTURE_PROFILE_CONFLICT` (info) — both `--auth-profile` and an initialized
   `edgeUserDataDir` were supplied; persistent-context wins.
+- `CAPTURE_BROWSER_MEDIA_DOWNLOADED` (info) — STT-fallback media download succeeded.
+- `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) — no single-file media URL observed (typically
+  chunked stream); STT skipped.
+- `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) — authenticated media re-download
+  failed; STT skipped.
+- `CAPTURE_STREAM_TRANSCRIPT_DISCOVERED` (info) \u2014 Stream transcripts-metadata endpoint
+  observed and parsed; lists language + source for each transcript found.
+- `CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED` (info) \u2014 per-transcript download via authenticated
+  context succeeded; reports language, byte count, output path.
+- `CAPTURE_STREAM_METADATA_PARSE_FAILED` (warning) \u2014 the transcripts-metadata response body
+  wasn't valid JSON or lacked the expected `media.transcripts[]` array.
+- `CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED` (warning) \u2014 transcript body downloaded but could
+  not be converted to WebVTT (unknown format); raw body kept for inspection.
 
 ### Changed
-- `BrowserCaptureRequest` record gained two optional fields (`EdgeUserDataDir`,
-  `EdgeProfileDirectory`). Additive; existing call sites compile unchanged.
+- `BrowserCaptureRequest` record gained four optional fields (`EdgeUserDataDir`,
+  `EdgeProfileDirectory`, `CaptureMediaForStt`, `MaxMediaBytes`). Additive; existing call
+  sites compile unchanged.
+- `BrowserCaptureResult` record gained `DownloadedMediaPath` (optional). Additive.
 - `auth` subcommand usage hint extended to list `init-edge-profile`.
 
 ### Migration notes

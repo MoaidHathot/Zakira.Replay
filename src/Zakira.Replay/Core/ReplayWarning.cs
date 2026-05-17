@@ -105,6 +105,58 @@ public static class ReplayWarningCodes
 
     public const string CaptionsBrowserNetworkParseFailed = "CAPTIONS_BROWSER_NETWORK_PARSE_FAILED";
 
+    /// <summary>
+    /// Browser capture programmatically enabled one or more caption tracks on the
+    /// <c>&lt;video&gt;</c> element (set <c>track.mode = "showing"</c>) so the player would
+    /// fetch caption cue sources. Players like SharePoint Stream advertise tracks in
+    /// metadata but only fetch their bodies when CC is toggled; activation lets the existing
+    /// network interceptor catch them. Severity is <c>info</c>; reports how many tracks
+    /// were activated.
+    /// </summary>
+    public const string CaptureBrowserCaptionsActivated = "CAPTURE_BROWSER_CAPTIONS_ACTIVATED";
+
+    /// <summary>
+    /// Browser capture read caption cues directly out of the <c>&lt;video&gt;</c> element's
+    /// <c>textTracks</c> API (in-browser JavaScript) and serialised them to VTT files in the
+    /// run's <c>captions/</c> directory. Used when the player constructs cues programmatically
+    /// (<c>track.addCue()</c>) rather than fetching a <c>.vtt</c> over the wire \u2014 the network
+    /// interceptor sees nothing in that case, but the cues are still in JS memory after
+    /// activation. Severity is <c>info</c>; reports the number of tracks and total cues
+    /// harvested.
+    /// </summary>
+    public const string CaptureBrowserCaptionsHarvestedFromDom = "CAPTURE_BROWSER_CAPTIONS_HARVESTED_FROM_DOM";
+
+    /// <summary>
+    /// Browser capture observed the SharePoint Stream / OneDrive transcripts metadata
+    /// endpoint (<c>_api/v2.X/drives/{drive-id}/items/{item-id}?...media/transcripts</c>) and
+    /// parsed at least one transcript entry out of the response body. Severity is <c>info</c>;
+    /// the orchestrator can use this to confirm Stream-specific extraction kicked in.
+    /// </summary>
+    public const string CaptureStreamTranscriptDiscovered = "CAPTURE_STREAM_TRANSCRIPT_DISCOVERED";
+
+    /// <summary>
+    /// SharePoint Stream transcript fetch via the authenticated Playwright context succeeded
+    /// and the resulting file landed under <c>captions/</c>. Severity is <c>info</c>; reports
+    /// the language, byte count, and output path.
+    /// </summary>
+    public const string CaptureStreamTranscriptDownloaded = "CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED";
+
+    /// <summary>
+    /// SharePoint Stream transcript metadata response could not be parsed as JSON, or the
+    /// JSON did not contain a recognisable <c>media.transcripts[]</c> array. Severity is
+    /// <c>warning</c>; the raw body is still persisted in <c>debug/metadata-responses/</c>
+    /// when <c>--capture-debug</c> is enabled for inspection.
+    /// </summary>
+    public const string CaptureStreamMetadataParseFailed = "CAPTURE_STREAM_METADATA_PARSE_FAILED";
+
+    /// <summary>
+    /// Successfully downloaded a SharePoint Stream transcript file but could not convert its
+    /// body into standard WebVTT \u2014 the format wasn't recognised (neither VTT nor any of the
+    /// known Teams JSON shapes). Raw body is still persisted under <c>captions/</c> for the
+    /// orchestrator to inspect. Severity is <c>warning</c>.
+    /// </summary>
+    public const string CaptureStreamTranscriptParseFailed = "CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED";
+
     public const string AuthProfileNotFound = "AUTH_PROFILE_NOT_FOUND";
 
     public const string AuthProfileStale = "AUTH_PROFILE_STALE";
@@ -167,6 +219,29 @@ public static class ReplayWarningCodes
     /// Severity is <c>info</c> for auditability.
     /// </summary>
     public const string CaptureProfileConflict = "CAPTURE_PROFILE_CONFLICT";
+
+    /// <summary>
+    /// Browser capture saw a candidate media response during playback and successfully
+    /// downloaded it via the authenticated browser context, falling back to local STT after
+    /// no inline captions were observed. Severity is <c>info</c>; recorded so orchestrators
+    /// can see the audio-fallback path was used.
+    /// </summary>
+    public const string CaptureBrowserMediaDownloaded = "CAPTURE_BROWSER_MEDIA_DOWNLOADED";
+
+    /// <summary>
+    /// Browser capture saw no candidate media responses suitable for re-download during
+    /// playback. Typical cause: the player uses HLS / DASH chunked streaming and serves the
+    /// audio as many small fragments rather than a single addressable file. Severity is
+    /// <c>info</c>; STT will not run for this source unless an alternate audio path is wired.
+    /// </summary>
+    public const string CaptureBrowserMediaNoCandidate = "CAPTURE_BROWSER_MEDIA_NO_CANDIDATE";
+
+    /// <summary>
+    /// Browser capture identified a media URL but the authenticated re-download attempt
+    /// failed (HTTP error, oversize body, transient network failure). Severity is
+    /// <c>warning</c>; STT will not run.
+    /// </summary>
+    public const string CaptureBrowserMediaDownloadFailed = "CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED";
 
     public const string ClipMediaUrlUnresolved = "CLIP_MEDIA_URL_UNRESOLVED";
 

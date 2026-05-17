@@ -1328,6 +1328,15 @@ public static class CliApp
         var smartCropProfile = parsed.Get("smart-crop-profile") ?? parsed.Get("crop-profile");
         var captureMode = parsed.Get("capture-mode") ?? parsed.Get("capture");
         var authProfile = parsed.Get("auth-profile") ?? parsed.Get("auth");
+        bool? captureDebug = null;
+        if (parsed.GetBool("capture-debug", defaultValue: false))
+        {
+            captureDebug = true;
+        }
+        else if (parsed.GetBool("no-capture-debug", defaultValue: false))
+        {
+            captureDebug = false;
+        }
         var captionLanguages = ParseCaptionLanguagesOption(parsed);
         bool? slideGrouping = parsed.GetBool("no-slide-grouping", defaultValue: false) ? false : null;
         var slideHashDistance = parsed.GetOptionalInt("slide-hash-distance");
@@ -1378,7 +1387,8 @@ public static class CliApp
             NumSpeakers: numSpeakers,
             DiarizationThreshold: diarizationThreshold,
             VisionProvider: visionProvider,
-            LocalVisionMode: localVisionMode);
+            LocalVisionMode: localVisionMode,
+            CaptureDebug: captureDebug);
     }
 
     private static IReadOnlyList<string>? ParseCaptionLanguagesOption(CommandOptions parsed)

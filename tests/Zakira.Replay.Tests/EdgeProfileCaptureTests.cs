@@ -367,6 +367,123 @@ public sealed class EdgeProfileCaptureTests
         }
     }
 
+    [Fact]
+    public async Task BrowserCaptureRequestEnablesMediaCollectionOnlyWhenSttRequestedAndNoAudio()
+    {
+        using var temp = new TestTempDirectory();
+        var artifactStore = new ArtifactStore(temp.GetPath("runs"));
+        var browser = new RecordingBrowserCapture();
+        var pipeline = new AnalysisPipeline(artifactStore, new MinimalYtDlp(), new MinimalFfmpeg(), _ => null, browser);
+
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousEdge = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", temp.GetPath("no-edge-here"));
+
+            // Without --stt: media collection must stay off.
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://example.test/private",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: false,
+                FrameCount: 1,
+                RunId: "media-collect-off",
+                CaptureMode: CaptureModes.Browser), progress: null, CancellationToken.None);
+            Assert.False(browser.LastRequest!.CaptureMediaForStt,
+                "CaptureMediaForStt must be false when --stt is not requested");
+
+            // With --stt and no audio source: media collection must be on.
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://example.test/private",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: true,
+                UseSpeechToText: true,
+                FrameCount: 1,
+                RunId: "media-collect-on",
+                CaptureMode: CaptureModes.Browser), progress: null, CancellationToken.None);
+            Assert.True(browser.LastRequest!.CaptureMediaForStt,
+                "CaptureMediaForStt must be true when --stt is requested and no audio yet");
+            Assert.True(browser.LastRequest!.MaxMediaBytes > 0,
+                "MaxMediaBytes safety cap must be > 0 when media collection is enabled");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", previousEdge);
+        }
+    }
+
+    [Fact]
+    public async Task CaptureDebugFlagFlowsToBrowserRequest()
+    {
+        using var temp = new TestTempDirectory();
+        var artifactStore = new ArtifactStore(temp.GetPath("runs"));
+        var browser = new RecordingBrowserCapture();
+        var pipeline = new AnalysisPipeline(artifactStore, new MinimalYtDlp(), new MinimalFfmpeg(), _ => null, browser);
+
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousEdge = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", temp.GetPath("no-edge-here"));
+
+            // Default: debug stays off.
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://example.test/private",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: false,
+                FrameCount: 1,
+                RunId: "debug-default-off",
+                CaptureMode: CaptureModes.Browser), progress: null, CancellationToken.None);
+            Assert.False(browser.LastRequest!.Debug);
+
+            // Per-run override: CaptureDebug=true forces it on regardless of config.
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://example.test/private",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: false,
+                FrameCount: 1,
+                RunId: "debug-cli-on",
+                CaptureMode: CaptureModes.Browser,
+                CaptureDebug: true), progress: null, CancellationToken.None);
+            Assert.True(browser.LastRequest!.Debug);
+            Assert.True(browser.LastRequest!.DebugMaxBodyBytes > 0);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", previousEdge);
+        }
+    }
+
+    [Fact]
+    public async Task ConfigSetCaptureDebugRoundTrips()
+    {
+        using var temp = new TestTempDirectory();
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        var previous = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            var store = new ConfigStore();
+            await store.SetAsync("capture.browser.debug", "true", CancellationToken.None);
+
+            var fetched = await store.GetAsync("capture.browser.debug", CancellationToken.None);
+            Assert.Equal("True", fetched);
+
+            var loaded = store.Load();
+            Assert.True(loaded.Capture.Browser.Debug);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previous);
+        }
+    }
+
     private sealed class RecordingBrowserCapture : IBrowserVideoCaptureClient
     {
         public bool WasCalled { get; private set; }

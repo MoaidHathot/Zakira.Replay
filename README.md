@@ -427,7 +427,7 @@ Zakira.Replay ships an LLM-free path end-to-end. Captions/sidecars handle transc
 
 ### `--vision-provider local`
 
-The local vision provider (`LocalOnnxVisionProvider`) produces the same `VisionFrameStructured` JSON shape as the LLM path - `kind`, `title`, `bullets[]`, `codeBlocks[]`, `charts[]`, `uiElements[]`, `freeText` - without ever calling an LLM. It piggybacks on the OCR result for the same frame to populate the structured fields and optionally adds a CLIP zero-shot classifier and a BLIP image captioner on top.
+The local vision provider (`LocalOnnxVisionProvider`) produces the same `VisionFrameStructured` JSON shape as the LLM path - `kind`, `title`, `bullets[]`, `codeBlocks[]`, `charts[]`, `uiElements[]`, `freeText` - without ever calling an LLM. It piggybacks on the OCR result for the same frame to populate the structured fields and optionally adds a CLIP zero-shot classifier and a Florence-2 image captioner on top.
 
 ```bash
 # Fully air-gapped: local STT, local OCR, local vision (heuristic mode is zero-model)
@@ -435,10 +435,10 @@ zakira-replay analyze "<source>" --stt --llm-provider local-whisper \
     --ocr --ocr-provider local \
     --vision --vision-provider local --local-vision-mode heuristic --cache
 
-# Heuristic + CLIP zero-shot kind classification (requires CLIP image-encoder ONNX)
+# Heuristic + CLIP zero-shot kind classification (~150 MB downloaded models)
 zakira-replay analyze "<source>" --vision --vision-provider local --local-vision-mode clip --ocr
 
-# Heuristic + CLIP + BLIP captioning (default for the local provider)
+# Heuristic + CLIP + Florence-2 captioning (default for the local provider; ~410 MB total)
 zakira-replay analyze "<source>" --vision --vision-provider local --ocr
 ```
 
@@ -448,54 +448,48 @@ Three selectable sub-modes via `--local-vision-mode`:
 |---|---|---|---|
 | `heuristic` | none | 0 MB | Structure from OCR: title, bullets, code blocks, UI elements. `kind` by token-scoring rules. `charts[]` empty. `freeText` = concatenated OCR. |
 | `clip` | CLIP image-encoder ONNX + pre-computed kind embeddings | ~150 MB | Above plus CLIP zero-shot classification for `kind`. |
-| `clip-blip` (default) | above + BLIP image-encoder + decoder + WordPiece vocab | ~550 MB | Above plus BLIP image captioning prefixed with `"Frame appears to show: ..."` filling `freeText`. |
+| `clip-caption` (default) | above + Florence-2 vision_encoder + encoder + decoder + embed_tokens + BART BPE tokenizer | ~410 MB total | Above plus Florence-2-base-ft image captioning prefixed with `"Frame appears to show: ..."` filling `freeText` with a natural-language scene description (and the literal OCR text after the caption for cross-reference). |
+
+The deprecated string `clip-blip` is still accepted by `--local-vision-mode` and config files; it maps to `clip-caption` for back-compat with 0.7.x.
 
 OCR is auto-enabled when `--vision-provider local` is passed without `--ocr` (the structured fields need it). The pipeline records `VISION_LOCAL_OCR_REQUIRED` (info) so orchestrators can see the implicit decision.
 
-### Installing CLIP models for `clip` mode (one-time setup)
-
-For `clip` mode the toolchain auto-downloads the CLIP ViT-B/32 ONNX export from Hugging Face (`Xenova/clip-vit-base-patch32`, community-maintained) and generates a small kind-embeddings binary from the canonical prompts hard-coded in `LocalOnnxVisionProvider.ClipKindPrompts`:
+### Installing the local vision models
 
 ```bash
-# Download CLIP image + text encoder ONNX + tokenizer (~150 MB)
-zakira-replay deps install vision --mode clip
+# Download CLIP ViT-B/32 ONNX + tokenizer (~150 MB) and Florence-2-base-ft ONNX (~260 MB)
+zakira-replay deps install vision --mode clip-caption
 
-# Run the 7 kind prompts through the text encoder once; writes clip-kind-embeddings.bin (14336 bytes)
+# (Required after `deps install vision`, for clip / clip-caption modes:)
+# Run the 7 CLIP kind prompts through the text encoder once; writes clip-kind-embeddings.bin (14336 bytes)
 zakira-replay vision generate-clip-embeddings
 
 # Confirm doctor reports vision-models: found
 zakira-replay doctor
 ```
 
-The files land under `<portable-dir>/models/vision/` (defaults to `%LOCALAPPDATA%\Zakira.Replay\portable\models\vision` on Windows, `~/.local/share/Zakira.Replay/portable/models/vision` on Linux). Override per-file paths with `vision.local.clip*Path` config keys when you want to point at a custom export.
+For `clip` mode only (no Florence-2 captioner), use `--mode clip` instead — saves ~260 MB.
 
-Hugging Face downloads track the `main` branch of the Xenova repo. If upstream changes the export, downloads keep succeeding but inference might fail — the provider then surfaces `VISION_LOCAL_INIT_FAILED` with the exception so the orchestrator can branch.
+The files land under `<portable-dir>/models/vision/` (defaults to `%LOCALAPPDATA%\Zakira.Replay\portable\models\vision` on Windows, `~/.local/share/Zakira.Replay/portable/models/vision` on Linux). Override per-file paths with `vision.local.clip*Path` and `vision.local.florence*Path` config keys when you want to point at a custom export.
 
-### Bringing your own BLIP (for `clip-blip` mode — deferred to a future release)
+Quantization is configurable via `vision.local.florenceQuantization` (or env var `ZAKIRA_REPLAY_VISION_FLORENCE_QUANTIZATION`). Default is `quantized` (int8); other supported values: `fp16`, `q4`, `q4f16`, `bnb4`, `int8`, `uint8`, `full`. Higher quality = larger download.
 
-`clip-blip` mode is structurally wired but **BLIP auto-download is not in this release**. The provider needs three files (image encoder ONNX, decoder ONNX, WordPiece vocab) which can be sourced from `Salesforce/blip-image-captioning-base` after exporting to ONNX via Optimum, or from a community ONNX export. Point Zakira.Replay at the files:
-
-```bash
-zakira-replay config set vision.local.blipImageEncoderPath /path/to/blip-image-encoder.onnx
-zakira-replay config set vision.local.blipDecoderPath /path/to/blip-decoder.onnx
-zakira-replay config set vision.local.blipVocabPath /path/to/blip-vocab.txt
-```
-
-If any file is missing, the provider degrades gracefully to `clip` mode and records `VISION_LOCAL_MODE_DEGRADED` (warning) so orchestrators can branch.
+Hugging Face downloads track the `main` branch of `Xenova/clip-vit-base-patch32` and `onnx-community/Florence-2-base-ft`. If upstream changes the export, downloads keep succeeding but inference might fail — the provider then surfaces `VISION_LOCAL_INIT_FAILED` with the exception so the orchestrator can branch.
 
 ### Honest limitations
 
 - **`charts[]` is always empty in local mode.** Detecting charts reliably needs a chart-aware model we do not ship; OCR-derived heuristics can't infer axes/series from text alone without false positives.
-- **BLIP captions are noisy.** The base BLIP captioner ("Frame appears to show: a slide with text on it") is significantly less accurate than a frontier vision LLM. The `freeText` always includes the literal OCR text after the caption so the agent has the trustworthy part to cite.
-- **Diagrams without labels and free-form scenes** (people, landscapes, generic photographs) get classified as `other` and produce empty structured fields.
+- **Florence-2-base captions are smaller-model captions.** They're useful and grammatical but less detailed than a frontier vision LLM. The provider always appends the literal OCR text (`"Visible text: ..."`) after the model-derived description so the trustworthy part is preserved.
+- **Diagrams without labels and free-form scenes** sometimes generate generic captions ("In this image we can see a person...") that don't carry the specific information OCR would have caught. The OCR text in `freeText` covers this.
 - **No language model in the structured-output loop.** This is the point. For tasks where the LLM path's free-form scene description matters (e.g. "describe what's happening visually"), prefer `--vision-provider copilot` or use `--llm-provider ollama` with a vision-capable local model.
+- **No KV-cache decoding (v2 limitation).** Each decoder step recomputes from scratch — captions take a few seconds per frame on CPU. KV-cache support is a v3 follow-up.
 
 Warning codes specific to the local vision path:
 
 - `VISION_LOCAL_MODELS_MISSING` (warning) - one or more files the configured mode needs are absent. Lists the missing paths.
 - `VISION_LOCAL_INIT_FAILED` (error) - the provider could not initialise at all (bad ONNX, corrupt vocab, etc.).
 - `VISION_LOCAL_INFERENCE_FAILED` (warning, per-frame) - ONNX threw at runtime; frame skipped, run continues.
-- `VISION_LOCAL_MODE_DEGRADED` (warning) - actual mode was lower than requested (e.g. clip-blip → clip because BLIP files missing).
+- `VISION_LOCAL_MODE_DEGRADED` (warning) - actual mode was lower than requested (e.g. clip-caption → clip because Florence files missing).
 - `VISION_LOCAL_OCR_REQUIRED` (info) - OCR was auto-enabled because `--vision-provider local` needs per-frame OCR. Pass `--ocr` explicitly to silence.
 - `VISION_UNKNOWN_PROVIDER` (error) - the `--vision-provider` value was not recognised; no vision ran.
 

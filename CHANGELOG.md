@@ -7,6 +7,69 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [Unreleased] — Florence-2 local image captioner (replaces BLIP)
+
+### Added
+- **`--local-vision-mode clip-caption`** ships with a working Florence-2-base-ft image
+  captioner. Auto-downloaded via `zakira-replay deps install vision --mode clip-caption`
+  (~410 MB total: CLIP ~150 MB + Florence ~260 MB; tracks `onnx-community/Florence-2-base-ft`
+  main branch on Hugging Face). Caption text fills `VisionFrameStructured.FreeText` with the
+  pattern `"Frame appears to show: <model caption>. Visible text: <OCR concat>"` so the
+  trustworthy OCR text is always available alongside the model-derived description.
+- **`FlorenceBartBpeTokenizer`** (`Core/FlorenceBartBpeTokenizer.cs`) - hand-rolled BART-style
+  byte-level BPE tokenizer with the GPT-2 `bytes_to_unicode` table. Loads vocab.json +
+  merges.txt + added_tokens.json from the canonical onnx-community export. ~290 LOC. No new
+  NuGet dependency.
+- **4-graph Florence-2 orchestration** in `LocalOnnxVisionProvider.GenerateFlorenceCaptionAsync`:
+  vision_encoder → embed_tokens → encoder_model → decoder_model_merged, greedy decoding,
+  EOS detection. Image preprocessing at 768x768 with ImageNet mean/std per Florence's
+  preprocessor_config.json. Task prompt hard-coded to `<DETAILED_CAPTION>` expanded to
+  "Describe in detail what is shown in the image." per upstream documentation.
+- **New config knobs**: `vision.local.florence{VisionEncoder,Encoder,Decoder,EmbedTokens,Vocab,Merges,AddedTokens}Path`, `vision.local.florenceMaxTokens` (default 80), `vision.local.florenceQuantization` (default `quantized` / int8; also accepts `fp16`, `q4`, `q4f16`, `bnb4`, `int8`, `uint8`, `full`). Mirroring env vars `ZAKIRA_REPLAY_VISION_FLORENCE_*`.
+
+### Changed
+- **`LocalVisionMode.ClipBlip` renamed to `LocalVisionMode.ClipCaption`.** Same integer value
+  (`2`) is preserved for ABI compat. The string forms `"clip-blip"` / `"clip+blip"` / `"blip"`
+  are still accepted by `VisionProviderFactory.NormalizeMode` as deprecated aliases mapping
+  to the new value. Canonical string form is now `"clip-caption"`.
+- BLIP-specific config keys (`vision.local.blip*Path`, `vision.local.blipMaxTokens`) and
+  `LocalVisionOptions.Blip*` fields are **removed**. The previous BLIP integration was never
+  functional (no auto-download flow shipped; no public ONNX export was validated). Florence-2
+  replaces it.
+- `LocalVisionOptions` record signature changed: new `Quantization` parameter, new
+  `Florence*` paths, removed `Blip*` paths and `BlipMaxTokens` field.
+- `PortableDependencyInstaller.InstallVisionModelsAsync` now downloads Florence-2 ONNX from
+  `onnx-community/Florence-2-base-ft` for `--mode clip-caption`. Files saved under canonical
+  names (`florence-vision-encoder.onnx`, `florence-encoder.onnx`, `florence-decoder.onnx`,
+  `florence-embed-tokens.onnx`, `florence-vocab.json`, `florence-merges.txt`,
+  `florence-added-tokens.json`) regardless of source filename or quantization variant.
+
+### Demo D results (live verification)
+- Source: `https://www.youtube.com/watch?v=Ws-Nc9S8i_Y` (ThePrimeagen video about npm
+  Shai-Hulud supply-chain attack).
+- 50 frames analyzed end-to-end with **zero LLM calls**.
+- Kind distribution: 30 code, 13 ui, 7 slide, 0 other (identical to Demo C since CLIP
+  classifier didn't change).
+- Caption examples (Florence-2-base-ft, int8 quantized):
+  - frame-001 [00:04]: "In this image we can see a person wearing black color T-shirt is
+    standing and speaking in the microphone. In the background, we can see the screen with
+    some text and images."
+  - frame-012 [00:59]: "In this image we can see a person holding a mic. In the background of
+    the image there is some text." (Visible text: ChainPatrol @ChainPatrol Mni Shai-Hulud
+    (CVE-2026-45321) is a supply chain wori...)
+  - frame-056 [04:38]: "In this image we can see a screen. On the screen we can see a person
+    wearing headphones and holding a mic. Also something is written on the screen."
+- All 50 results tagged `"provider": "local"`. Run on disk: `runs/demo-vision-d-florence/`.
+
+### Honest caveats
+- **No KV-cache decoding.** Each decoder step recomputes from scratch (`decoder_model_merged.onnx`
+  with `use_cache_branch=false`). Caption generation takes a few seconds per frame on CPU.
+  KV-cache support is a v3 follow-up.
+- **Florence-2-base captions are smaller-model captions.** Useful and grammatical but less
+  detailed than a frontier vision LLM. Always paired with literal OCR text in `freeText` so
+  the trustworthy part is preserved.
+- **`charts[]` still always empty** in local mode (unchanged from prior release).
+
 ## [Unreleased] — Local vision provider (no LLM)
 
 ### Added

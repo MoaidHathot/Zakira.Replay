@@ -239,7 +239,7 @@ Agent behavior:
 - Combine four "local" surfaces: STT via `local-whisper`, OCR via `local`, vision via the new `local` provider, and (optionally) speaker diarization via local sherpa-onnx.
 - `--ocr-provider local` is already the default. Add `--vision-provider local` to keep vision off the LLM as well.
 - The local vision provider auto-enables OCR when omitted; emits `VISION_LOCAL_OCR_REQUIRED` (info) so the orchestrator can see the implicit decision. Pass `--ocr` explicitly to silence.
-- `--local-vision-mode heuristic` (zero models) works out of the box. `--local-vision-mode clip` adds CLIP zero-shot kind classification — install with `zakira-replay deps install vision --mode clip` followed by `zakira-replay vision generate-clip-embeddings` (~150 MB one-time). `--local-vision-mode clip-blip` additionally captions frames with BLIP — **clip-blip auto-download is deferred to a future release**; if the user wants captions they currently need to bring their own BLIP ONNX and configure `vision.local.blip*Path`. Missing files cause graceful degradation (`clip-blip` → `clip` → `heuristic`) with `VISION_LOCAL_MODE_DEGRADED` warnings.
+- `--local-vision-mode heuristic` (zero models) works out of the box. `--local-vision-mode clip` adds CLIP zero-shot kind classification — install with `zakira-replay deps install vision --mode clip` followed by `zakira-replay vision generate-clip-embeddings` (~150 MB one-time). `--local-vision-mode clip-caption` (default for the local provider) additionally captions frames with Florence-2-base-ft — install with `zakira-replay deps install vision --mode clip-caption` (~410 MB total). The deprecated `clip-blip` is still accepted as an alias for `clip-caption`. Missing files cause graceful degradation (`clip-caption` → `clip` → `heuristic`) with `VISION_LOCAL_MODE_DEGRADED` warnings.
 
 ```json
 {
@@ -264,7 +264,7 @@ Agent behavior:
 Tradeoffs to mention up front:
 
 - `charts[]` is always empty in local vision mode (no chart-aware model ships).
-- BLIP captions are noisier than a frontier vision LLM's; the `freeText` always includes the literal OCR text after the caption so the trustworthy part is preserved for citation.
+- Florence-2-base captions are smaller-model captions; the `freeText` always includes the literal OCR text after the caption so the trustworthy part is preserved for citation.
 - Diagrams without labels and generic photographic frames classify as `other` with empty structured fields.
 - For tasks where the LLM path's free-form scene description matters (e.g. "describe what's happening visually"), suggest the user retry with `visionProvider: "copilot"` or `--llm-provider ollama` with a vision-capable local model.
 

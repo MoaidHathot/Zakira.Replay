@@ -17,7 +17,7 @@ public static class VisionProviders
 
     /// <summary>
     /// Fully local vision via classical CV + optional ONNX models (CLIP for zero-shot kind
-    /// classification, BLIP for image captioning). Never invokes an LLM. Produced by
+    /// classification, Florence-2 for image captioning). Never invokes an LLM. Produced by
     /// <see cref="LocalOnnxVisionProvider"/>; behaviour controlled by <see cref="LocalVisionMode"/>.
     /// </summary>
     public const string Local = "local";
@@ -27,7 +27,8 @@ public static class VisionProviders
 /// Sub-mode of the local (no-LLM) vision provider. Selects how much classical-CV/ONNX
 /// machinery the provider engages. The three values are ordered by footprint and quality:
 /// <see cref="Heuristic"/> needs no models, <see cref="Clip"/> adds a CLIP image encoder
-/// (~150 MB), and <see cref="ClipBlip"/> additionally loads BLIP image-captioning (~400 MB).
+/// (~150 MB), and <see cref="ClipCaption"/> additionally loads a Florence-2 captioner
+/// (~200 MB).
 /// </summary>
 public enum LocalVisionMode
 {
@@ -45,13 +46,21 @@ public enum LocalVisionMode
     Clip = 1,
 
     /// <summary>
-    /// CLIP for <c>Kind</c> plus BLIP-base image captioning to fill <c>FreeText</c> with an
-    /// actual visual description (prefixed by "Frame appears to show:" so consumers know it
-    /// came from a smaller captioning model). Structured fields stay heuristic-derived.
-    /// Default when <c>--vision-provider local</c> is selected without an explicit
+    /// CLIP for <c>Kind</c> plus a local image-captioning model (Florence-2-base-ft as of v0.8)
+    /// to fill <c>FreeText</c> with an actual visual description (prefixed by
+    /// <c>"Frame appears to show:"</c> so consumers know it came from a smaller captioning model
+    /// rather than a frontier vision LLM). Structured fields stay heuristic-derived. Default
+    /// when <c>--vision-provider local</c> is selected without an explicit
     /// <c>--local-vision-mode</c>.
+    /// <para>
+    /// This enum value was named <c>ClipBlip</c> in 0.7.x; it was renamed to
+    /// <c>ClipCaption</c> when the BLIP integration was dropped in favour of Florence-2.
+    /// The integer value (<c>2</c>) is preserved for back-compat and the string forms
+    /// <c>"clip-blip"</c> / <c>"clip+blip"</c> / <c>"blip"</c> are still accepted by
+    /// <see cref="VisionProviderFactory.NormalizeMode"/> as deprecated aliases.
+    /// </para>
     /// </summary>
-    ClipBlip = 2
+    ClipCaption = 2
 }
 
 /// <summary>
@@ -74,7 +83,7 @@ public static class VisionProviderFactory
     /// <summary>
     /// Returns the local-vision sub-mode configured for the current environment, honouring
     /// <c>ZAKIRA_REPLAY_VISION_LOCAL_MODE</c>, then <c>vision.local.mode</c> in config, then
-    /// the <see cref="LocalVisionMode.ClipBlip"/> default.
+    /// the <see cref="LocalVisionMode.ClipCaption"/> default.
     /// </summary>
     public static LocalVisionMode GetConfiguredLocalMode(ReplayConfig? config = null)
     {
@@ -105,21 +114,25 @@ public static class VisionProviderFactory
 
     /// <summary>
     /// Normalises a user-supplied mode string into a <see cref="LocalVisionMode"/> enum value.
-    /// Empty/null/unknown inputs default to <see cref="LocalVisionMode.ClipBlip"/>.
+    /// Empty/null/unknown inputs default to <see cref="LocalVisionMode.ClipCaption"/>.
+    /// <c>"clip-blip"</c>/<c>"clip+blip"</c>/<c>"blip"</c> are accepted as deprecated aliases
+    /// for <see cref="LocalVisionMode.ClipCaption"/> so older config files keep working.
     /// </summary>
     public static LocalVisionMode NormalizeMode(string? mode)
     {
         if (string.IsNullOrWhiteSpace(mode))
         {
-            return LocalVisionMode.ClipBlip;
+            return LocalVisionMode.ClipCaption;
         }
 
         return mode.Trim().ToLowerInvariant().Replace('_', '-') switch
         {
             "heuristic" or "heuristics" or "ocr-only" or "ocr" or "no-models" or "none" => LocalVisionMode.Heuristic,
             "clip" or "clip-only" or "zero-shot" => LocalVisionMode.Clip,
-            "clip-blip" or "clip+blip" or "blip" or "full" or "default" => LocalVisionMode.ClipBlip,
-            _ => LocalVisionMode.ClipBlip
+            // Canonical name + deprecated BLIP-era aliases.
+            "clip-caption" or "caption" or "full" or "default" => LocalVisionMode.ClipCaption,
+            "clip-blip" or "clip+blip" or "blip" => LocalVisionMode.ClipCaption,
+            _ => LocalVisionMode.ClipCaption
         };
     }
 
@@ -131,7 +144,7 @@ public static class VisionProviderFactory
     {
         LocalVisionMode.Heuristic => "heuristic",
         LocalVisionMode.Clip => "clip",
-        LocalVisionMode.ClipBlip => "clip-blip",
-        _ => "clip-blip"
+        LocalVisionMode.ClipCaption => "clip-caption",
+        _ => "clip-caption"
     };
 }

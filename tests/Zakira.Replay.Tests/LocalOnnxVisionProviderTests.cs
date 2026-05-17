@@ -61,12 +61,15 @@ public sealed class LocalOnnxVisionProviderTests
         var ffmpeg = new NullFfmpegClient();
         var options = BuildHeuristicOptions(temp.Path) with
         {
-            Mode = LocalVisionMode.ClipBlip,
+            Mode = LocalVisionMode.ClipCaption,
             ClipImageEncoderPath = temp.GetPath("missing-clip-image.onnx"),
             ClipKindEmbeddingsPath = temp.GetPath("missing-clip-embeddings.bin"),
-            BlipImageEncoderPath = temp.GetPath("missing-blip-image.onnx"),
-            BlipDecoderPath = temp.GetPath("missing-blip-decoder.onnx"),
-            BlipVocabPath = temp.GetPath("missing-blip-vocab.txt")
+            FlorenceVisionEncoderPath = temp.GetPath("missing-florence-vision.onnx"),
+            FlorenceEncoderPath = temp.GetPath("missing-florence-encoder.onnx"),
+            FlorenceDecoderPath = temp.GetPath("missing-florence-decoder.onnx"),
+            FlorenceEmbedTokensPath = temp.GetPath("missing-florence-embed.onnx"),
+            FlorenceVocabPath = temp.GetPath("missing-florence-vocab.json"),
+            FlorenceMergesPath = temp.GetPath("missing-florence-merges.txt")
         };
 
         using var provider = new LocalOnnxVisionProvider(options, ffmpeg);
@@ -91,16 +94,16 @@ public sealed class LocalOnnxVisionProviderTests
     }
 
     [Theory]
-    [InlineData(null, LocalVisionMode.ClipBlip)]
-    [InlineData("", LocalVisionMode.ClipBlip)]
+    [InlineData(null, LocalVisionMode.ClipCaption)]
+    [InlineData("", LocalVisionMode.ClipCaption)]
     [InlineData("heuristic", LocalVisionMode.Heuristic)]
     [InlineData("HEURISTIC", LocalVisionMode.Heuristic)]
     [InlineData("ocr-only", LocalVisionMode.Heuristic)]
     [InlineData("clip", LocalVisionMode.Clip)]
     [InlineData("zero-shot", LocalVisionMode.Clip)]
-    [InlineData("clip-blip", LocalVisionMode.ClipBlip)]
-    [InlineData("clip+blip", LocalVisionMode.ClipBlip)]
-    [InlineData("full", LocalVisionMode.ClipBlip)]
+    [InlineData("clip-blip", LocalVisionMode.ClipCaption)]
+    [InlineData("clip+blip", LocalVisionMode.ClipCaption)]
+    [InlineData("full", LocalVisionMode.ClipCaption)]
     public void VisionProviderFactoryNormalisesLocalVisionMode(string? input, LocalVisionMode expected)
     {
         Assert.Equal(expected, VisionProviderFactory.NormalizeMode(input));
@@ -109,7 +112,7 @@ public sealed class LocalOnnxVisionProviderTests
     [Theory]
     [InlineData(LocalVisionMode.Heuristic, "heuristic")]
     [InlineData(LocalVisionMode.Clip, "clip")]
-    [InlineData(LocalVisionMode.ClipBlip, "clip-blip")]
+    [InlineData(LocalVisionMode.ClipCaption, "clip-caption")]
     public void FormatModeReturnsCanonicalString(LocalVisionMode mode, string expected)
     {
         Assert.Equal(expected, VisionProviderFactory.FormatMode(mode));
@@ -141,13 +144,18 @@ public sealed class LocalOnnxVisionProviderTests
     {
         return new LocalVisionOptions(
             Mode: LocalVisionMode.Heuristic,
+            Quantization: LocalVisionOptions.DefaultQuantization,
             ClipImageEncoderPath: Path.Combine(baseDir, "clip-image-encoder.onnx"),
             ClipTextEncoderPath: Path.Combine(baseDir, "clip-text-encoder.onnx"),
             ClipKindEmbeddingsPath: Path.Combine(baseDir, "clip-kind-embeddings.bin"),
-            BlipImageEncoderPath: Path.Combine(baseDir, "blip-image-encoder.onnx"),
-            BlipDecoderPath: Path.Combine(baseDir, "blip-decoder.onnx"),
-            BlipVocabPath: Path.Combine(baseDir, "blip-vocab.txt"),
-            BlipMaxTokens: LocalVisionOptions.DefaultBlipMaxTokens,
+            FlorenceVisionEncoderPath: Path.Combine(baseDir, "florence-vision-encoder.onnx"),
+            FlorenceEncoderPath: Path.Combine(baseDir, "florence-encoder.onnx"),
+            FlorenceDecoderPath: Path.Combine(baseDir, "florence-decoder.onnx"),
+            FlorenceEmbedTokensPath: Path.Combine(baseDir, "florence-embed-tokens.onnx"),
+            FlorenceVocabPath: Path.Combine(baseDir, "florence-vocab.json"),
+            FlorenceMergesPath: Path.Combine(baseDir, "florence-merges.txt"),
+            FlorenceAddedTokensPath: Path.Combine(baseDir, "florence-added-tokens.json"),
+            FlorenceMaxTokens: LocalVisionOptions.DefaultFlorenceMaxTokens,
             AutoDownload: false,
             ModelDirectory: baseDir);
     }

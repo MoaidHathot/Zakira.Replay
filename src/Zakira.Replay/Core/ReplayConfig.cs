@@ -266,66 +266,50 @@ public sealed class LocalVisionConfig
 {
     /// <summary>
     /// Sub-mode for the local (no-LLM) vision provider. One of <c>heuristic</c>, <c>clip</c>,
-    /// or <c>clip-blip</c> (default). Controlled at runtime by the <see cref="LocalVisionMode"/>
-    /// enum; this string form is for config-file and env-var consumption.
+    /// or <c>clip-caption</c> (default). The deprecated alias <c>clip-blip</c> is still
+    /// accepted for back-compat with 0.7.x and earlier.
     /// </summary>
-    public string? Mode { get; set; } = "clip-blip";
+    public string? Mode { get; set; } = "clip-caption";
 
     /// <summary>
-    /// Directory containing the CLIP / BLIP ONNX model files. Resolved against the portable
-    /// directory's <c>vision/</c> subfolder when null. Auto-populated by
+    /// Directory containing the CLIP / Florence-2 ONNX model files. Resolved against the
+    /// portable directory's <c>vision/</c> subfolder when null. Auto-populated by
     /// <c>zakira-replay deps install vision</c>.
     /// </summary>
     public string? ModelDirectory { get; set; }
 
-    /// <summary>
-    /// CLIP image-encoder ONNX path. Required for <c>clip</c> and <c>clip-blip</c> modes.
-    /// Heuristic mode ignores it. When null and <see cref="ModelDirectory"/> is set, the file
-    /// is looked up at <c>&lt;ModelDirectory&gt;/clip-image-encoder.onnx</c>.
-    /// </summary>
     public string? ClipImageEncoderPath { get; set; }
-
-    /// <summary>
-    /// CLIP text-encoder ONNX path. Used by the provider to compute zero-shot text embeddings
-    /// for the <c>Kind</c> labels on first use (results are cached on disk at
-    /// <c>clip-kind-embeddings.bin</c> next to the encoder). Required when no pre-computed
-    /// embeddings file exists.
-    /// </summary>
     public string? ClipTextEncoderPath { get; set; }
-
-    /// <summary>
-    /// Path to a pre-computed CLIP text embeddings file (7 vectors × 512 float32 little-endian).
-    /// When present, lets the provider skip loading the CLIP text encoder entirely. Generated
-    /// on first use when <see cref="ClipTextEncoderPath"/> is configured.
-    /// </summary>
     public string? ClipKindEmbeddingsPath { get; set; }
 
-    /// <summary>
-    /// BLIP image-encoder ONNX path. Required for <c>clip-blip</c> mode. Heuristic and clip
-    /// modes ignore it.
-    /// </summary>
-    public string? BlipImageEncoderPath { get; set; }
+    /// <summary>Florence-2 vision-encoder ONNX path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceVisionEncoderPath { get; set; }
+    /// <summary>Florence-2 text-encoder ONNX path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceEncoderPath { get; set; }
+    /// <summary>Florence-2 decoder ONNX path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceDecoderPath { get; set; }
+    /// <summary>Florence-2 embed-tokens ONNX path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceEmbedTokensPath { get; set; }
+    /// <summary>Florence-2 tokenizer vocab.json path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceVocabPath { get; set; }
+    /// <summary>Florence-2 tokenizer merges.txt path. Required for <c>clip-caption</c> mode.</summary>
+    public string? FlorenceMergesPath { get; set; }
+    /// <summary>Florence-2 added_tokens.json path. Optional; only used for &lt;loc_*&gt; tokens during decode.</summary>
+    public string? FlorenceAddedTokensPath { get; set; }
 
     /// <summary>
-    /// BLIP decoder ONNX path. Required for <c>clip-blip</c> mode.
+    /// Quantization variant for the Florence ONNX downloads. One of
+    /// <see cref="LocalVisionOptions.SupportedQuantizations"/>. Defaults to <c>quantized</c> (int8).
     /// </summary>
-    public string? BlipDecoderPath { get; set; }
+    public string? FlorenceQuantization { get; set; }
 
-    /// <summary>
-    /// BLIP tokenizer vocabulary file (WordPiece, one token per line). Required for
-    /// <c>clip-blip</c> mode.
-    /// </summary>
-    public string? BlipVocabPath { get; set; }
-
-    /// <summary>
-    /// Maximum length (in tokens) for the BLIP greedy-decoded caption. Defaults to 40.
-    /// </summary>
-    public int? BlipMaxTokens { get; set; }
+    /// <summary>Maximum length (in tokens) for the Florence greedy-decoded caption. Defaults to 80.</summary>
+    public int? FlorenceMaxTokens { get; set; }
 
     /// <summary>
     /// When true (default), the provider may invoke
-    /// <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the CLIP/BLIP models on
-    /// first use. Set false to disable on-demand downloads entirely (e.g. air-gapped runs).
+    /// <see cref="PortableDependencyInstaller.InstallAsync"/> to fetch the CLIP / Florence models
+    /// on first use. Set false to disable on-demand downloads entirely (e.g. air-gapped runs).
     /// </summary>
     public bool AutoDownload { get; set; } = true;
 }
@@ -1108,27 +1092,48 @@ public sealed class ConfigStore
             case "vision.local.clip.kind-embeddings-path":
                 config.Vision.Local.ClipKindEmbeddingsPath = NormalizeFilePath(value);
                 break;
-            case "vision.local.blipimageencoderpath":
-            case "vision.local.blip-image-encoder-path":
-            case "vision.local.blip.imageencoderpath":
-            case "vision.local.blip.image-encoder-path":
-                config.Vision.Local.BlipImageEncoderPath = NormalizeFilePath(value);
+            case "vision.local.florencevisionencoderpath":
+            case "vision.local.florence-vision-encoder-path":
+            case "vision.local.florence.visionencoderpath":
+                config.Vision.Local.FlorenceVisionEncoderPath = NormalizeFilePath(value);
                 break;
-            case "vision.local.blipdecoderpath":
-            case "vision.local.blip-decoder-path":
-            case "vision.local.blip.decoderpath":
-            case "vision.local.blip.decoder-path":
-                config.Vision.Local.BlipDecoderPath = NormalizeFilePath(value);
+            case "vision.local.florenceencoderpath":
+            case "vision.local.florence-encoder-path":
+            case "vision.local.florence.encoderpath":
+                config.Vision.Local.FlorenceEncoderPath = NormalizeFilePath(value);
                 break;
-            case "vision.local.blipvocabpath":
-            case "vision.local.blip-vocab-path":
-            case "vision.local.blip.vocabpath":
-            case "vision.local.blip.vocab-path":
-                config.Vision.Local.BlipVocabPath = NormalizeFilePath(value);
+            case "vision.local.florencedecoderpath":
+            case "vision.local.florence-decoder-path":
+            case "vision.local.florence.decoderpath":
+                config.Vision.Local.FlorenceDecoderPath = NormalizeFilePath(value);
                 break;
-            case "vision.local.blipmaxtokens":
-            case "vision.local.blip-max-tokens":
-                config.Vision.Local.BlipMaxTokens = ParsePositiveInt(value, key);
+            case "vision.local.florenceembedtokenspath":
+            case "vision.local.florence-embed-tokens-path":
+            case "vision.local.florence.embedtokenspath":
+                config.Vision.Local.FlorenceEmbedTokensPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.florencevocabpath":
+            case "vision.local.florence-vocab-path":
+            case "vision.local.florence.vocabpath":
+                config.Vision.Local.FlorenceVocabPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.florencemergespath":
+            case "vision.local.florence-merges-path":
+            case "vision.local.florence.mergespath":
+                config.Vision.Local.FlorenceMergesPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.florenceaddedtokenspath":
+            case "vision.local.florence-added-tokens-path":
+            case "vision.local.florence.addedtokenspath":
+                config.Vision.Local.FlorenceAddedTokensPath = NormalizeFilePath(value);
+                break;
+            case "vision.local.florencemaxtokens":
+            case "vision.local.florence-max-tokens":
+                config.Vision.Local.FlorenceMaxTokens = ParsePositiveInt(value, key);
+                break;
+            case "vision.local.florencequantization":
+            case "vision.local.florence-quantization":
+                config.Vision.Local.FlorenceQuantization = LocalVisionOptions.NormalizeQuantization(value);
                 break;
             case "vision.local.autodownload":
             case "vision.local.auto-download":
@@ -1293,10 +1298,15 @@ public sealed class ConfigStore
             "vision.local.clipimageencoderpath" or "vision.local.clip-image-encoder-path" or "vision.local.clip.imageencoderpath" or "vision.local.clip.image-encoder-path" => config.Vision.Local.ClipImageEncoderPath,
             "vision.local.cliptextencoderpath" or "vision.local.clip-text-encoder-path" or "vision.local.clip.textencoderpath" or "vision.local.clip.text-encoder-path" => config.Vision.Local.ClipTextEncoderPath,
             "vision.local.clipkindembeddingspath" or "vision.local.clip-kind-embeddings-path" or "vision.local.clip.kindembeddingspath" or "vision.local.clip.kind-embeddings-path" => config.Vision.Local.ClipKindEmbeddingsPath,
-            "vision.local.blipimageencoderpath" or "vision.local.blip-image-encoder-path" or "vision.local.blip.imageencoderpath" or "vision.local.blip.image-encoder-path" => config.Vision.Local.BlipImageEncoderPath,
-            "vision.local.blipdecoderpath" or "vision.local.blip-decoder-path" or "vision.local.blip.decoderpath" or "vision.local.blip.decoder-path" => config.Vision.Local.BlipDecoderPath,
-            "vision.local.blipvocabpath" or "vision.local.blip-vocab-path" or "vision.local.blip.vocabpath" or "vision.local.blip.vocab-path" => config.Vision.Local.BlipVocabPath,
-            "vision.local.blipmaxtokens" or "vision.local.blip-max-tokens" => config.Vision.Local.BlipMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            "vision.local.florencevisionencoderpath" or "vision.local.florence-vision-encoder-path" or "vision.local.florence.visionencoderpath" => config.Vision.Local.FlorenceVisionEncoderPath,
+            "vision.local.florenceencoderpath" or "vision.local.florence-encoder-path" or "vision.local.florence.encoderpath" => config.Vision.Local.FlorenceEncoderPath,
+            "vision.local.florencedecoderpath" or "vision.local.florence-decoder-path" or "vision.local.florence.decoderpath" => config.Vision.Local.FlorenceDecoderPath,
+            "vision.local.florenceembedtokenspath" or "vision.local.florence-embed-tokens-path" or "vision.local.florence.embedtokenspath" => config.Vision.Local.FlorenceEmbedTokensPath,
+            "vision.local.florencevocabpath" or "vision.local.florence-vocab-path" or "vision.local.florence.vocabpath" => config.Vision.Local.FlorenceVocabPath,
+            "vision.local.florencemergespath" or "vision.local.florence-merges-path" or "vision.local.florence.mergespath" => config.Vision.Local.FlorenceMergesPath,
+            "vision.local.florenceaddedtokenspath" or "vision.local.florence-added-tokens-path" or "vision.local.florence.addedtokenspath" => config.Vision.Local.FlorenceAddedTokensPath,
+            "vision.local.florencemaxtokens" or "vision.local.florence-max-tokens" => config.Vision.Local.FlorenceMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            "vision.local.florencequantization" or "vision.local.florence-quantization" => config.Vision.Local.FlorenceQuantization,
             "vision.local.autodownload" or "vision.local.auto-download" => config.Vision.Local.AutoDownload.ToString(),
             "crop.enabled" or "smartcrop.enabled" or "smart-crop.enabled" => config.Crop.Enabled.ToString(),
             "crop.profile" or "smartcrop.profile" or "smart-crop.profile" => config.Crop.Profile,
@@ -1390,10 +1400,15 @@ public sealed class ConfigStore
             ["vision.local.clipImageEncoderPath"] = config.Vision.Local.ClipImageEncoderPath,
             ["vision.local.clipTextEncoderPath"] = config.Vision.Local.ClipTextEncoderPath,
             ["vision.local.clipKindEmbeddingsPath"] = config.Vision.Local.ClipKindEmbeddingsPath,
-            ["vision.local.blipImageEncoderPath"] = config.Vision.Local.BlipImageEncoderPath,
-            ["vision.local.blipDecoderPath"] = config.Vision.Local.BlipDecoderPath,
-            ["vision.local.blipVocabPath"] = config.Vision.Local.BlipVocabPath,
-            ["vision.local.blipMaxTokens"] = config.Vision.Local.BlipMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            ["vision.local.florenceVisionEncoderPath"] = config.Vision.Local.FlorenceVisionEncoderPath,
+            ["vision.local.florenceEncoderPath"] = config.Vision.Local.FlorenceEncoderPath,
+            ["vision.local.florenceDecoderPath"] = config.Vision.Local.FlorenceDecoderPath,
+            ["vision.local.florenceEmbedTokensPath"] = config.Vision.Local.FlorenceEmbedTokensPath,
+            ["vision.local.florenceVocabPath"] = config.Vision.Local.FlorenceVocabPath,
+            ["vision.local.florenceMergesPath"] = config.Vision.Local.FlorenceMergesPath,
+            ["vision.local.florenceAddedTokensPath"] = config.Vision.Local.FlorenceAddedTokensPath,
+            ["vision.local.florenceMaxTokens"] = config.Vision.Local.FlorenceMaxTokens?.ToString(CultureInfo.InvariantCulture),
+            ["vision.local.florenceQuantization"] = config.Vision.Local.FlorenceQuantization,
             ["vision.local.autoDownload"] = config.Vision.Local.AutoDownload.ToString(),
             ["crop.enabled"] = config.Crop.Enabled.ToString(),
             ["crop.profile"] = config.Crop.Profile,

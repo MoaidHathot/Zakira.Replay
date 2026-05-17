@@ -497,14 +497,39 @@ public sealed class PortableDependencyInstaller
             items.Add(new PortableDependencyInstallItem(Vision, destination, installed, file.Url, installed ? "downloaded" : "already exists"));
         }
 
-        if (resolvedMode == LocalVisionMode.ClipBlip)
+        if (resolvedMode == LocalVisionMode.ClipCaption)
         {
-            items.Add(new PortableDependencyInstallItem(
-                Vision,
-                Path.Combine(modelDirectory, LocalVisionOptions.BlipImageEncoderFile),
-                false,
-                string.Empty,
-                "BLIP auto-download is not available in this release. Configure vision.local.blipImageEncoderPath / blipDecoderPath / blipVocabPath manually to point at an existing ONNX export, or stick with --local-vision-mode clip."));
+            // Download Florence-2 ONNX from onnx-community. Track main branch.
+            var quantization = LocalVisionOptions.NormalizeQuantization(
+                Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_VISION_FLORENCE_QUANTIZATION")
+                ?? config.Vision.Local.FlorenceQuantization);
+            var suffix = LocalVisionOptions.QuantizationSuffix(quantization);
+            var florenceBaseUrl = "https://huggingface.co/onnx-community/Florence-2-base-ft/resolve/main";
+
+            // Florence-2 graph + tokenizer file set.
+            // - vision_encoder: image (768x768 RGB) -> visual features [1, 577, 768]
+            // - embed_tokens: token ids -> embeddings (used by encoder + decoder)
+            // - encoder_model: fused image+text embeddings -> encoder hidden states
+            // - decoder_model_merged: KV-cache-enabled autoregressive decoder
+            //   (chosen over decoder_model.onnx for production-grade perf per v2 spec)
+            var florenceFiles = new (string LocalName, string Url)[]
+            {
+                (LocalVisionOptions.FlorenceVisionEncoderFile, $"{florenceBaseUrl}/onnx/vision_encoder{suffix}.onnx"),
+                (LocalVisionOptions.FlorenceEncoderFile,        $"{florenceBaseUrl}/onnx/encoder_model{suffix}.onnx"),
+                (LocalVisionOptions.FlorenceDecoderFile,        $"{florenceBaseUrl}/onnx/decoder_model_merged{suffix}.onnx"),
+                (LocalVisionOptions.FlorenceEmbedTokensFile,    $"{florenceBaseUrl}/onnx/embed_tokens{suffix}.onnx"),
+                (LocalVisionOptions.FlorenceVocabFile,          $"{florenceBaseUrl}/vocab.json"),
+                (LocalVisionOptions.FlorenceMergesFile,         $"{florenceBaseUrl}/merges.txt"),
+                (LocalVisionOptions.FlorenceAddedTokensFile,    $"{florenceBaseUrl}/added_tokens.json")
+            };
+
+            foreach (var file in florenceFiles)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var destination = Path.Combine(modelDirectory, file.LocalName);
+                var installed = await DownloadFileAsync(file.Url, destination, force, progress, cancellationToken).ConfigureAwait(false);
+                items.Add(new PortableDependencyInstallItem(Vision, destination, installed, file.Url, installed ? $"downloaded ({quantization})" : $"already exists ({quantization})"));
+            }
         }
 
         return items;

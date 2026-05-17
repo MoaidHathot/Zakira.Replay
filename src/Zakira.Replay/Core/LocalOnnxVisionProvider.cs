@@ -15,6 +15,9 @@ public sealed class LocalOnnxVisionProvider : IVisionProvider, IDisposable
     private const int ClipImageSize = 224;
     private const int FlorenceImageSize = 768;
     private const int FlorenceHiddenSize = 768;
+    private const int FlorenceDecoderLayers = 6;
+    private const int FlorenceNumHeads = 12;
+    private const int FlorenceHeadDim = 64;
     private const long FlorenceEosTokenId = 2;
     private const long FlorencePadTokenId = 1;
     private const long FlorenceDecoderStartTokenId = 2;
@@ -338,13 +341,33 @@ public sealed class LocalOnnxVisionProvider : IVisionProvider, IDisposable
                 encoderHiddenFlat = encOut.ToArray();
             }
 
-            // 7. Greedy decode.
+            // 7. Greedy decode with KV cache.
+            //    Step 0: use_cache_branch=false, full inputs_embeds, empty past_key_values.
+            //            Capture present.X.{encoder,decoder}.{key,value} into caches.
+            //    Step N>0: use_cache_branch=true, inputs_embeds = embedding of last generated token only,
+            //              past_key_values.X.encoder.* = step 0 outputs (constant),
+            //              past_key_values.X.decoder.* = previous step's present.X.decoder.* (grows by 1 each step).
             var maxTokens = options.FlorenceMaxTokens;
             var generated = new List<long> { FlorenceDecoderStartTokenId };
+            Dictionary<string, (float[] data, int[] dims)>? encoderKVCache = null;
+            Dictionary<string, (float[] data, int[] dims)>? decoderKVCache = null;
+
             for (var step = 0; step < maxTokens; step++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                var nextToken = DecoderStep(encoderHiddenFlat, encoderHiddenDims, attentionMask, generated);
+                var stepTokens = step == 0
+                    ? new[] { FlorenceDecoderStartTokenId }
+                    : new[] { generated[^1] };
+
+                var nextToken = DecoderStepWithCache(
+                    encoderHiddenFlat,
+                    encoderHiddenDims,
+                    attentionMask,
+                    stepTokens,
+                    isFirstStep: step == 0,
+                    ref encoderKVCache,
+                    ref decoderKVCache);
+
                 if (nextToken < 0) return null;
                 if (nextToken == FlorenceEosTokenId && generated.Count > 1) break;
                 generated.Add(nextToken);
@@ -358,71 +381,110 @@ public sealed class LocalOnnxVisionProvider : IVisionProvider, IDisposable
         }
     }
 
-    private long DecoderStep(
+    private long DecoderStepWithCache(
         float[] encoderHiddenFlat,
         int[] encoderHiddenDims,
         long[] encoderAttentionMask,
-        List<long> generated)
+        long[] stepInputIds,
+        bool isFirstStep,
+        ref Dictionary<string, (float[] data, int[] dims)>? encoderKVCache,
+        ref Dictionary<string, (float[] data, int[] dims)>? decoderKVCache)
     {
         var encoderTensor = new DenseTensor<float>(encoderHiddenFlat, encoderHiddenDims);
         var encMaskTensor = new DenseTensor<long>(encoderAttentionMask, [1, encoderAttentionMask.Length]);
-        var inputIds = new DenseTensor<long>(generated.ToArray(), [1, generated.Count]);
 
-        var decoderInputs = new List<NamedOnnxValue>();
-        var decoderMeta = florenceDecoderSession!.InputMetadata;
-
-        if (decoderMeta.ContainsKey("encoder_hidden_states"))
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("encoder_hidden_states", encoderTensor));
-        if (decoderMeta.ContainsKey("encoder_attention_mask"))
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("encoder_attention_mask", encMaskTensor));
-
-        if (decoderMeta.ContainsKey("input_ids"))
+        // Embed step input token(s) via embed_tokens graph.
+        var inputIdsTensor = new DenseTensor<long>(stepInputIds, [1, stepInputIds.Length]);
+        float[] inputEmbedsFlat;
+        using (var embedRun = florenceEmbedTokensSession!.Run([NamedOnnxValue.CreateFromTensor(
+            florenceEmbedTokensSession.InputMetadata.Keys.First(), inputIdsTensor)]))
         {
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("input_ids", inputIds));
+            inputEmbedsFlat = embedRun.First().AsTensor<float>().ToArray();
         }
-        else if (decoderMeta.ContainsKey("decoder_input_ids"))
-        {
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("decoder_input_ids", inputIds));
-        }
-        else if (decoderMeta.ContainsKey("inputs_embeds"))
-        {
-            using var embedRun = florenceEmbedTokensSession!.Run([NamedOnnxValue.CreateFromTensor(
-                florenceEmbedTokensSession.InputMetadata.Keys.First(), inputIds)]);
-            var inputEmbedsFlat = embedRun.First().AsTensor<float>().ToArray();
-            var embedsTensor = new DenseTensor<float>(inputEmbedsFlat, [1, generated.Count, FlorenceHiddenSize]);
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("inputs_embeds", embedsTensor));
-        }
+        var embedsTensor = new DenseTensor<float>(inputEmbedsFlat, [1, stepInputIds.Length, FlorenceHiddenSize]);
 
-        if (decoderMeta.ContainsKey("use_cache_branch"))
+        var decoderInputs = new List<NamedOnnxValue>
         {
-            var useCacheBranch = new DenseTensor<bool>(new[] { false }, [1]);
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor("use_cache_branch", useCacheBranch));
-        }
+            NamedOnnxValue.CreateFromTensor("encoder_hidden_states", encoderTensor),
+            NamedOnnxValue.CreateFromTensor("encoder_attention_mask", encMaskTensor),
+            NamedOnnxValue.CreateFromTensor("inputs_embeds", embedsTensor),
+            NamedOnnxValue.CreateFromTensor("use_cache_branch", new DenseTensor<bool>(new[] { !isFirstStep }, [1])),
+        };
 
-        foreach (var name in decoderMeta.Keys)
+        // Past key values: empty on first step, cached values on subsequent steps.
+        for (var layer = 0; layer < FlorenceDecoderLayers; layer++)
         {
-            if (!name.StartsWith("past_key_values.", StringComparison.Ordinal)) continue;
-            if (decoderInputs.Any(v => v.Name == name)) continue;
-            var emptyTensor = new DenseTensor<float>(Array.Empty<float>(), [1, 12, 0, 64]);
-            decoderInputs.Add(NamedOnnxValue.CreateFromTensor(name, emptyTensor));
+            foreach (var kvKind in new[] { "decoder", "encoder" })
+            {
+                foreach (var part in new[] { "key", "value" })
+                {
+                    var name = $"past_key_values.{layer}.{kvKind}.{part}";
+                    if (isFirstStep)
+                    {
+                        decoderInputs.Add(NamedOnnxValue.CreateFromTensor(name,
+                            new DenseTensor<float>(Array.Empty<float>(), [1, FlorenceNumHeads, 0, FlorenceHeadDim])));
+                    }
+                    else
+                    {
+                        var cache = kvKind == "decoder" ? decoderKVCache : encoderKVCache;
+                        if (cache is null || !cache.TryGetValue(name, out var entry))
+                        {
+                            return -1;
+                        }
+
+                        decoderInputs.Add(NamedOnnxValue.CreateFromTensor(name,
+                            new DenseTensor<float>(entry.data, entry.dims)));
+                    }
+                }
+            }
         }
 
         try
         {
-            using var decoderRun = florenceDecoderSession.Run(decoderInputs);
-            var logits = decoderRun.First(r => r.Name.Contains("logits", StringComparison.OrdinalIgnoreCase)).AsTensor<float>();
-            var dims = logits.Dimensions;
-            if (dims.Length != 3) return -1;
+            using var decoderRun = florenceDecoderSession!.Run(decoderInputs);
 
-            var lastPos = dims[1] - 1;
-            var bestId = 0L;
+            // 1. Logits → argmax at last position.
+            long bestId = -1;
             var bestScore = float.MinValue;
-            for (var v = 0; v < dims[2]; v++)
+            var newDecoderCache = new Dictionary<string, (float[], int[])>(FlorenceDecoderLayers * 2);
+
+            foreach (var result in decoderRun)
             {
-                var score = logits[0, lastPos, v];
-                if (score > bestScore) { bestScore = score; bestId = v; }
+                if (result.Name == "logits")
+                {
+                    var logits = result.AsTensor<float>();
+                    var dims = logits.Dimensions;
+                    if (dims.Length != 3) return -1;
+                    var lastPos = dims[1] - 1;
+                    bestId = 0L;
+                    for (var v = 0; v < dims[2]; v++)
+                    {
+                        var score = logits[0, lastPos, v];
+                        if (score > bestScore) { bestScore = score; bestId = v; }
+                    }
+                }
+                else if (result.Name.StartsWith("present.", StringComparison.Ordinal))
+                {
+                    var pastName = "past_key_values" + result.Name.Substring("present".Length);
+                    var t = result.AsTensor<float>();
+                    var entry = (data: t.ToArray(), dims: t.Dimensions.ToArray());
+                    if (result.Name.Contains(".encoder.", StringComparison.Ordinal))
+                    {
+                        // Encoder cross-attention KV is constant across steps — capture once on first step.
+                        if (isFirstStep)
+                        {
+                            encoderKVCache ??= new Dictionary<string, (float[], int[])>(FlorenceDecoderLayers * 2);
+                            encoderKVCache[pastName] = entry;
+                        }
+                    }
+                    else
+                    {
+                        newDecoderCache[pastName] = entry;
+                    }
+                }
             }
 
+            decoderKVCache = newDecoderCache;
             return bestId;
         }
         catch

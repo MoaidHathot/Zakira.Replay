@@ -62,9 +62,16 @@ warning codes, env vars, config keys) so orchestrators can plan migrations.
 - All 50 results tagged `"provider": "local"`. Run on disk: `runs/demo-vision-d-florence/`.
 
 ### Honest caveats
-- **No KV-cache decoding.** Each decoder step recomputes from scratch (`decoder_model_merged.onnx`
-  with `use_cache_branch=false`). Caption generation takes a few seconds per frame on CPU.
-  KV-cache support is a v3 follow-up.
+- **KV-cache decoding is enabled** (`decoder_model_merged.onnx` with `use_cache_branch=true`
+  after step 0; encoder cross-attention K/V captured once and reused; decoder self-attention
+  K/V threaded forward). Measured speedup on the int8 quantized models is modest — ~12% on
+  a 3-frame benchmark (2.76 s/frame uncached → 2.42 s/frame cached) — because the
+  autoregressive decoder loop is only ~12% of per-frame wall-clock time. The dominant cost
+  is the vision encoder + image preprocessing subprocess, neither of which KV-cache touches.
+  Captions also drift slightly between the cached and uncached paths (different word
+  choices, same scene) because int8 op fusion differs between the `use_cache_branch=true/false`
+  subtrees of the merged graph; greedy decoding amplifies that into different tokens. Both
+  captions are coherent and accurate.
 - **Florence-2-base captions are smaller-model captions.** Useful and grammatical but less
   detailed than a frontier vision LLM. Always paired with literal OCR text in `freeText` so
   the trustworthy part is preserved.

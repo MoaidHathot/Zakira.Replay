@@ -21,7 +21,82 @@ The first implementation focuses on durable extraction primitives:
 - Artifact folders with `manifest.json`, `metadata.json`, `evidence.json`, `transcript.md`, frames, slides, structured warnings, and a per-speaker registry.
 - CLI and MCP stdio entrypoints.
 
-Dependencies are not installed automatically unless explicitly configured. Missing dependencies fail with a clear error.
+System binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) and the search-embedding model are opt-in: install them upfront with `zakira-replay deps install`, or set `dependencies.autoDownload=true` once and let Zakira.Replay fetch them on first need. Local providers (OCR, Whisper STT, diarization, local vision) **auto-download their models on first use by default** — opt out per-provider if you want strict offline control. Missing dependencies always fail with a clear, actionable error.
+
+## Install
+
+Zakira.Replay ships as a regular .NET global tool on NuGet. Requires the **.NET 10 SDK** (or runtime).
+
+```bash
+# Install once, run anywhere (recommended for repeated use):
+dotnet tool install -g Zakira.Replay
+zakira-replay version
+
+# Or run one-off without installing (.NET 10 SDK only — no install, no cleanup):
+dnx Zakira.Replay version
+```
+
+Both invocations expose the same `zakira-replay` command surface documented below.
+
+## Getting Started
+
+Confirm the tool launches and inspect environment readiness:
+
+```bash
+zakira-replay version
+zakira-replay doctor          # one-line per dependency: found / missing / version
+zakira-replay info --json     # machine-readable resolved-paths + capability flags
+```
+
+Install the OS-level binaries Zakira.Replay relies on. They are **not bundled**; `deps install` fetches portable copies into the configured portable directory (override with `dependencies.portableDirectory` or `ZAKIRA_REPLAY_PORTABLE_DIRECTORY`):
+
+```bash
+# Media essentials (ffmpeg + ffprobe + yt-dlp). Required for almost everything.
+zakira-replay deps install media
+
+# Optional local-only providers — install only what you plan to use:
+zakira-replay deps install ocr              # RapidOCR PP-OCRv5 latin pack (~30 MB)
+zakira-replay deps install whisper-model    # local Whisper ggml model for --llm-provider local-whisper
+zakira-replay deps install diarization      # pyannote-segmentation + 3D-Speaker ONNX (for --diarize)
+zakira-replay deps install onnx             # all-MiniLM-L6-v2 search embedding model (for sqlite-onnx)
+
+# Or install everything at once:
+zakira-replay deps install all
+```
+
+### Or: enable on-demand auto-download
+
+If you'd rather have Zakira.Replay fetch system tools the moment they're needed (instead of running `deps install` upfront), flip one flag:
+
+```bash
+zakira-replay config set dependencies.autoDownload true
+```
+
+After that, the first invocation that needs `yt-dlp` auto-fetches it from the official GitHub release (Windows, Linux x64, Linux ARM64, macOS).
+
+Two caveats:
+
+- **`ffmpeg` / `ffprobe`** portable auto-download is **Windows-x64 only**. On Linux/macOS install through your package manager (`apt install ffmpeg`, `brew install ffmpeg`, etc.).
+- The **ONNX search embedding model** is separately opt-in: `zakira-replay config set search.onnx.autoDownload true` to enable for the `sqlite-onnx` search backend.
+
+Local providers (OCR, Whisper STT, diarization, local vision) already auto-download their models on first use by default — no extra flag required.
+
+Run your first analysis. Output lands under `runs/<source-slug>-<sha8>/` (the run-id is deterministic per source so `--cache` reuse "just works"):
+
+```bash
+zakira-replay analyze https://www.youtube.com/watch?v=dQw4w9WgXcQ
+```
+
+Inspect what came out:
+
+```bash
+ls runs/                              # find the generated run folder
+cat runs/<run-id>/manifest.json       # pipeline timings, dependency snapshot, artifact index
+cat runs/<run-id>/transcript.md       # speaker-attributed transcript
+cat runs/<run-id>/evidence.json       # structured timestamped facts for LLM agents
+```
+
+For one-off ad-hoc operations without a full analyze run, see `zakira-replay frames`, `clip`, `transcribe`, and `search` further down. For agent integration, see [MCP Jobs](#mcp-jobs) and [Agent Skills](#agent-skills). For default behaviour, override flags, and per-stage configuration, continue with [Commands](#commands), [Defaults](#defaults), and [Dependency Configuration](#dependency-configuration).
 
 ## Commands
 
@@ -83,7 +158,20 @@ Zakira.Replay resolves dependency paths in this order:
 
 Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr [--language <pack>]` to download a RapidOCR PP-OCRv5 language pack for the local OCR provider (default `latin`; other packs: `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`), `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path, or `zakira-replay deps install diarization` to download the pyannote-segmentation-3.0 and 3D-Speaker ONNX models used by the `--diarize` flag. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, the configured OCR language pack, the default Whisper model, and the diarization models.
 
-To allow on-demand downloads when a dependency is first required, set `dependencies.autoDownload=true`. To allow ONNX model download when `sqlite-onnx` search needs model files, set `search.onnx.autoDownload=true`. Both are `false` by default.
+### Auto-download flags
+
+Zakira.Replay has six independent `autoDownload` flags. **System tools and the search model are opt-in (default `false`); local-provider models are opt-out (default `true`).** Each flag triggers fetch-on-first-use without requiring an upfront `deps install` run:
+
+| Flag | Default | Triggers when |
+|---|---|---|
+| `dependencies.autoDownload` | `false` | `yt-dlp` / `ffmpeg` / `ffprobe` are needed and missing (portable `ffmpeg` is Windows-x64 only) |
+| `search.onnx.autoDownload` | `false` | The `sqlite-onnx` search backend needs the all-MiniLM-L6-v2 embedding model |
+| `ocr.local.autoDownload` | **`true`** | A local OCR run needs the RapidOCR PP-OCRv5 language pack |
+| `llm.localWhisper.autoDownload` | **`true`** | `--llm-provider local-whisper` needs a Whisper ggml model |
+| `diarization.autoDownload` | **`true`** | `--diarize` needs the sherpa-onnx (pyannote + 3D-Speaker) models |
+| `vision.local.autoDownload` | **`true`** | `--vision-provider local` needs CLIP / Florence ONNX models |
+
+Set any flag with `zakira-replay config set <flag> <true|false>`. To go strictly offline, flip the four local-provider flags to `false` and pre-install everything with `zakira-replay deps install all`.
 
 The global config path is resolved in this order:
 

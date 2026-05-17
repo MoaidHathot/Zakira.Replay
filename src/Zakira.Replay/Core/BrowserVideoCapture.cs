@@ -26,7 +26,9 @@ public sealed record BrowserCaptureRequest(
     int JpegQuality,
     bool CaptureCaptions,
     int MaxCaptionBytes,
-    string? AuthStorageStatePath = null);
+    string? AuthStorageStatePath = null,
+    string? EdgeUserDataDir = null,
+    string? EdgeProfileDirectory = null);
 
 public sealed record BrowserCaptureResult(
     IReadOnlyList<FrameArtifact> Frames,
@@ -68,21 +70,82 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
 
         IPlaywright? playwright = null;
         IBrowser? browser = null;
+        IBrowserContext? context = null;
         try
         {
             playwright = await Playwright.CreateAsync().ConfigureAwait(false);
-            browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
-            {
-                ExecutablePath = edge,
-                Headless = true,
-                Args = ["--disable-gpu"]
-            }).ConfigureAwait(false);
 
-            var context = await browser.NewContextAsync(new BrowserNewContextOptions
+            if (!string.IsNullOrWhiteSpace(request.EdgeUserDataDir))
             {
-                ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
-                StorageStatePath = string.IsNullOrWhiteSpace(request.AuthStorageStatePath) ? null : request.AuthStorageStatePath
-            }).ConfigureAwait(false);
+                // Persistent-context mode: Playwright launches Edge with --user-data-dir, so
+                // Chromium reads/writes cookies in-place using its DPAPI-encrypted SQLite
+                // (per-user, per-machine on Windows). No plaintext bearer tokens persisted by
+                // us. Pre-flight checks below abort with actionable warnings if the profile
+                // isn't usable.
+                var profileSubdir = string.IsNullOrWhiteSpace(request.EdgeProfileDirectory) ? "Default" : request.EdgeProfileDirectory;
+                if (!Directory.Exists(request.EdgeUserDataDir))
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.CaptureBrowserProfileDirMissing,
+                        $"Configured Edge user-data-dir does not exist: '{request.EdgeUserDataDir}'. " +
+                        $"Run `zakira-replay auth init-edge-profile` to create and initialize it, or set " +
+                        $"`capture.browser.edgeUserDataDir` to an existing directory.",
+                        Source: "playwright",
+                        Severity: ReplayWarningSeverities.Error));
+                    return new BrowserCaptureResult([], null, warnings, []);
+                }
+
+                var singletonLock = Path.Combine(request.EdgeUserDataDir, profileSubdir, "SingletonLock");
+                if (File.Exists(singletonLock))
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.CaptureBrowserProfileLocked,
+                        $"Edge profile lock detected at '{singletonLock}'. Close any Edge windows using " +
+                        $"user-data-dir '{request.EdgeUserDataDir}' before retrying.",
+                        Source: "playwright",
+                        Severity: ReplayWarningSeverities.Error));
+                    return new BrowserCaptureResult([], null, warnings, []);
+                }
+
+                try
+                {
+                    context = await playwright.Chromium.LaunchPersistentContextAsync(
+                        request.EdgeUserDataDir,
+                        new BrowserTypeLaunchPersistentContextOptions
+                        {
+                            ExecutablePath = edge,
+                            Headless = true,
+                            Args = ["--disable-gpu", $"--profile-directory={profileSubdir}"],
+                            ViewportSize = new ViewportSize { Width = 1920, Height = 1080 }
+                        }).ConfigureAwait(false);
+                }
+                catch (PlaywrightException ex)
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.CaptureBrowserProfileLaunchFailed,
+                        $"Edge persistent-context launch failed for user-data-dir '{request.EdgeUserDataDir}' " +
+                        $"(profile '{profileSubdir}'): {ex.Message}. Try re-initialising with " +
+                        $"`zakira-replay auth init-edge-profile`.",
+                        Source: "playwright",
+                        Severity: ReplayWarningSeverities.Error));
+                    return new BrowserCaptureResult([], null, warnings, []);
+                }
+            }
+            else
+            {
+                browser = await playwright.Chromium.LaunchAsync(new BrowserTypeLaunchOptions
+                {
+                    ExecutablePath = edge,
+                    Headless = true,
+                    Args = ["--disable-gpu"]
+                }).ConfigureAwait(false);
+
+                context = await browser.NewContextAsync(new BrowserNewContextOptions
+                {
+                    ViewportSize = new ViewportSize { Width = 1920, Height = 1080 },
+                    StorageStatePath = string.IsNullOrWhiteSpace(request.AuthStorageStatePath) ? null : request.AuthStorageStatePath
+                }).ConfigureAwait(false);
+            }
 
             var page = await context.NewPageAsync().ConfigureAwait(false);
 
@@ -105,6 +168,21 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             }).ConfigureAwait(false);
 
             await page.WaitForTimeoutAsync(1_000).ConfigureAwait(false);
+
+            // Inspect the post-navigation URL and page content to detect a sign-in redirect
+            // BEFORE we attempt to drive playback. Without this check a missing/expired
+            // browser session manifests as a misleading CAPTURE_DURATION_UNRESOLVED 20s later;
+            // here we abort early with an actionable message.
+            if (await DetectAuthFailureAsync(page, request, warnings).ConfigureAwait(false))
+            {
+                IReadOnlyList<BrowserCapturedCaption> authFailCaptions = [];
+                if (captionCollector is not null)
+                {
+                    page.Response -= captionCollector.OnResponse;
+                    authFailCaptions = await captionCollector.PersistAsync(cancellationToken).ConfigureAwait(false);
+                }
+                return new BrowserCaptureResult([], null, warnings, authFailCaptions);
+            }
 
             await PlayVideoAsync(page, request, warnings, progress).ConfigureAwait(false);
 
@@ -146,12 +224,104 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
         }
         finally
         {
+            if (context is not null && browser is null)
+            {
+                // Persistent-context mode: we own the context; dispose it explicitly. In
+                // StorageState mode the context lives on the browser, so disposing the
+                // browser cleans it up.
+                await context.DisposeAsync().ConfigureAwait(false);
+            }
             if (browser is not null)
             {
                 await browser.DisposeAsync().ConfigureAwait(false);
             }
             playwright?.Dispose();
         }
+    }
+
+    /// <summary>
+    /// Inspect the post-navigation URL and (cheaply) page content to detect whether the page
+    /// redirected to a sign-in flow or surfaced an MFA challenge. Emits
+    /// <c>CAPTURE_BROWSER_AUTH_REQUIRED</c> or <c>CAPTURE_BROWSER_AUTH_MFA_DETECTED</c> as
+    /// appropriate. Returns <c>true</c> when capture should be aborted.
+    /// </summary>
+    private static async Task<bool> DetectAuthFailureAsync(IPage page, BrowserCaptureRequest request, List<ReplayWarning> warnings)
+    {
+        var finalUrl = page.Url ?? string.Empty;
+        if (LooksLikeLoginPage(finalUrl))
+        {
+            var hint = string.IsNullOrWhiteSpace(request.EdgeUserDataDir)
+                ? "Run `zakira-replay auth init-edge-profile --url <site>` (recommended) " +
+                  "or `zakira-replay auth login <profile>` and pass `--auth-profile <profile>` to retry."
+                : $"Run `zakira-replay auth init-edge-profile --url <site>` to re-sign in against " +
+                  $"user-data-dir '{request.EdgeUserDataDir}' and retry.";
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptureBrowserAuthRequired,
+                $"Page redirected to a sign-in URL ({finalUrl}). The browser context is not " +
+                $"signed in to the target site. {hint}",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Error));
+            return true;
+        }
+
+        // Cheap content check for the canonical Microsoft MFA selectors. These selectors
+        // come from public Entra ID / Azure AD sign-in HTML; if you see them, the browser
+        // is on an interactive MFA challenge that headless Playwright cannot satisfy.
+        try
+        {
+            var mfa = await page.EvaluateAsync<bool>(@"
+                () => {
+                    if (document.querySelector('#idDiv_SAOTCC_OTC') !== null) return true;
+                    if (document.querySelector('#idDiv_SAOTCS_Proofs') !== null) return true;
+                    if (document.querySelector('input[name=""otc""]') !== null) return true;
+                    if (document.querySelector('#idRichContext_DisplaySign') !== null) return true;
+                    return false;
+                }").ConfigureAwait(false);
+            if (mfa)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.CaptureBrowserAuthMfaDetected,
+                    $"Page rendered a Microsoft MFA challenge ({finalUrl}) that headless capture " +
+                    $"cannot satisfy. Re-run `zakira-replay auth init-edge-profile --url <site>` and " +
+                    $"complete MFA interactively to clear the challenge.",
+                    Source: "playwright",
+                    Severity: ReplayWarningSeverities.Error));
+                return true;
+            }
+        }
+        catch (PlaywrightException)
+        {
+            // The evaluate failed (unusual). Don't fail the capture for this; let the
+            // duration probe make the call.
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Pattern-match the final URL against canonical Microsoft sign-in / SAML / OAuth domains.
+    /// Conservative: misses are fine (we fall through to the standard duration probe), false
+    /// positives would needlessly abort otherwise-valid captures.
+    /// </summary>
+    internal static bool LooksLikeLoginPage(string finalUrl)
+    {
+        if (string.IsNullOrWhiteSpace(finalUrl))
+        {
+            return false;
+        }
+
+        var u = finalUrl.ToLowerInvariant();
+        return u.Contains("login.microsoftonline.com")
+            || u.Contains("login.live.com")
+            || u.Contains("login.windows.net")
+            || u.Contains("login.microsoftonline.us")
+            || u.Contains("/account/signin")
+            || u.Contains("/account/login")
+            || u.Contains("/oauth2/authorize")
+            || u.Contains("/saml/login")
+            || u.Contains("/_layouts/15/wopi.ashx?ru=")
+            || u.Contains("login.partner.microsoftonline.cn")
+            || u.Contains("idsrv/account/login");
     }
 
     private static async Task PlayVideoAsync(IPage page, BrowserCaptureRequest request, List<ReplayWarning> warnings, IProgress<string>? progress)

@@ -111,6 +111,63 @@ public static class ReplayWarningCodes
 
     public const string AuthProfileLoadFailed = "AUTH_PROFILE_LOAD_FAILED";
 
+    /// <summary>
+    /// The dedicated Edge user-data-dir resolved from <c>capture.browser.edgeUserDataDir</c>
+    /// (or its <c>%LOCALAPPDATA%\Zakira.Replay\edge-profile</c> default) has no Cookies file
+    /// inside the named profile sub-folder, so persistent-context capture cannot reuse a
+    /// prior sign-in. Severity is <c>info</c>: capture falls back to the StorageState path
+    /// (anonymous browser context unless <c>--auth-profile</c> is also configured).
+    /// Remediation: <c>zakira-replay auth init-edge-profile</c>.
+    /// </summary>
+    public const string CaptureBrowserProfileNotInitialized = "CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED";
+
+    /// <summary>
+    /// The configured <c>capture.browser.edgeUserDataDir</c> resolves to a path whose parent
+    /// directory does not exist. Severity is <c>error</c>; capture aborts. Fix the config
+    /// or create the directory.
+    /// </summary>
+    public const string CaptureBrowserProfileDirMissing = "CAPTURE_BROWSER_PROFILE_DIR_MISSING";
+
+    /// <summary>
+    /// A <c>SingletonLock</c> file inside the configured profile sub-folder indicates Edge
+    /// (or another Chromium-based process) is already using the user-data-dir. Severity is
+    /// <c>error</c>; capture aborts. Close the running Edge instance and retry.
+    /// </summary>
+    public const string CaptureBrowserProfileLocked = "CAPTURE_BROWSER_PROFILE_LOCKED";
+
+    /// <summary>
+    /// <see cref="Microsoft.Playwright.IBrowserType.LaunchPersistentContextAsync"/> threw
+    /// during persistent-context capture (corrupt profile, DPAPI failure, incompatible Edge
+    /// version, etc.). Severity is <c>error</c>; capture aborts. The Playwright exception
+    /// message is included.
+    /// </summary>
+    public const string CaptureBrowserProfileLaunchFailed = "CAPTURE_BROWSER_PROFILE_LAUNCH_FAILED";
+
+    /// <summary>
+    /// Post-navigation URL inspection matched a known Microsoft / SAML / OAuth sign-in
+    /// domain, indicating the page redirected to a login page rather than serving the
+    /// requested content. Severity is <c>error</c>; capture aborts before duration probing
+    /// to avoid misleading <c>CAPTURE_DURATION_UNRESOLVED</c> downstream. Remediation:
+    /// re-run <c>zakira-replay auth init-edge-profile</c> (persistent-context mode) or
+    /// <c>zakira-replay auth login &lt;profile&gt;</c> (StorageState mode) and retry.
+    /// </summary>
+    public const string CaptureBrowserAuthRequired = "CAPTURE_BROWSER_AUTH_REQUIRED";
+
+    /// <summary>
+    /// Post-navigation the page contains a Microsoft MFA challenge selector (e.g. an OTP
+    /// input or the "Approve sign-in request" prompt), which headless Playwright cannot
+    /// satisfy. Severity is <c>error</c>; capture aborts. Re-init the profile interactively
+    /// to clear the MFA challenge.
+    /// </summary>
+    public const string CaptureBrowserAuthMfaDetected = "CAPTURE_BROWSER_AUTH_MFA_DETECTED";
+
+    /// <summary>
+    /// Both <c>--auth-profile</c> and an initialized <c>capture.browser.edgeUserDataDir</c>
+    /// are configured. Persistent-context wins; the StorageState profile is ignored.
+    /// Severity is <c>info</c> for auditability.
+    /// </summary>
+    public const string CaptureProfileConflict = "CAPTURE_PROFILE_CONFLICT";
+
     public const string ClipMediaUrlUnresolved = "CLIP_MEDIA_URL_UNRESOLVED";
 
     public const string FrameCaptureMediaUrlUnresolved = "FRAME_CAPTURE_MEDIA_URL_UNRESOLVED";

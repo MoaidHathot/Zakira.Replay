@@ -7,6 +7,66 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [Unreleased] — Dedicated Edge profile for browser capture
+
+### Added
+- **`zakira-replay auth init-edge-profile`** — one-command per-machine setup of a dedicated
+  Microsoft Edge user-data-dir for browser-capture mode. Launches the real Edge binary (no
+  Playwright automation surface) with `--user-data-dir <configured-dir>`, waits for the user
+  to sign in interactively, and verifies a Cookies file appeared after Edge exits. Cookies
+  are stored in Edge's native DPAPI-encrypted SQLite (per-user, per-machine on Windows;
+  Keychain on macOS; libsecret/KWallet on Linux) so the on-disk auth state is not a portable
+  bearer token like the `StorageState` JSON produced by `auth login`.
+- **`capture.browser.edgeUserDataDir`** config key — absolute path to the dedicated Edge
+  user-data-dir. Stored verbatim (env-var literals like `%LOCALAPPDATA%` preserved) so the
+  config travels across machines; expansion happens at read time. Default
+  `%LOCALAPPDATA%\Zakira.Replay\edge-profile` (resolved per-machine via
+  `Environment.SpecialFolder.LocalApplicationData`).
+- **`capture.browser.edgeProfileDirectory`** config key — Chromium `--profile-directory` value
+  (sub-folder inside `EdgeUserDataDir`). Defaults to `"Default"`.
+- **Persistent-context capture path** in `PlaywrightVideoCaptureClient` — when the configured
+  Edge user-data-dir contains a Cookies file under the named sub-folder, capture switches
+  from `LaunchAsync` + `NewContextAsync(StorageStatePath)` to
+  `LaunchPersistentContextAsync(userDataDir, ...)`. Activates implicitly; no CLI flag needed.
+- **Post-navigation auth-failure detection** — capture inspects the final URL against
+  canonical Microsoft / OAuth / SAML sign-in domains and probes for Entra ID MFA challenge
+  selectors before duration probing. Replaces the misleading `CAPTURE_DURATION_UNRESOLVED`
+  timeout that previously hid expired sessions.
+- **`edge-profile` synthetic dependency** in `doctor` output — reports `ready` / `not
+  initialized` / `locked` / `missing` for the configured Edge user-data-dir, mirroring the
+  existing `whisper-model`, `ocr-models`, `vision-models` entries.
+
+### Warning codes added
+- `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED` (info) — Edge profile dir has no Cookies file
+  yet. Capture falls back to the StorageState path; run `auth init-edge-profile` to upgrade.
+- `CAPTURE_BROWSER_PROFILE_DIR_MISSING` (error) — explicit `edgeUserDataDir` points at a
+  non-existent directory; capture aborts.
+- `CAPTURE_BROWSER_PROFILE_LOCKED` (error) — `SingletonLock` present inside the profile
+  sub-folder; another Edge process is using the dir. Close Edge and retry.
+- `CAPTURE_BROWSER_PROFILE_LAUNCH_FAILED` (error) — `LaunchPersistentContextAsync` threw
+  (corrupt profile, DPAPI unavailable, incompatible Edge version). Playwright message
+  included.
+- `CAPTURE_BROWSER_AUTH_REQUIRED` (error) — post-navigation URL matched a sign-in domain;
+  the browser context is not signed in. Re-run `auth init-edge-profile --url <site>`.
+- `CAPTURE_BROWSER_AUTH_MFA_DETECTED` (error) — page contains a Microsoft MFA challenge
+  selector that headless capture cannot satisfy. Re-init interactively.
+- `CAPTURE_PROFILE_CONFLICT` (info) — both `--auth-profile` and an initialized
+  `edgeUserDataDir` were supplied; persistent-context wins.
+
+### Changed
+- `BrowserCaptureRequest` record gained two optional fields (`EdgeUserDataDir`,
+  `EdgeProfileDirectory`). Additive; existing call sites compile unchanged.
+- `auth` subcommand usage hint extended to list `init-edge-profile`.
+
+### Migration notes
+- Existing users who never set `capture.browser.edgeUserDataDir` see one new info-level
+  warning per browser-capture run: `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED`. Behaviour is
+  otherwise unchanged — capture falls back to the StorageState path. Run
+  `zakira-replay auth init-edge-profile` once to silence the warning and start using
+  DPAPI-encrypted cookies.
+- The config file remains backward-compatible; the two new keys default to null. Existing
+  StorageState auth profiles continue to work via the `--auth-profile` flag.
+
 ## [Unreleased] — Florence-2 local image captioner (replaces BLIP)
 
 ### Added

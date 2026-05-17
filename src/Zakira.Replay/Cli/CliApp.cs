@@ -198,6 +198,9 @@ public static class CliApp
         var visionReport = BuildVisionDoctorReport();
         reports.Add(visionReport);
 
+        var edgeProfileReport = BuildEdgeProfileDoctorReport();
+        reports.Add(edgeProfileReport);
+
         if (parsed.GetBool("json", defaultValue: false))
         {
             stdout.WriteLine(JsonSerializer.Serialize(new DoctorReport(DateTimeOffset.UtcNow, reports), CliJson.Options));
@@ -382,6 +385,74 @@ public static class CliApp
         {
             return new DoctorDependencyReport(
                 Name: "diarization-models",
+                IsFound: false,
+                IsRunnable: false,
+                Path: null,
+                Source: "config",
+                Message: ex.Message,
+                RunnableError: ex.Message);
+        }
+    }
+
+    /// <summary>
+    /// Inspect the resolved dedicated Edge profile directory (configured via
+    /// <c>capture.browser.edgeUserDataDir</c> or its <c>%LOCALAPPDATA%\Zakira.Replay\edge-profile</c>
+    /// default) and report whether it is ready for persistent-context capture. States: <c>ready</c>,
+    /// <c>not initialized</c>, <c>locked</c>, <c>missing</c>.
+    /// </summary>
+    private static DoctorDependencyReport BuildEdgeProfileDoctorReport()
+    {
+        try
+        {
+            var config = new ConfigStore().Load();
+            var userDataDir = config.Capture.Browser.ResolveEdgeUserDataDir();
+            var profileDirectory = config.Capture.Browser.ResolveEdgeProfileDirectory();
+            var dirExists = Directory.Exists(userDataDir);
+            var initialized = config.Capture.Browser.IsEdgeProfileInitialized();
+            var singletonLock = config.Capture.Browser.GetEdgeProfileSingletonLockPath();
+            var isLocked = File.Exists(singletonLock);
+
+            string message;
+            bool isFound;
+            string? runnableError;
+            if (isLocked)
+            {
+                message = $"profile '{profileDirectory}' is locked by a running Edge instance ({singletonLock})";
+                isFound = false;
+                runnableError = "Close Edge before running analyze.";
+            }
+            else if (initialized)
+            {
+                message = $"profile '{profileDirectory}' ready (DPAPI-encrypted cookies present)";
+                isFound = true;
+                runnableError = null;
+            }
+            else if (!dirExists)
+            {
+                message = $"directory does not exist. Run `zakira-replay auth init-edge-profile` to create it.";
+                isFound = false;
+                runnableError = "user-data-dir missing";
+            }
+            else
+            {
+                message = $"directory exists but profile '{profileDirectory}' has no Cookies yet. Run `zakira-replay auth init-edge-profile`.";
+                isFound = false;
+                runnableError = "profile not initialized";
+            }
+
+            return new DoctorDependencyReport(
+                Name: "edge-profile",
+                IsFound: isFound,
+                IsRunnable: isFound,
+                Path: userDataDir,
+                Source: "config",
+                Message: message,
+                RunnableError: runnableError);
+        }
+        catch (Exception ex)
+        {
+            return new DoctorDependencyReport(
+                Name: "edge-profile",
                 IsFound: false,
                 IsRunnable: false,
                 Path: null,
@@ -1002,7 +1073,7 @@ public static class CliApp
     {
         if (args.Length == 0)
         {
-            throw new ReplayException("Usage: zakira-replay auth <login|list|show|clear|path> [profile-name]");
+            throw new ReplayException("Usage: zakira-replay auth <login|init-edge-profile|list|show|clear|path> [profile-name]");
         }
 
         var configStore = new ConfigStore();
@@ -1035,6 +1106,30 @@ public static class CliApp
 
                 stdout.WriteLine($"Profile slug: {AuthProfileStore.SlugifyProfileName(profileName)}");
                 return 0;
+            }
+
+            case "init-edge-profile":
+            case "edge-init":
+            case "edge-profile-init":
+            {
+                var parsed = CommandOptions.Parse(args.Skip(1).ToArray());
+                var startUrl = parsed.Get("url") ?? parsed.Get("start-url");
+                var userDataDirOverride = parsed.Get("user-data-dir") ?? parsed.Get("edge-user-data-dir");
+                var profileDirOverride = parsed.Get("profile-directory") ?? parsed.Get("edge-profile-directory");
+
+                var userDataDir = string.IsNullOrWhiteSpace(userDataDirOverride)
+                    ? config.Capture.Browser.ResolveEdgeUserDataDir()
+                    : Path.GetFullPath(Environment.ExpandEnvironmentVariables(userDataDirOverride));
+                var profileDirectory = string.IsNullOrWhiteSpace(profileDirOverride)
+                    ? config.Capture.Browser.ResolveEdgeProfileDirectory()
+                    : profileDirOverride;
+
+                var initService = new EdgeProfileInitService(new DependencyResolver(config));
+                var result = await initService.RunAsync(
+                    new EdgeProfileInitRequest(userDataDir, profileDirectory, startUrl),
+                    stdout,
+                    cancellationToken).ConfigureAwait(false);
+                return result.Initialized ? 0 : 1;
             }
 
             case "list":
@@ -1117,7 +1212,7 @@ public static class CliApp
             }
 
             default:
-                throw new ReplayException("Usage: zakira-replay auth <login|list|show|clear|path> [profile-name]");
+                throw new ReplayException("Usage: zakira-replay auth <login|init-edge-profile|list|show|clear|path> [profile-name]");
         }
     }
 
@@ -1350,6 +1445,7 @@ public static class CliApp
         stdout.WriteLine("  zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--language latin|chinese|english|korean|cyrillic|arabic|devanagari|greek|telugu|tamil] [--force]  # defaults: target=media, --whisper-model=small, --language=latin");
         stdout.WriteLine("  zakira-replay deps path");
         stdout.WriteLine("  zakira-replay auth login <profile-name> [--url <start-url>]");
+        stdout.WriteLine("  zakira-replay auth init-edge-profile [--url <start-url>] [--user-data-dir <path>] [--profile-directory <name>]   # one-command per-machine setup of the dedicated Edge profile used by browser capture (DPAPI-encrypted cookies)");
         stdout.WriteLine("  zakira-replay auth list");
         stdout.WriteLine("  zakira-replay auth show <profile-name>");
         stdout.WriteLine("  zakira-replay auth clear <profile-name>");

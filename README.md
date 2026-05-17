@@ -1,25 +1,18 @@
 # Zakira.Replay
 
-Zakira.Replay is a .NET 10 CLI/global tool and MCP server for turning video sources into timestamped evidence that LLM agents can analyze.
+**Let LLMs and AI agents "watch" video.**
 
-It is part of the **Zakira** family of agent-cognition primitives:
+LLMs cannot ingest video natively. Zakira.Replay turns any video source — YouTube URL, conference recording, course lecture, meeting capture, local `.mp4` — into the durable, timestamped artifacts an agent can actually reason over. Instead of pretending it watched a 90-minute talk, the agent quotes specific moments with timecodes from artifacts on disk.
 
-- [Zakira.Imprint](https://github.com/MoaidHathot/Zakira.Imprint) — ship AI Skills, custom instructions, and MCP server configs alongside NuGet packages.
-- [Zakira.Recall](https://www.nuget.org/packages/Zakira.Recall) — local CLI and MCP server for web search, fetch, and research.
-- [Zakira.Exchange](https://www.nuget.org/packages/Zakira.Exchange) — MCP server and CLI for AI agent memory storage and semantic search.
-- **Zakira.Replay** — turn videos into replayable evidence (this package).
+The pipeline produces three complementary views of the same video so an agent can pick whichever fits the question:
 
-The first implementation focuses on durable extraction primitives:
+- **Transcripts** — speaker-attributed text from existing captions (via `yt-dlp` for URLs, sidecar `.vtt`/`.srt` for local files) when available, or local Whisper STT (`--llm-provider local-whisper`) when no captions exist. Silence-aware chunking handles long-form audio without hitting per-request limits. Optional local speaker diarization (`--diarize`, sherpa-onnx + pyannote + 3D-Speaker) attributes audio when caption tags don't.
+- **Vision** — representative frames extracted at ffmpeg scene-change boundaries, then routed through OCR (local RapidOCR PP-OCRv5 by default, or LLM-routed) and structured vision analysis (local CLIP / Florence-2 on-device, or GitHub Copilot SDK / OpenAI / Azure OpenAI / Ollama). Perceptual-hash slide grouping runs OCR and vision once per unique on-screen slide and records first/last visible timestamps as facts.
+- **Structured evidence** — every run lands in `runs/<source-slug>-<sha8>/` with `manifest.json` (pipeline timings + dependency snapshot), `evidence.json` (timestamped facts), `transcript.md`, extracted frames, slides, per-speaker registry, optional chapter index, and structured warnings. Schema-versioned and machine-readable so agents can quote with confidence.
 
-- Existing captions/subtitles via `yt-dlp` for URLs, with multi-language support.
-- Sidecar `.vtt`/`.srt` subtitles for local media files.
-- Speaker attribution from caption tags (`<v Name>` in VTT, `Speaker:` line prefixes in SRT) propagated through transcripts.
-- Audio and representative frame extraction via `ffmpeg`/`ffprobe`.
-- Silence-aware audio chunking so long-audio STT (Whisper, Copilot SDK) does not hit per-request size limits.
-- Perceptual-hash slide grouping so OCR/vision is run once per unique on-screen slide, with first/last visible timestamps recorded as facts.
-- Optional GitHub Copilot SDK analysis for audio transcription, structured OCR, and structured vision.
-- Artifact folders with `manifest.json`, `metadata.json`, `evidence.json`, `transcript.md`, frames, slides, structured warnings, and a per-speaker registry.
-- CLI and MCP stdio entrypoints.
+One .NET 10 binary ships **two surfaces** for the same pipeline: a `zakira-replay` CLI (drive from shell scripts or `dnx`) and an MCP server (`zakira-replay mcp serve`) so any MCP-aware agent can analyze video as a first-class tool. Local providers run fully on-device when you want air-gapped operation; cloud LLM providers plug in via `Microsoft.Extensions.AI.IChatClient` when you want stronger summarization or vision quality.
+
+> Part of the [Zakira](https://github.com/MoaidHathot?tab=repositories&q=Zakira) project family.
 
 System binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) and the search-embedding model are opt-in: install them upfront with `zakira-replay deps install`, or set `dependencies.autoDownload=true` once and let Zakira.Replay fetch them on first need. Local providers (OCR, Whisper STT, diarization, local vision) **auto-download their models on first use by default** — opt out per-provider if you want strict offline control. Missing dependencies always fail with a clear, actionable error.
 
@@ -120,6 +113,7 @@ zakira-replay queue status [--queue-id <id>] [--json]
 zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
 zakira-replay deps path
 zakira-replay auth login <profile-name> [--url <start-url>]
+zakira-replay auth init-edge-profile [--url <start-url>] [--user-data-dir <path>] [--profile-directory <name>]
 zakira-replay auth list
 zakira-replay auth show <profile-name>
 zakira-replay auth clear <profile-name>
@@ -202,6 +196,7 @@ Environment variables:
 - `ZAKIRA_REPLAY_OCR_RECOGNITION_MODEL_PATH`
 - `ZAKIRA_REPLAY_OCR_DICTIONARY_PATH`
 - `ZAKIRA_REPLAY_AUTH_DIRECTORY`
+- `ZAKIRA_REPLAY_EDGE_USER_DATA_DIR`
 - `ZAKIRA_REPLAY_LLM_PROVIDER`
 - `ZAKIRA_REPLAY_OLLAMA_ENDPOINT`
 - `ZAKIRA_REPLAY_OLLAMA_MODEL`
@@ -654,6 +649,103 @@ Warning codes emitted by browser capture:
 - `CAPTURE_SEEK_FAILED` — at least one `video.currentTime` assignment threw.
 - `CAPTURE_SCREENSHOT_FAILED` — at least one screenshot threw; the run continues with remaining frames.
 - `CAPTURE_UNKNOWN_MODE` — the requested mode name is not `auto`/`ytdlp`/`browser`; falls back to `ytdlp`.
+
+## Reusing a Dedicated Edge Profile (Persistent Context)
+
+Auth profiles store cookies as a plaintext Playwright `StorageState` JSON file. That file is portable — copy it to another machine and it works there too. Convenient, but every leaked StorageState is a complete drop-in session credential.
+
+The alternative is to point Zakira.Replay at a **dedicated Microsoft Edge user-data-dir**. Edge stores cookies in its native SQLite, with the sensitive columns DPAPI-encrypted per-user, per-machine on Windows (Keychain on macOS, libsecret/KWallet on Linux). A leaked Edge profile is unreadable on a different machine. Cookies refresh in place during normal use, so the 1-hour StorageState refresh cycle goes away. This is the recommended approach for SharePoint Stream / Microsoft Stream / authenticated Microsoft 365 portals.
+
+### One-command setup (per machine)
+
+```bash
+# Launch Edge against the dedicated user-data-dir, sign in interactively, close Edge.
+# Zakira verifies the profile is initialised and reports the cookie path.
+zakira-replay auth init-edge-profile --url https://microsofteur-my.sharepoint.com/
+
+# Confirm Zakira sees a ready profile:
+zakira-replay doctor       # \u2192 edge-profile: ready (...edge-profile, Default, ...)
+```
+
+After step 1, your browser-capture analyses **automatically** use persistent-context mode whenever the configured profile directory contains a Cookies file. No CLI flag needed:
+
+```bash
+zakira-replay analyze "https://microsofteur-my.sharepoint.com/.../stream.aspx?id=..." \
+    --capture-mode browser --smart-crop --smart-crop-profile teams \
+    --stt --llm-provider local-whisper --ocr --vision --vision-provider local --cache
+```
+
+### On-disk layout
+
+```
+%LOCALAPPDATA%\Zakira.Replay\edge-profile\          \u2190 user-data-dir (the directory)
+\u251c\u2500\u2500 Local State                              \u2190 user-data-dir metadata
+\u251c\u2500\u2500 First Run
+\u2514\u2500\u2500 Default\                                 \u2190 profile sub-folder (the name)
+    \u251c\u2500\u2500 Network\Cookies                       \u2190 DPAPI-encrypted SQLite
+    \u251c\u2500\u2500 Login Data                            \u2190 DPAPI-encrypted (if you saved passwords)
+    \u2514\u2500\u2500 \u2026
+```
+
+- `capture.browser.edgeUserDataDir` — absolute path to the user-data-dir. Stored verbatim (env-var literals like `%LOCALAPPDATA%` are preserved) so the config travels between machines; expansion happens at read time. Default: `%LOCALAPPDATA%\Zakira.Replay\edge-profile`.
+- `capture.browser.edgeProfileDirectory` — sub-folder name. Default `"Default"`; only change this if you've manually created multiple profiles inside the same user-data-dir.
+
+### Cross-machine workflow
+
+Zakira config syncs across machines fine (the env-var literal in `edgeUserDataDir` expands per-machine). The Edge profile contents do **not** sync — DPAPI keys are per-user, per-machine, so even if you copied the directory it wouldn't be usable elsewhere. This is the property that makes the dedicated-profile approach more secure than StorageState.
+
+On a new machine: `zakira-replay auth init-edge-profile --url <site>` once, then `zakira-replay analyze` works.
+
+If you forget the init step, the analyze run prints:
+
+```
+[CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED] (info) Edge profile at <path> is not initialized.
+  Run `zakira-replay auth init-edge-profile` to sign in once per machine.
+  Continuing with the StorageState path for now.
+```
+
+If you then hit an auth-gated URL:
+
+```
+[CAPTURE_BROWSER_AUTH_REQUIRED] (error) Page redirected to a sign-in URL (login.microsoftonline.com/...).
+  Run `zakira-replay auth init-edge-profile --url <site>` to re-sign in and retry.
+```
+
+No more silent `CAPTURE_DURATION_UNRESOLVED` timeouts when the only real problem was an expired session.
+
+### Failure-mode warning codes
+
+- `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED` (info) — no Cookies file in the configured profile sub-folder. Capture falls back to StorageState/anonymous; run `auth init-edge-profile` to enable persistent-context mode.
+- `CAPTURE_BROWSER_PROFILE_DIR_MISSING` (error) — explicit `edgeUserDataDir` points at a non-existent directory. Capture aborts.
+- `CAPTURE_BROWSER_PROFILE_LOCKED` (error) — `SingletonLock` present inside the profile sub-folder; Edge is already using the dir. Close Edge and retry.
+- `CAPTURE_BROWSER_PROFILE_LAUNCH_FAILED` (error) — `LaunchPersistentContextAsync` threw (corrupt profile, DPAPI key unavailable, incompatible Edge version). The Playwright exception message is included.
+- `CAPTURE_BROWSER_AUTH_REQUIRED` (error) — post-navigation URL matched a sign-in domain. Re-init the profile.
+- `CAPTURE_BROWSER_AUTH_MFA_DETECTED` (error) — page contains a Microsoft MFA challenge selector that headless capture cannot satisfy. Re-init interactively.
+- `CAPTURE_PROFILE_CONFLICT` (info) — both `--auth-profile` and an initialized `edgeUserDataDir` were supplied; persistent-context wins, the StorageState profile is ignored for this run.
+
+### Manual setup (if you'd rather not use the helper)
+
+```bash
+# Equivalent of `auth init-edge-profile`:
+msedge.exe --user-data-dir="%LOCALAPPDATA%\Zakira.Replay\edge-profile" `
+           --profile-directory=Default `
+           --no-first-run --no-default-browser-check `
+           https://microsofteur-my.sharepoint.com/
+# Sign in, complete MFA, close Edge. Zakira will see the cookies on the next `doctor` / `analyze`.
+```
+
+### Security comparison vs. StorageState
+
+| Threat | StorageState JSON (`auth login`) | Dedicated Edge profile (`auth init-edge-profile`) |
+|---|---|---|
+| Stolen laptop without disk encryption | Cookies fully readable as plaintext JSON, usable on any machine until expiry | Cookies unreadable (DPAPI keyed to your user+machine) |
+| Accidentally committed to git / pushed to a remote | Fully usable from anywhere | Unusable on attacker's machine |
+| OneDrive Known-Folder-Backup of the user profile | Plaintext JSON syncs to cloud | `%LOCALAPPDATA%` is excluded by default; encrypted contents wouldn't be useful anyway |
+| Malware running as your Windows user | Direct read | DPAPI decrypts for the running user — same risk |
+| Other user on the same machine | Compromised if dir is world-readable | Cookies unreadable (different DPAPI key) |
+| Re-auth frequency | Every ~60 min (StorageState files expire fast) | Cookies refresh in-place during use; profile valid until Conditional Access forces re-auth |
+
+This is standard Chromium/Edge encryption behaviour — the same DPAPI machinery that protects your daily Edge browsing.
 
 ## Evidence Alignment
 

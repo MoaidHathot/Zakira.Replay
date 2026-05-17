@@ -184,9 +184,14 @@ public sealed class AuthProfileTests
 
         // Point auth dir at the per-test temp dir to keep this test fully isolated.
         var prev = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY");
+        var prevEdge = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR");
         try
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY", temp.GetPath("auth"));
+            // Force the persistent-context check to fall through by pointing at a non-existent
+            // path; otherwise this test would activate persistent-context on machines where the
+            // user has already initialised their dedicated Edge profile.
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", temp.GetPath("no-edge-here"));
             var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
                 Source: "https://example.test/private",
                 VisionInstruction: string.Empty,
@@ -205,6 +210,7 @@ public sealed class AuthProfileTests
         finally
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY", prev);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", prevEdge);
         }
     }
 
@@ -217,9 +223,12 @@ public sealed class AuthProfileTests
         // Seed a profile in a per-test auth directory.
         var authDir = temp.GetPath("auth");
         var prev = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY");
+        var prevEdge = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR");
         try
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY", authDir);
+            // Force persistent-context off so the AuthStorageStatePath assertion holds.
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", temp.GetPath("no-edge-here"));
             var profileStore = new AuthProfileStore(MakeConfig(), configPath: null);
             profileStore.SaveJson("ignite", "{\"cookies\":[],\"origins\":[]}");
             var expectedPath = profileStore.GetProfilePath("ignite");
@@ -245,6 +254,7 @@ public sealed class AuthProfileTests
         finally
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_AUTH_DIRECTORY", prev);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR", prevEdge);
         }
     }
 

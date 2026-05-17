@@ -177,6 +177,113 @@ public sealed class BrowserCaptureConfig
     /// the disk. Defaults to 5 MB.
     /// </summary>
     public int MaxCaptionBytes { get; set; } = 5 * 1024 * 1024;
+
+    /// <summary>
+    /// Optional dedicated Edge user-data-dir for persistent-context capture. When the resolved
+    /// directory contains a Cookies file under the named profile sub-folder, the browser-capture
+    /// client launches Playwright with <c>LaunchPersistentContextAsync</c> against this dir,
+    /// reusing cookies stored by Edge in their DPAPI-encrypted SQLite format (per-user,
+    /// per-machine on Windows). This is materially more secure than the plaintext
+    /// <c>StorageState</c> JSON produced by <c>auth login</c>: a leaked StorageState file works
+    /// on any machine; a leaked Edge profile is unusable on a different user / machine.
+    /// </summary>
+    /// <remarks>
+    /// Stored verbatim (including environment-variable references like <c>%LOCALAPPDATA%</c>)
+    /// so the config travels across machines. Expansion happens at read time via
+    /// <see cref="ResolveEdgeUserDataDir"/>. When the value is null/empty, the default is
+    /// <c>%LOCALAPPDATA%\Zakira.Replay\edge-profile</c> on Windows (and the platform-equivalent
+    /// LocalApplicationData folder on other OSes).
+    /// </remarks>
+    public string? EdgeUserDataDir { get; set; }
+
+    /// <summary>
+    /// Name of the profile sub-folder inside <see cref="EdgeUserDataDir"/>. Maps to Chromium's
+    /// <c>--profile-directory</c> switch. Defaults to <c>"Default"</c>; only change this if
+    /// you've manually created multiple profiles inside the same user-data-dir.
+    /// </summary>
+    public string? EdgeProfileDirectory { get; set; }
+
+    /// <summary>
+    /// Resolves <see cref="EdgeUserDataDir"/> to an absolute filesystem path, expanding any
+    /// environment-variable references (e.g. <c>%LOCALAPPDATA%</c>) against the current
+    /// machine's environment. When the configured value is null or whitespace, returns the
+    /// per-machine default <c>{LocalApplicationData}/Zakira.Replay/edge-profile</c>.
+    /// </summary>
+    /// <remarks>
+    /// <c>ZAKIRA_REPLAY_EDGE_USER_DATA_DIR</c> takes priority over the config value when set,
+    /// mirroring the override pattern used by <c>ZAKIRA_REPLAY_AUTH_DIRECTORY</c>. Useful for
+    /// pinning the path in CI / tests without touching the config file.
+    /// </remarks>
+    public string ResolveEdgeUserDataDir()
+    {
+        var fromEnv = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_USER_DATA_DIR");
+        if (!string.IsNullOrWhiteSpace(fromEnv))
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(fromEnv.Trim().Trim('"')));
+        }
+
+        if (!string.IsNullOrWhiteSpace(EdgeUserDataDir))
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(EdgeUserDataDir.Trim().Trim('"')));
+        }
+
+        var localAppData = Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData);
+        if (string.IsNullOrWhiteSpace(localAppData))
+        {
+            // Final fallback for environments where LocalApplicationData is empty (rare on CI).
+            localAppData = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+                ".local", "share");
+        }
+        return Path.Combine(localAppData, "Zakira.Replay", "edge-profile");
+    }
+
+    /// <summary>
+    /// Resolves <see cref="EdgeProfileDirectory"/> to a non-empty sub-folder name. Defaults to
+    /// <c>"Default"</c> when null/whitespace.
+    /// </summary>
+    public string ResolveEdgeProfileDirectory()
+    {
+        return string.IsNullOrWhiteSpace(EdgeProfileDirectory) ? "Default" : EdgeProfileDirectory.Trim();
+    }
+
+    /// <summary>
+    /// Reports whether the resolved Edge profile directory exists and contains a usable
+    /// <c>Cookies</c> file inside the configured sub-folder. Used by both the capture client
+    /// (to decide whether to take the persistent-context path) and by <c>doctor</c>.
+    /// </summary>
+    public bool IsEdgeProfileInitialized()
+    {
+        try
+        {
+            var profileDir = Path.Combine(ResolveEdgeUserDataDir(), ResolveEdgeProfileDirectory());
+            if (!System.IO.Directory.Exists(profileDir))
+            {
+                return false;
+            }
+
+            // Chromium stores cookies at either Default/Cookies (older layout) or
+            // Default/Network/Cookies (newer layout). Treat either as initialized.
+            var legacyCookies = Path.Combine(profileDir, "Cookies");
+            var modernCookies = Path.Combine(profileDir, "Network", "Cookies");
+            return (File.Exists(legacyCookies) && new FileInfo(legacyCookies).Length > 0)
+                || (File.Exists(modernCookies) && new FileInfo(modernCookies).Length > 0);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// Returns the path to the <c>SingletonLock</c> file Chromium creates inside a profile
+    /// sub-folder while a process holds the user-data-dir. Existence of this file at launch
+    /// time indicates Edge (or another Chromium process) is already using the profile.
+    /// </summary>
+    public string GetEdgeProfileSingletonLockPath()
+    {
+        return Path.Combine(ResolveEdgeUserDataDir(), ResolveEdgeProfileDirectory(), "SingletonLock");
+    }
 }
 
 public sealed class CropConfig
@@ -1180,6 +1287,14 @@ public sealed class ConfigStore
             case "capture.browser.max-caption-bytes":
                 config.Capture.Browser.MaxCaptionBytes = ParsePositiveInt(value, key);
                 break;
+            case "capture.browser.edgeuserdatadir":
+            case "capture.browser.edge-user-data-dir":
+                config.Capture.Browser.EdgeUserDataDir = NormalizePathPreservingEnvVars(value, key);
+                break;
+            case "capture.browser.edgeprofiledirectory":
+            case "capture.browser.edge-profile-directory":
+                config.Capture.Browser.EdgeProfileDirectory = NormalizeNonEmpty(value, key);
+                break;
             case "auth.directory":
                 config.Auth.Directory = NormalizeDirectoryPath(value);
                 break;
@@ -1318,6 +1433,8 @@ public sealed class ConfigStore
             "capture.browser.jpegquality" or "capture.browser.jpeg-quality" => config.Capture.Browser.JpegQuality.ToString(CultureInfo.InvariantCulture),
             "capture.browser.capturecaptions" or "capture.browser.capture-captions" => config.Capture.Browser.CaptureCaptions.ToString(),
             "capture.browser.maxcaptionbytes" or "capture.browser.max-caption-bytes" => config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
+            "capture.browser.edgeuserdatadir" or "capture.browser.edge-user-data-dir" => config.Capture.Browser.EdgeUserDataDir,
+            "capture.browser.edgeprofiledirectory" or "capture.browser.edge-profile-directory" => config.Capture.Browser.EdgeProfileDirectory,
             "auth.directory" => config.Auth.Directory,
             "auth.stalethresholdminutes" or "auth.stale-threshold-minutes" => config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
             "diarization.provider" => config.Diarization.Provider,
@@ -1420,6 +1537,8 @@ public sealed class ConfigStore
             ["capture.browser.jpegQuality"] = config.Capture.Browser.JpegQuality.ToString(CultureInfo.InvariantCulture),
             ["capture.browser.captureCaptions"] = config.Capture.Browser.CaptureCaptions.ToString(),
             ["capture.browser.maxCaptionBytes"] = config.Capture.Browser.MaxCaptionBytes.ToString(CultureInfo.InvariantCulture),
+            ["capture.browser.edgeUserDataDir"] = config.Capture.Browser.EdgeUserDataDir,
+            ["capture.browser.edgeProfileDirectory"] = config.Capture.Browser.EdgeProfileDirectory,
             ["auth.directory"] = config.Auth.Directory,
             ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
             ["diarization.provider"] = config.Diarization.Provider,
@@ -1460,6 +1579,23 @@ public sealed class ConfigStore
     private static string NormalizeDirectoryPath(string value)
     {
         return Path.GetFullPath(Environment.ExpandEnvironmentVariables(value.Trim().Trim('"')));
+    }
+
+    /// <summary>
+    /// Variant of <see cref="NormalizeDirectoryPath"/> that PRESERVES environment-variable
+    /// references in the stored config value (e.g. <c>%LOCALAPPDATA%\Zakira.Replay\edge-profile</c>
+    /// stays literal). Expansion happens at read time via the consumer's own resolver. This
+    /// lets the config travel between machines whose username / drive letter differ; callers
+    /// are responsible for expanding when they need the absolute path.
+    /// </summary>
+    private static string NormalizePathPreservingEnvVars(string value, string key)
+    {
+        var normalized = value.Trim().Trim('"');
+        if (string.IsNullOrWhiteSpace(normalized))
+        {
+            throw new ReplayException($"Config key {key} requires a non-empty value.");
+        }
+        return normalized;
     }
 
     private static string NormalizeUrl(string value, string key)

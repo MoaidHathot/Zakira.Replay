@@ -71,7 +71,7 @@ public sealed class AnalysisPipeline
         {
             info = isLocalFile
                 ? CreateLocalInfo(localPath)
-                : await ResolveUrlMetadataAsync(request, progress, cancellationToken).ConfigureAwait(false);
+                : await ResolveUrlMetadataAsync(request, warnings, progress, cancellationToken).ConfigureAwait(false);
             info.AvailableSubtitleLanguages = BuildAvailableSubtitleLanguages(info);
         }
         await artifactStore.WriteJsonAsync(run, "metadata.json", info, cancellationToken).ConfigureAwait(false);
@@ -1292,6 +1292,48 @@ public sealed class AnalysisPipeline
 
         var config = new ConfigStore().Load();
         var authStoragePath = ResolveAuthProfilePath(request, config, warnings);
+
+        // Decide whether persistent-context (dedicated Edge profile) mode is available.
+        // The mode auto-activates whenever the resolved Edge user-data-dir contains a Cookies
+        // file inside the configured profile sub-folder. Otherwise we fall back to the
+        // StorageState/anonymous path and emit an info-level breadcrumb.
+        string? edgeUserDataDir = null;
+        string? edgeProfileDirectory = null;
+        if (config.Capture.Browser.IsEdgeProfileInitialized())
+        {
+            edgeUserDataDir = config.Capture.Browser.ResolveEdgeUserDataDir();
+            edgeProfileDirectory = config.Capture.Browser.ResolveEdgeProfileDirectory();
+
+            if (!string.IsNullOrWhiteSpace(authStoragePath))
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.CaptureProfileConflict,
+                    $"Both `--auth-profile` and an initialized Edge user-data-dir " +
+                    $"('{edgeUserDataDir}', profile '{edgeProfileDirectory}') are configured. " +
+                    $"Persistent-context wins; the StorageState profile will be ignored for this run.",
+                    Source: "playwright",
+                    Severity: ReplayWarningSeverities.Info));
+                authStoragePath = null;
+            }
+        }
+        else if (!string.IsNullOrWhiteSpace(config.Capture.Browser.EdgeUserDataDir)
+                 || string.IsNullOrWhiteSpace(authStoragePath))
+        {
+            // Either the user explicitly configured a custom path that's not yet initialized,
+            // OR they're on the default path with no --auth-profile fallback configured. In
+            // both cases, emit an info breadcrumb that explains how to set up.
+            var resolved = config.Capture.Browser.ResolveEdgeUserDataDir();
+            var profile = config.Capture.Browser.ResolveEdgeProfileDirectory();
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptureBrowserProfileNotInitialized,
+                $"Edge profile at '{resolved}' (profile '{profile}') is not initialized. " +
+                $"Run `zakira-replay auth init-edge-profile` to sign in once per machine; " +
+                $"persistent-context mode (DPAPI-encrypted cookies) will auto-activate after that. " +
+                $"Continuing with the StorageState path for now.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Info));
+        }
+
         var browserCaptureRequest = new BrowserCaptureRequest(
             Url: request.Source,
             Run: run,
@@ -1303,7 +1345,9 @@ public sealed class AnalysisPipeline
             JpegQuality: config.Capture.Browser.JpegQuality,
             CaptureCaptions: config.Capture.Browser.CaptureCaptions,
             MaxCaptionBytes: config.Capture.Browser.MaxCaptionBytes,
-            AuthStorageStatePath: authStoragePath);
+            AuthStorageStatePath: authStoragePath,
+            EdgeUserDataDir: edgeUserDataDir,
+            EdgeProfileDirectory: edgeProfileDirectory);
 
         var result = await browserCaptureClient.CaptureAsync(browserCaptureRequest, progress, cancellationToken).ConfigureAwait(false);
         foreach (var warning in result.Warnings)
@@ -1562,10 +1606,40 @@ public sealed class AnalysisPipeline
             .ToArray();
     }
 
-    private async Task<YtDlpInfo> ResolveUrlMetadataAsync(AnalyzeRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
+    private async Task<YtDlpInfo> ResolveUrlMetadataAsync(AnalyzeRequest request, List<ReplayWarning> warnings, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         progress?.Report("Resolving metadata with yt-dlp...");
-        return await ytDlp.GetInfoAsync(request, cancellationToken).ConfigureAwait(false);
+
+        // yt-dlp may legitimately fail for sites whose metadata is auth-gated (SharePoint
+        // Stream, internal portals, custom players). When the caller has explicitly asked for
+        // browser capture (or `auto`, where browser is a valid fallback), we don't want a
+        // metadata probe failure to abort the whole pipeline. Surface a warning, hand back a
+        // minimal synthetic info, and let the browser path do its work.
+        try
+        {
+            return await ytDlp.GetInfoAsync(request, cancellationToken).ConfigureAwait(false);
+        }
+        catch (ReplayException ex)
+        {
+            var captureModeHint = (request.CaptureMode ?? string.Empty).ToLowerInvariant();
+            var allowFallback = captureModeHint == CaptureModes.Browser || captureModeHint == CaptureModes.Auto;
+            if (!allowFallback)
+            {
+                throw;
+            }
+
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.MediaUrlUnresolved,
+                $"yt-dlp metadata probe failed ({ex.Message.Trim()}); continuing with browser capture using only the URL.",
+                Source: "yt-dlp",
+                Severity: ReplayWarningSeverities.Info));
+            return new YtDlpInfo
+            {
+                Id = null,
+                Title = null,
+                WebpageUrl = request.Source
+            };
+        }
     }
 
     private static Dictionary<string, AvailableSubtitleLanguage>? BuildAvailableSubtitleLanguages(YtDlpInfo info)

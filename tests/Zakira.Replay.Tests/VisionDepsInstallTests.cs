@@ -21,7 +21,7 @@ namespace Zakira.Replay.Tests;
 /// </summary>
 public sealed class VisionDepsInstallTests
 {
-    [Fact]
+    [SkippableFact]
     public void ClipBpeTokenizerProducesFixedLengthSequences()
     {
         var modelDir = ResolveVisionModelDirectory();
@@ -38,7 +38,7 @@ public sealed class VisionDepsInstallTests
         Assert.Contains(ClipBpeTokenizer.EosTokenId, ids);
     }
 
-    [Fact]
+    [SkippableFact]
     public void ClipBpeTokenizerProducesIdenticalIdsForIdenticalInput()
     {
         var modelDir = ResolveVisionModelDirectory();

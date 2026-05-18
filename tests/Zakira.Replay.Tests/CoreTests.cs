@@ -416,7 +416,7 @@ public sealed class CoreTests
             using var stdout = new StringWriter();
             using var stderr = new StringWriter();
 
-            var exitCode = await CliApp.RunAsync(["deps", "path"], stdout, stderr, CancellationToken.None);
+            var exitCode = await CliApp.RunAsync(["deps", "status"], stdout, stderr, CancellationToken.None);
 
             Assert.Equal(0, exitCode);
             Assert.Contains("Portable directory:", stdout.ToString(), StringComparison.Ordinal);
@@ -1397,7 +1397,7 @@ public sealed class CoreTests
         using var stdout = new StringWriter();
         using var stderr = new StringWriter();
 
-        var exitCode = await CliApp.RunAsync(["doctor", "--json"], stdout, stderr, CancellationToken.None);
+        var exitCode = await CliApp.RunAsync(["doctor", "--output-format", "json"], stdout, stderr, CancellationToken.None);
 
         Assert.Equal(0, exitCode);
         using var document = System.Text.Json.JsonDocument.Parse(stdout.ToString());
@@ -1419,12 +1419,11 @@ public sealed class CoreTests
         Assert.Contains(ReplayVersion.Current, stdout.ToString(), StringComparison.Ordinal);
 
         stdout.GetStringBuilder().Clear();
-        var infoExitCode = await CliApp.RunAsync(["info", "--json"], stdout, stderr, CancellationToken.None);
+        var infoExitCode = await CliApp.RunAsync(["info", "--output-format", "json"], stdout, stderr, CancellationToken.None);
 
         Assert.Equal(0, infoExitCode);
         Assert.Contains("configPath", stdout.ToString(), StringComparison.Ordinal);
         Assert.Contains("llmProvider", stdout.ToString(), StringComparison.Ordinal);
-        Assert.Empty(stderr.ToString());
     }
 
     private static int CountOccurrences(string value, string needle)

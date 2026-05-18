@@ -18,8 +18,10 @@ Never claim you watched a video directly. Base every answer on artifacts returne
 The server command is:
 
 ```bash
-zakira-replay mcp serve
+zakira-replay mcp serve [--transport stdio|http|sse] [--port 8765]
 ```
+
+`--transport stdio` (the default) is what Claude Desktop, Cursor, VS Code Copilot, and any subprocess-style MCP client use. `--transport http` hosts a Streamable HTTP MCP endpoint at `http://127.0.0.1:<port>/` for hosted-agent platforms that connect over the network instead of spawning a subprocess. `--transport sse` is an alias for the same Streamable HTTP endpoint (the SSE transport was folded into Streamable HTTP in the MCP spec) and is kept for legacy clients.
 
 If `zakira-replay` is not on `PATH`, configure the MCP client to use the full executable path or a development `dotnet run` command.
 
@@ -29,25 +31,25 @@ Use `doctor` as the first tool when dependency or provider readiness is unknown.
 
 Prefer these tools:
 
-- `create_analysis_job`: start non-blocking analysis and get a `jobId`.
-- `get_job_status`: poll logs and status.
-- `get_job_result`: fetch completed manifest and artifact directory.
-- `build_chapters`: build `chapters/chapters.json` and `chapters/chapters.md` for a completed run.
-- `build_search_index`: build JSON, SQLite, or SQLite+ONNX search over a completed run.
-- `query_search_index`: retrieve relevant evidence chunks.
-- `extract_clip`: create a timestamped clip when start/end are known.
-- `extract_frames`: ad-hoc frame capture at specific timestamps or inside a time window, without paying for the full analyze pipeline (no slides/OCR/vision/alignment). Use after a full `analyze_video` run when an agent needs additional stills for a downstream artifact (e.g. illustrating a recipe step, attaching a thumbnail to a chapter, or grabbing a screenshot at a transcript moment).
-- `build_evidence_alignment`: build cross-modal alignment views (`by-chapter`, `by-slide`) over a completed run. Pure rearrangement; no model calls.
+- `analyze.start`: start non-blocking analysis and get a `jobId`.
+- `analyze.status`: poll logs and status.
+- `analyze.result`: fetch completed manifest and artifact directory.
+- `chapters.build`: build `chapters/chapters.json` and `chapters/chapters.md` for a completed run.
+- `index.build`: build JSON, SQLite, or SQLite+ONNX search over a completed run.
+- `index.query`: retrieve relevant evidence chunks.
+- `clip`: create a timestamped clip when start/end are known.
+- `frames`: ad-hoc frame capture at specific timestamps or inside a time window, without paying for the full analyze pipeline (no slides/OCR/vision/alignment). Use after a full `analyze` run when an agent needs additional stills for a downstream artifact (e.g. illustrating a recipe step, attaching a thumbnail to a chapter, or grabbing a screenshot at a transcript moment).
+- `align`: build cross-modal alignment views (`by-chapter`, `by-slide`) over a completed run. Pure rearrangement; no model calls.
 - `doctor`: diagnose dependencies and provider setup.
-- `enqueue_analysis_queue_job`, `run_analysis_queue`, `get_analysis_queue_status`: persistent queue workflow for many videos.
+- `queue.enqueue`, `queue.run`, `queue.status`: persistent queue workflow for many videos.
 
-Use `analyze_video` only for short, low-risk jobs where blocking is acceptable. For long videos, visual analysis, OCR, or STT work, use `create_analysis_job`.
+Use `analyze` only for short, low-risk jobs where blocking is acceptable. For long videos, visual analysis, OCR, or STT work, use `analyze.start`.
 
 ## Job Workflow
 
-1. Call `create_analysis_job` with source and analysis options.
-2. Poll `get_job_status` every few seconds until status is `succeeded`, `failed`, or `cancelled`.
-3. If `succeeded`, call `get_job_result`.
+1. Call `analyze.start` with source and analysis options.
+2. Poll `analyze.status` every few seconds until status is `succeeded`, `failed`, or `cancelled`.
+3. If `succeeded`, call `analyze.result`.
 4. Extract `artifactDirectory` from the result.
 5. Read `manifest.json` first, then the evidence artifacts needed for the user's request.
 6. Build chapters/search only after analysis succeeds.
@@ -185,7 +187,7 @@ Diarization (`useDiarization: true`): runs local sherpa-onnx speaker diarization
 
 ## Artifact Reading Order
 
-After `get_job_result`, read artifacts from `artifactDirectory` in this order:
+After `analyze.result`, read artifacts from `artifactDirectory` in this order:
 
 1. `manifest.json`: confirms produced artifacts, structured warnings, frame list, and paths. Each `FrameArtifact` may carry optional `width`, `height`, `crop` (`{x, y, width, height, source}`), and `originalPath` when smart-crop fired — the `path` field then points to the cropped variant and the perceptual hash was computed on the crop, not the original.
 2. `evidence.json`: structured transcript segments, frames, slides, OCR, vision, per-speaker registry (`speakers[]`), structured warnings.
@@ -203,6 +205,25 @@ After `get_job_result`, read artifacts from `artifactDirectory` in this order:
 Speakers in `evidence.speakers[]` carry `id` (slug, stable), optional `displayName`, `segmentCount`, `totalSeconds`, `firstSeenSeconds`, `lastSeenSeconds`. Each `transcript[*]` segment has `id` (`segment-NNNN`) and may have `speakerId` and `speakerDisplayName`. STT-derived transcripts do not carry speakers in this release.
 
 Warnings in `manifest.json` and `evidence.json` are structured records: `{ code, message, source, severity }`. Branch on `code` (for example `TRANSCRIPT_NOT_FOUND`, `STT_NO_LLM_PROVIDER`, `STT_CHUNK_FAILED`, `OCR_PARSE_FALLBACK`, `OCR_LOCAL_MODELS_MISSING`, `OCR_LOCAL_INIT_FAILED`, `OCR_LOCAL_INFERENCE_FAILED`, `OCR_UNKNOWN_PROVIDER`, `VISION_PARSE_FALLBACK`, `PERCEPTUAL_HASH_FAILED`, `FRAMES_REMOTE_FALLBACK`, `FRAMES_LIKELY_UNDERSAMPLED`, `FRAMES_SCENE_CAP_REACHED`, `CROP_BAIL_OUT`, `CROP_PROFILE_UNKNOWN`, `CROP_IMAGE_DECODE_FAILED`, `CROP_OUTPUT_FAILED`, `CAPTURE_BROWSER_FALLBACK`, `CAPTURE_BROWSER_UNAVAILABLE`, `CAPTURE_PLAY_BUTTON_NOT_FOUND`, `CAPTURE_DURATION_UNRESOLVED`, `CAPTURE_SEEK_FAILED`, `CAPTURE_SCREENSHOT_FAILED`, `CAPTURE_UNKNOWN_MODE`, `CAPTIONS_BROWSER_NETWORK_NONE`, `CAPTIONS_BROWSER_NETWORK_DOWNLOAD_FAILED`, `CAPTIONS_BROWSER_NETWORK_PARSE_FAILED`, `CAPTURE_BROWSER_CAPTIONS_ACTIVATED`, `CAPTURE_BROWSER_CAPTIONS_HARVESTED_FROM_DOM`, `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED`, `CAPTURE_BROWSER_PROFILE_DIR_MISSING`, `CAPTURE_BROWSER_PROFILE_LOCKED`, `CAPTURE_BROWSER_PROFILE_LAUNCH_FAILED`, `CAPTURE_BROWSER_AUTH_REQUIRED`, `CAPTURE_BROWSER_AUTH_MFA_DETECTED`, `CAPTURE_PROFILE_CONFLICT`, `CAPTURE_BROWSER_MEDIA_DOWNLOADED`, `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE`, `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED`, `CAPTURE_STREAM_TRANSCRIPT_DISCOVERED`, `CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED`, `CAPTURE_STREAM_METADATA_PARSE_FAILED`, `CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED`, `AUTH_PROFILE_NOT_FOUND`, `AUTH_PROFILE_STALE`, `AUTH_PROFILE_LOAD_FAILED`) rather than fuzzy-matching the message.
+
+## MCP Resources (`replay://`)
+
+In addition to tools (verbs), Zakira.Replay exposes its on-disk artifacts as MCP **resources** at stable URIs under the `replay://` scheme. Clients that support resources (Claude Desktop, Cursor, VS Code Copilot, MCP Inspector) can list them via `resources/templates/list` and read them via `resources/read` without firing a tool call. Prefer resources when the user only needs to look at an existing artifact — no compute cost, no job lifecycle, no polling.
+
+Available templates:
+
+- `replay://runs` — JSON index of every run under the configured `runs/` directory (id, directory path, manifest-exists flag, last-write timestamp; most-recent-first).
+- `replay://runs/{id}/manifest` — `manifest.json` for a run.
+- `replay://runs/{id}/evidence` — `evidence.json` for a run (the canonical fact stream).
+- `replay://runs/{id}/transcript` — `transcript.md` (speaker-attributed markdown).
+- `replay://runs/{id}/chapters` — `chapters/chapters.json` (when chapters were built).
+- `replay://runs/{id}/aligned/by-chapter` — `evidence-aligned/by-chapter.json` (cross-modal rollup by chapter).
+- `replay://runs/{id}/aligned/by-slide` — `evidence-aligned/by-slide.json` (cross-modal rollup by slide).
+- `replay://runs/{id}/frames/{frameId}/ocr` — per-frame OCR JSON.
+- `replay://runs/{id}/frames/{frameId}/vision` — per-frame structured vision JSON.
+- `replay://jobs/{jobId}/logs` — the live in-memory log buffer of an MCP analyze job; subscribe to follow progress without polling `analyze.status`.
+
+When `analyze.result` returns an `artifactDirectory`, the `runId` is the last path segment — use it as `{id}` in the resource URIs above. Reading a resource that does not exist on disk returns an MCP error with the missing path in the message; treat it the same way as a missing artifact in the artifact-reading workflow.
 
 ## Search Workflow
 
@@ -250,7 +271,7 @@ Read `chapters/chapters.md` for the topic outline and `chapters/chapters.json` f
 
 ## Evidence Alignment Workflow
 
-After chapters and slides exist, call `build_evidence_alignment` to materialise cross-modal views:
+After chapters and slides exist, call `align` to materialise cross-modal views:
 
 ```json
 {
@@ -282,7 +303,7 @@ Report the clip path and timestamp range from the returned clip artifact.
 
 ## Ad-hoc Frame Capture Workflow
 
-Use `extract_frames` for the "I already analyzed this and just want a few specific stills" case. The tool skips slide grouping, hashing, OCR, vision, and chapter synthesis, so it is cheap to call repeatedly between turns. Output lands in a new `runs/<id>/frames/` folder with a minimal `frame-capture.json` manifest (schema: `frame-capture.schema.json`, `kind: "frame-capture"`).
+Use `frames` for the "I already analyzed this and just want a few specific stills" case. The tool skips slide grouping, hashing, OCR, vision, and chapter synthesis, so it is cheap to call repeatedly between turns. Output lands in a new `runs/<id>/frames/` folder with a minimal `frame-capture.json` manifest (schema: `frame-capture.schema.json`, `kind: "frame-capture"`).
 
 Two mutually-exclusive modes:
 
@@ -316,7 +337,7 @@ Shared optional fields:
 - `jpegQuality`: 1-100 (mapped to ffmpeg qscale 31-2). Default high quality.
 - `computePerceptualHash`: when true, also computes a 64-bit dHash per frame so you can dedupe near-identical stills downstream.
 - `sceneSafetyCap`: upper bound on scene cuts inside the window (defaults to `max(count, 200)`). Emits `FRAME_CAPTURE_SCENE_CAP_REACHED` when reached.
-- `cookies` / `cookiesFromBrowser` / `browserAuth`: yt-dlp auth for remote sources, identical semantics to `analyze_video`.
+- `cookies` / `cookiesFromBrowser` / `browserAuth`: yt-dlp auth for remote sources, identical semantics to `analyze`.
 
 The tool response includes `runId`, `artifactDirectory`, `manifestPath`, `frameCount`, a `frames` array (absolute and relative paths plus `timestampSeconds` / `timestampLabel`), and `warnings`. When you want to embed the frames into a downstream artifact (recipe Markdown, work-item file, alignment view), prefer the absolute `path` returned for each frame.
 
@@ -329,25 +350,25 @@ Frame-capture-specific warning codes (all under `frames[*].warnings`/`manifest.w
 - `FRAME_CAPTURE_SCENE_CAP_REACHED` - the safety cap was hit during scene detection.
 - `FRAME_CAPTURE_MEDIA_URL_UNRESOLVED` - yt-dlp could not resolve a direct media URL; fell back to downloading.
 
-Do not use `extract_frames` as a substitute for `analyze_video`/`create_analysis_job` when you actually need transcript, slides, OCR, vision, chapters, or evidence alignment. It is purpose-built for spot frames.
+Do not use `frames` as a substitute for `analyze`/`analyze.start` when you actually need transcript, slides, OCR, vision, chapters, or evidence alignment. It is purpose-built for spot frames.
 
 ## Queue Workflow
 
 Use the MCP queue tools for many videos or resumable local processing:
 
-1. `enqueue_analysis_queue_job` with `source`, `queueId`, optional `jobId`, and analysis options.
-2. `run_analysis_queue` with `queueId`, `concurrency`, and `retries`.
-3. `get_analysis_queue_status` to report pending/running/succeeded/failed jobs.
+1. `queue.enqueue` with `source`, `queueId`, optional `jobId`, and analysis options.
+2. `queue.run` with `queueId`, `concurrency`, and `retries`.
+3. `queue.status` to report pending/running/succeeded/failed jobs.
 4. Read each completed run's artifact directory before synthesizing results.
 
 ## Topic Summary And Work Items Pattern
 
 For requests like "watch this and summarize topics and work items":
 
-1. Use `create_analysis_job` with `frames: 30`, `frameStrategy: "scene"`, `stt: true`, `ocr: true`, `vision: true`, `cache: true`, and `maxAiFrames: 30` unless the user requests cheaper settings.
+1. Use `analyze.start` with `frames: 30`, `frameStrategy: "scene"`, `stt: true`, `ocr: true`, `vision: true`, `cache: true`, and `maxAiFrames: 30` unless the user requests cheaper settings.
 2. Poll until success and get `artifactDirectory`.
-3. Call `build_chapters`.
-4. Call `build_search_index` with `backend: "sqlite-onnx"` when available; use `sqlite` or `json` if ONNX is unavailable.
+3. Call `chapters.build`.
+4. Call `index.build` with `backend: "sqlite-onnx"` when available; use `sqlite` or `json` if ONNX is unavailable.
 5. Query for `action item`, `next steps`, `todo`, `follow up`, `decision`, `owner`, `deadline`, and project terms.
 6. Read `chapters/chapters.md`, `evidence.json`, `transcript.md`, and `ocr/combined.md`.
 7. Synthesize the topic summary and work items yourself from these facts. Write or return the requested Markdown output. If writing a file, place it next to artifacts, usually `<artifactDirectory>/work-items.md`.

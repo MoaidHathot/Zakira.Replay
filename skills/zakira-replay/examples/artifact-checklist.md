@@ -55,7 +55,7 @@ Present only when browser capture ran and observed at least one caption response
 
 ## Ad-hoc Frame Capture
 
-- A `frame-capture.json` file (schema: `frame-capture.schema.json`, `kind: "frame-capture"`) at the root of a run means the run came from `extract_frames` / `zakira-replay frames --at|--from`, not the full analyze pipeline. There is no `manifest.json`, no `evidence.json`, no slides/OCR/vision/chapters in that directory.
+- A `frame-capture.json` file (schema: `frame-capture.schema.json`, `kind: "frame-capture"`) at the root of a run means the run came from `frames` / `zakira-replay frames --at|--from`, not the full analyze pipeline. There is no `manifest.json`, no `evidence.json`, no slides/OCR/vision/chapters in that directory.
 - `frame-capture.json` carries the request summary (`mode: "timestamps" | "range"`, the original timestamps or range bounds, requested options) plus the resulting `frames[]` array (same shape as `FrameArtifact`) and `warnings[]`.
 - Use ad-hoc capture to grab additional stills after a full analyze run (recipe-card photos at known timestamps, transcript-aligned thumbnails, screenshots at evidence-cited moments) without re-running the expensive pipeline.
 - Range-mode frames carry timestamps in absolute source-timeline seconds even when the underlying ffmpeg call was scoped to a window.

@@ -80,7 +80,7 @@ public sealed class AnalysisQueueTests
             using var stderr = new StringWriter();
 
             var enqueueExit = await Cli.CliApp.RunAsync(["queue", "enqueue", sourcePath, "--queue-id", "cli", "--job-id", "cli-job", "--frames", "0", "--frame-strategy", "interval", "--no-transcript"], stdout, stderr, CancellationToken.None);
-            var statusExit = await Cli.CliApp.RunAsync(["queue", "status", "--queue-id", "cli", "--json"], stdout, stderr, CancellationToken.None);
+            var statusExit = await Cli.CliApp.RunAsync(["queue", "status", "--queue-id", "cli", "--output-format", "json"], stdout, stderr, CancellationToken.None);
             var runExit = await Cli.CliApp.RunAsync(["queue", "run", "--queue-id", "cli", "--concurrency", "1"], stdout, stderr, CancellationToken.None);
 
             Assert.Equal(0, enqueueExit);

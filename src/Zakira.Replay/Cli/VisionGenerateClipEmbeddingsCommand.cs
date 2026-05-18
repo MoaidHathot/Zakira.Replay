@@ -18,14 +18,18 @@ internal static class VisionGenerateClipEmbeddingsCommand
 {
     public static async Task<int> RunAsync(string[] args, TextWriter stdout, CancellationToken cancellationToken)
     {
-        var parsed = CommandOptions.Parse(args);
+        // Tiny inline parser. The wider CLI lives in CliApp.cs (System.CommandLine 3.0); this
+        // sub-command is invoked via `vision generate-clip-embeddings <args>` and only needs
+        // four optional --key value pairs, so a 10-line helper avoids dragging in the full
+        // RootCommand surface for what is otherwise a single-purpose tool.
+        var parsed = ParseArgs(args);
         var config = new ConfigStore().Load();
         var options = LocalVisionOptions.Resolve(config);
 
-        var textEncoderPath = parsed.Get("text-encoder") ?? options.ClipTextEncoderPath;
-        var vocabPath = parsed.Get("vocab") ?? Path.Combine(options.ModelDirectory, "clip-vocab.json");
-        var mergesPath = parsed.Get("merges") ?? Path.Combine(options.ModelDirectory, "clip-merges.txt");
-        var outputPath = parsed.Get("out") ?? options.ClipKindEmbeddingsPath ?? Path.Combine(options.ModelDirectory, LocalVisionOptions.ClipKindEmbeddingsFile);
+        var textEncoderPath = parsed.GetValueOrDefault("text-encoder") ?? options.ClipTextEncoderPath;
+        var vocabPath = parsed.GetValueOrDefault("vocab") ?? Path.Combine(options.ModelDirectory, "clip-vocab.json");
+        var mergesPath = parsed.GetValueOrDefault("merges") ?? Path.Combine(options.ModelDirectory, "clip-merges.txt");
+        var outputPath = parsed.GetValueOrDefault("out") ?? options.ClipKindEmbeddingsPath ?? Path.Combine(options.ModelDirectory, LocalVisionOptions.ClipKindEmbeddingsFile);
 
         if (string.IsNullOrWhiteSpace(textEncoderPath) || !File.Exists(textEncoderPath))
         {
@@ -96,6 +100,34 @@ internal static class VisionGenerateClipEmbeddingsCommand
         stdout.WriteLine($"Wrote {prompts.Count} embeddings ({firstEmbedding.Length} floats each, {bytes.Length} bytes total) to:");
         stdout.WriteLine($"  {outputPath}");
         return 0;
+    }
+
+    private static Dictionary<string, string> ParseArgs(string[] args)
+    {
+        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i < args.Length; i++)
+        {
+            var arg = args[i];
+            if (!arg.StartsWith("--", StringComparison.Ordinal))
+            {
+                continue;
+            }
+            var key = arg[2..];
+            var equalIndex = key.IndexOf('=');
+            if (equalIndex >= 0)
+            {
+                result[key[..equalIndex]] = key[(equalIndex + 1)..];
+            }
+            else if (i + 1 < args.Length && !args[i + 1].StartsWith("--", StringComparison.Ordinal))
+            {
+                result[key] = args[++i];
+            }
+            else
+            {
+                result[key] = "true";
+            }
+        }
+        return result;
     }
 
     private static Task<float[]> RunTextEncoderAsync(InferenceSession session, int[] tokens, CancellationToken cancellationToken)

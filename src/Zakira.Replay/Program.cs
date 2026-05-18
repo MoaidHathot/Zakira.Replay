@@ -2,11 +2,24 @@ using System.Text;
 using Zakira.Replay.Cli;
 using Zakira.Replay.Core;
 
+// stdout default encoding to UTF-8 so JSON / Markdown output round-trips on Windows.
 Console.OutputEncoding = Encoding.UTF8;
+
+// Wire Ctrl-C to a real CancellationToken so async actions and subprocesses (yt-dlp,
+// ffmpeg, Playwright) get a chance to clean up. Without this Program.cs was passing
+// CancellationToken.None and Ctrl-C would kill the process mid-write, leaving a corrupt
+// manifest.json behind. ArtifactStore.WriteJsonAsync now writes atomically, but a polite
+// shutdown is still strictly better.
+using var cancellation = new CancellationTokenSource();
+Console.CancelKeyPress += (_, e) =>
+{
+    e.Cancel = true;
+    cancellation.Cancel();
+};
 
 try
 {
-    return await CliApp.RunAsync(args, Console.Out, Console.Error, CancellationToken.None);
+    return await CliApp.RunAsync(args, Console.Out, Console.Error, cancellation.Token);
 }
 catch (MissingDependencyException ex)
 {

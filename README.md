@@ -12,6 +12,8 @@ The pipeline produces three complementary views of the same video so an agent ca
 
 One .NET 10 binary ships **two surfaces** for the same pipeline: a `zakira-replay` CLI (drive from shell scripts or `dnx`) and an MCP server (`zakira-replay mcp serve`) so any MCP-aware agent can analyze video as a first-class tool. Local providers run fully on-device when you want air-gapped operation; cloud LLM providers plug in via `Microsoft.Extensions.AI.IChatClient` when you want stronger summarization or vision quality.
 
+> **0.9.0 is a breaking release.** MCP tool names moved to `verb.noun` (`analyze`, `analyze.start`, `queue.enqueue`, `index.build`, `chapters.build`, `align`, …) and the CLI was rebuilt on top of `System.CommandLine` 3.0 with grouped `noun verb` subcommands (`runs list|show|delete|export`, `index build|query`, `align build`, `deps status`, `llm chat`) plus recursive global flags (`--output-format text|json|ndjson`, `--log-file`, `--log-level`, `--correlation-id`). The MCP server now also exposes `replay://` resources and supports stdio / HTTP / SSE transports. See [CHANGELOG.md](CHANGELOG.md#090--mcp--cli-modernization-breaking) for the full rename tables.
+
 > Part of the [Zakira](https://github.com/MoaidHathot?tab=repositories&q=Zakira) project family.
 
 System binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) and the search-embedding model are opt-in: install them upfront with `zakira-replay deps install`, or set `dependencies.autoDownload=true` once and let Zakira.Replay fetch them on first need. Local providers (OCR, Whisper STT, diarization, local vision) **auto-download their models on first use by default** — opt out per-provider if you want strict offline control. Missing dependencies always fail with a clear, actionable error.
@@ -101,17 +103,17 @@ zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruc
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
 zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--json]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
-zakira-replay search build <run-directory> [--backend json|sqlite|sqlite-onnx]
-zakira-replay search query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]
+zakira-replay index build <run-directory> [--backend json|sqlite|sqlite-onnx]
+zakira-replay index query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]
 zakira-replay chapters build <run-directory> [--min-duration <seconds>] [--max-duration <seconds>]
-zakira-replay align <run-directory>
+zakira-replay align build <run-directory>
 zakira-replay discover <url> [--browser] [--output <path>]
 zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
 zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
 zakira-replay queue status [--queue-id <id>] [--json]
 zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
-zakira-replay deps path
+zakira-replay deps status
 zakira-replay auth login <profile-name> [--url <start-url>]
 zakira-replay auth init-edge-profile [--url <start-url>] [--user-data-dir <path>] [--profile-directory <name>]
 zakira-replay auth list
@@ -234,7 +236,7 @@ User config commands:
 ```bash
 zakira-replay config path
 zakira-replay config list
-zakira-replay deps path
+zakira-replay deps status
 zakira-replay deps install media
 zakira-replay deps install onnx
 zakira-replay config set yt-dlp.path C:\tools\yt-dlp\yt-dlp.exe
@@ -359,7 +361,7 @@ Install the local models (~30 MB, four files: detection ONNX, classification ONN
 
 ```bash
 zakira-replay deps install ocr
-zakira-replay deps path     # prints the resolved OCR model paths
+zakira-replay deps status     # prints the resolved OCR model paths
 ```
 
 Models are stored under `<portable-dir>/models/rapidocr-ppocrv5-latin/` by default. Override with `ocr.local.modelDirectory` in config or `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY`. Individual file paths can be overridden with `ocr.local.detectionModelPath`, `ocr.local.classificationModelPath`, `ocr.local.recognitionModelPath`, and `ocr.local.dictionaryPath` (or the corresponding `ZAKIRA_REPLAY_OCR_*` env vars).
@@ -647,7 +649,7 @@ This is standard Chromium/Edge encryption behaviour — the same DPAPI machinery
 
 ## Evidence Alignment
 
-`zakira-replay align <run-directory>` (and the MCP `build_evidence_alignment` tool) emits two cross-modal views under `evidence-aligned/`. Both files share `evidence-aligned.schema.json` and are pure rearrangements of `evidence.json` (and `chapters/chapters.json` when present); no model calls are made.
+`zakira-replay align build <run-directory>` (and the MCP `align` tool) emits two cross-modal views under `evidence-aligned/`. Both files share `evidence-aligned.schema.json` and are pure rearrangements of `evidence.json` (and `chapters/chapters.json` when present); no model calls are made.
 
 - `evidence-aligned/by-chapter.json` — one entry per chapter, joining `slideIds`, `transcriptSegmentIds`, `ocrFrameIds`, `visionFrameIds`, and per-speaker statistics within the chapter window.
 - `evidence-aligned/by-slide.json` — one entry per slide, joining `frameIds`, the slide's `ocr` and `vision` results, `transcriptSegmentIds` spoken while the slide was visible, per-speaker statistics over the slide window, and the chapters the slide overlaps.
@@ -930,16 +932,16 @@ zakira-replay clip C:\media\demo.mp4 --start 01:20 --end 02:05 --output-name das
 Search indexing builds over `evidence.json` transcript, OCR, vision, and warnings. The default backend is a portable JSON TF-IDF index at `search/index.json`:
 
 ```bash
-zakira-replay search build runs\example-run
-zakira-replay search query runs\example-run "wireguard throughput" --top 5
+zakira-replay index build runs\example-run
+zakira-replay index query runs\example-run "wireguard throughput" --top 5
 ```
 
 SQLite search is also available. `sqlite` builds `search/index.sqlite` with FTS5 keyword/BM25 search. `sqlite-onnx` additionally stores local ONNX embedding vectors as float32 blobs and queries with hybrid FTS plus brute-force cosine scoring:
 
 ```bash
-zakira-replay search build runs\example-run --backend sqlite
-zakira-replay search build runs\example-run --backend sqlite-onnx --onnx-model C:\models\embedding.onnx --onnx-vocab C:\models\vocab.txt
-zakira-replay search query runs\example-run "secure tunnel performance" --backend auto --top 5
+zakira-replay index build runs\example-run --backend sqlite
+zakira-replay index build runs\example-run --backend sqlite-onnx --onnx-model C:\models\embedding.onnx --onnx-vocab C:\models\vocab.txt
+zakira-replay index query runs\example-run "secure tunnel performance" --backend auto --top 5
 ```
 
 ONNX embedding support expects a BERT/WordPiece-style `vocab.txt` plus an ONNX model with common text inputs such as `input_ids`, `attention_mask`, and optional `token_type_ids`. Zakira.Replay does not bundle a model.
@@ -965,15 +967,15 @@ It writes `chapters/chapters.json` and `chapters/chapters.md`.
 
 MCP exposes both a blocking compatibility tool and non-blocking job tools:
 
-- `analyze_video`: starts analysis and waits for completion. Use only for short videos.
-- `create_analysis_job`: starts analysis in the background and returns a `jobId`.
-- `get_job_status`: returns status and recent logs.
-- `get_job_result`: returns the completed manifest and artifact directory.
-- `cancel_job`: cancels a running job.
-- `extract_clip`: extracts a timestamped video clip.
-- `build_search_index`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`.
-- `query_search_index`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`.
-- `build_chapters`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
+- `analyze`: starts analysis and waits for completion. Use only for short videos.
+- `analyze.start`: starts analysis in the background and returns a `jobId`.
+- `analyze.status`: returns status and recent logs.
+- `analyze.result`: returns the completed manifest and artifact directory.
+- `analyze.cancel`: cancels a running job.
+- `clip`: extracts a timestamped video clip.
+- `index.build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`.
+- `index.query`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`.
+- `chapters.build`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
 
 Agents should prefer the job tools for long videos or LLM-backed OCR/vision work.
 
@@ -1069,7 +1071,7 @@ Values are wall-clock seconds rounded to milliseconds. Use these to flag slow st
 "taking longer than usual" alert, or compare end-to-end runtimes across configurations (CPU
 vs GPU Whisper, local-whisper vs cloud STT, etc.).
 
-## Pre-flight: `info --json`
+## Pre-flight: `info --output-format json`
 
 ```bash
 zakira-replay info --json

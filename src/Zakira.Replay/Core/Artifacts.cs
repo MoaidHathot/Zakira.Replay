@@ -105,7 +105,7 @@ public sealed class ArtifactStore
         var entry = new ArtifactCacheEntry("0.1", cacheKey, run.Id, DateTimeOffset.UtcNow);
         var path = GetCacheEntryPath(cacheKey);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine, cancellationToken).ConfigureAwait(false);
+        await WriteAllTextAtomicAsync(path, JsonSerializer.Serialize(entry, JsonOptions) + Environment.NewLine, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<T?> ReadJsonAsync<T>(VideoRun run, string relativePath, CancellationToken cancellationToken)
@@ -124,16 +124,38 @@ public sealed class ArtifactStore
     {
         var path = run.GetPath(relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await using var stream = File.Create(path);
-        await JsonSerializer.SerializeAsync(stream, value, JsonOptions, cancellationToken).ConfigureAwait(false);
-        await stream.WriteAsync(new byte[] { (byte)'\n' }, cancellationToken).ConfigureAwait(false);
+        // Atomic write: serialize to a sibling .tmp file then rename. Guarantees that
+        // a Ctrl-C / crash mid-serialization never leaves a corrupt JSON behind for
+        // downstream agents to read. Same-volume rename is atomic on every supported
+        // filesystem (NTFS, ext4, APFS).
+        var tempPath = path + ".tmp";
+        await using (var stream = File.Create(tempPath))
+        {
+            await JsonSerializer.SerializeAsync(stream, value, JsonOptions, cancellationToken).ConfigureAwait(false);
+            await stream.WriteAsync(new byte[] { (byte)'\n' }, cancellationToken).ConfigureAwait(false);
+        }
+
+        File.Move(tempPath, path, overwrite: true);
     }
 
     public async Task WriteTextAsync(VideoRun run, string relativePath, string value, CancellationToken cancellationToken)
     {
         var path = run.GetPath(relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-        await File.WriteAllTextAsync(path, value, cancellationToken).ConfigureAwait(false);
+        await WriteAllTextAtomicAsync(path, value, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Writes <paramref name="contents"/> to <paramref name="path"/> atomically by first
+    /// writing to a sibling .tmp file and renaming it over the destination. Same-volume
+    /// rename is atomic on every filesystem we support, so partial writes never become
+    /// visible to readers (downstream agents) even after a Ctrl-C or process crash.
+    /// </summary>
+    private static async Task WriteAllTextAtomicAsync(string path, string contents, CancellationToken cancellationToken)
+    {
+        var tempPath = path + ".tmp";
+        await File.WriteAllTextAsync(tempPath, contents, cancellationToken).ConfigureAwait(false);
+        File.Move(tempPath, path, overwrite: true);
     }
 
     private string GetCacheEntryPath(string cacheKey) => Path.Combine(RootDirectory, ".cache", cacheKey + ".json");

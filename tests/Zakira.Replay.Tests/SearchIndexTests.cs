@@ -60,7 +60,7 @@ public sealed class SearchIndexTests
         using var stdout = new StringWriter();
         using var stderr = new StringWriter();
 
-        var exitCode = await Cli.CliApp.RunAsync(["search", "build", runDirectory, "--backend", "sqlite"], stdout, stderr, CancellationToken.None);
+        var exitCode = await Cli.CliApp.RunAsync(["index", "build", runDirectory, "--backend", "sqlite"], stdout, stderr, CancellationToken.None);
 
         Assert.Equal(0, exitCode);
         Assert.Contains("with sqlite backend", stdout.ToString(), StringComparison.OrdinalIgnoreCase);

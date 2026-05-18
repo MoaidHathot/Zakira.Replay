@@ -167,7 +167,7 @@ public sealed class EvidenceAlignmentTests
         using var stdout = new StringWriter();
         using var stderr = new StringWriter();
 
-        var exitCode = await Cli.CliApp.RunAsync(["align", runDirectory], stdout, stderr, CancellationToken.None);
+        var exitCode = await Cli.CliApp.RunAsync(["align", "build", runDirectory], stdout, stderr, CancellationToken.None);
 
         Assert.Equal(0, exitCode);
         Assert.Contains("Aligned evidence", stdout.ToString(), StringComparison.Ordinal);

@@ -7,6 +7,141 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.9.0] — MCP + CLI modernization (breaking)
+
+This release is a deliberate hard break of the MCP and CLI surfaces. The hand-rolled
+JSON-RPC server and command parser shipped through 0.8.x have been retired in favour of
+the official `ModelContextProtocol` C# SDK (1.3.0) and `System.CommandLine` 3.0-preview.
+Every existing agent and script that talks to Zakira.Replay needs to update to the new
+names.
+
+### Breaking — MCP tool renames (`verb.noun`)
+
+| 0.8.x tool name                  | 0.9.0 tool name      |
+| -------------------------------- | -------------------- |
+| `analyze_video`                  | `analyze`            |
+| `create_analysis_job`            | `analyze.start`      |
+| `get_job_status`                 | `analyze.status`     |
+| `get_job_result`                 | `analyze.result`     |
+| `cancel_job`                     | `analyze.cancel`     |
+| `enqueue_analysis_queue_job`     | `queue.enqueue`      |
+| `run_analysis_queue`             | `queue.run`          |
+| `get_analysis_queue_status`      | `queue.status`       |
+| `extract_clip`                   | `clip`               |
+| `extract_frames`                 | `frames`             |
+| `build_search_index`             | `index.build`        |
+| `query_search_index`             | `index.query`        |
+| `build_chapters`                 | `chapters.build`     |
+| `build_evidence_alignment`       | `align`              |
+| `discover_videos`                | `discover`           |
+| `doctor`                         | `doctor`             |
+
+### Breaking — CLI verb renames (`noun verb`)
+
+| 0.8.x command           | 0.9.0 command           |
+| ----------------------- | ----------------------- |
+| `search build <dir>`    | `index build <dir>`     |
+| `search query <dir> q`  | `index query <dir> q`   |
+| `align <dir>`           | `align build <dir>`     |
+| `deps path`             | `deps status`           |
+| `llm ask <prompt>`      | `llm chat <prompt>`     |
+| `doctor --json`         | `doctor --output-format json` |
+| `info --json`           | `info --output-format json`   |
+| `queue status --json`   | `queue status --output-format json` |
+
+### Added — MCP
+
+- **Official `ModelContextProtocol` SDK** powers `zakira-replay mcp serve`. Tool input
+  schemas are auto-generated from C# method signatures — no more hand-maintained JSON
+  schemas inside the server.
+- **Resources** (`replay://`) — agent-readable artifacts at stable URIs without firing a
+  tool call:
+  - `replay://runs` (run index)
+  - `replay://runs/{id}/manifest` / `evidence` / `transcript` / `chapters`
+  - `replay://runs/{id}/aligned/by-chapter` / `aligned/by-slide`
+  - `replay://runs/{id}/frames/{frameId}/ocr` / `vision`
+  - `replay://jobs/{jobId}/logs` (live job log buffer)
+- **HTTP + SSE transports** — `zakira-replay mcp serve --transport http --port 8765`
+  hosts a Streamable HTTP MCP endpoint (Stateless) so hosted-agent platforms can talk to
+  Zakira.Replay without spawning a stdio subprocess. `--transport sse` is an alias for the
+  same Streamable HTTP endpoint (the SSE transport was folded into Streamable HTTP in the
+  MCP spec). `--transport stdio` remains the default for Claude Desktop / Cursor / VS Code
+  Copilot.
+
+### Added — CLI
+
+- **System.CommandLine 3.0** parser. Brings auto-generated `--help`, shell completion
+  (`zakira-replay completion {bash|zsh|pwsh|fish}`), validated enum options, and
+  `Ctrl-C → CancellationToken` plumbing for free.
+- **`runs` group** (new) — first-class run inspection without grepping the filesystem:
+  - `runs list` (most-recent-first)
+  - `runs show <id>` (path summary plus manifest in JSON when `--output-format json`)
+  - `runs delete <id> --force`
+  - `runs export <id> --format md|jsonl`
+- **`--preset meeting|lecture|demo|interview|raw`** on `analyze` — opinionated defaults
+  bundles so agents don't have to pass ten flags for the common scenarios. `meeting`
+  turns on `--ocr --vision --diarize --stt`; `lecture` enables `--ocr --vision`; `demo`
+  prefers the scene-cut frame strategy; `interview` skips frames and runs diarization.
+  Explicit flags always win.
+- **Global flags** (recursive across every subcommand):
+  - `--output-format text|json|ndjson` (replaces ad-hoc `--json`)
+  - `--log-file <path>`
+  - `--log-level info|debug|trace`
+  - `--correlation-id <string>` (intended for cross-tool tracing)
+
+### Added — reliability
+
+- **Atomic artifact writes** — `ArtifactStore.WriteJsonAsync` and `WriteTextAsync` now
+  write to a sibling `.tmp` file and rename it over the destination. Same-volume rename
+  is atomic on every supported filesystem, so a Ctrl-C / crash mid-serialization can no
+  longer leave a corrupt `manifest.json` or `evidence.json` for downstream agents.
+- **Ctrl-C handler** — `Program.cs` now wires `Console.CancelKeyPress` to a real
+  `CancellationTokenSource` instead of passing `CancellationToken.None`. Long-running
+  pipelines and subprocesses (yt-dlp, ffmpeg, Playwright) get a chance to clean up.
+
+### Added — services
+
+- **`Zakira.Replay.Core.ServiceCollectionExtensions.AddReplay`** — registers the full
+  service graph (`ConfigStore`, `ReplayConfig`, `DependencyResolver`, `ArtifactStore`,
+  `IYtDlpClient`, `IFfmpegClient`, `IBrowserVideoCaptureClient`, `AnalysisPipeline`,
+  `ClipExtractionService`, `FrameCaptureService`, `DiscoveryService`,
+  `SearchIndexService`, `ChapterBuilder`, `EvidenceAlignmentService`, plus
+  `Func<AnalysisPipeline>` for queue/job factories) with
+  `Microsoft.Extensions.DependencyInjection`. The MCP host and the CLI's MCP tests both
+  consume this extension; downstream embedders can host Zakira.Replay without rebuilding
+  the dependency graph by hand.
+
+### New packages
+
+- `Microsoft.Extensions.Hosting` 10.0.8
+- `Microsoft.Extensions.DependencyInjection` 10.0.8
+- `Microsoft.Extensions.Logging.Console` 10.0.8
+- `ModelContextProtocol` 1.3.0
+- `ModelContextProtocol.AspNetCore` 1.3.0 (for the HTTP/SSE MCP transport)
+- `System.CommandLine` 3.0.0-preview.4
+
+### Removed
+
+- `Zakira.Replay.Mcp.McpServer` (the hand-rolled JSON-RPC dispatcher) — replaced by
+  `ReplayTools` + `ReplayResources` + `McpHost` on top of the official SDK.
+- `Zakira.Replay.Cli.CommandOptions` (the hand-rolled argv parser) — replaced by
+  System.CommandLine's `Option<T>` / `Argument<T>` bindings.
+- `--json` flag on individual commands — superseded by the global `--output-format json`.
+
+### Migration notes
+
+Agents currently calling 0.8.x tool names: update the tool name to the 0.9.0 equivalent
+from the table above. Schemas for individual tool arguments stayed conceptually identical
+(same property names and same types) but `ListToolsAsync()` will only return the new
+names — there is no deprecation shim.
+
+CLI scripts: update `search build` → `index build`, `search query` → `index query`,
+`align` → `align build`, `deps path` → `deps status`, `llm ask` → `llm chat`, and replace
+per-command `--json` with the global `--output-format json`.
+
+MCP transport upgrades: the new HTTP transport requires `ModelContextProtocol.AspNetCore`,
+which is already a direct dependency of the global tool nupkg. No extra install needed.
+
 ## [Unreleased] — Dedicated Edge profile for browser capture
 
 ### Added

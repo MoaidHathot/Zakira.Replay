@@ -251,7 +251,39 @@ Backend choice:
 
 - `json`: portable sparse TF-IDF fallback.
 - `sqlite`: SQLite FTS5 keyword search.
-- `sqlite-onnx`: semantic search, best for natural-language retrieval, requires ONNX model and vocabulary.
+- `sqlite-onnx`: semantic search via local ONNX embedding model, best for natural-language retrieval.
+
+Search-embedding model choice (0.10.0+): three models ship in the known-model registry.
+Pass `onnxModel` to `index.build` / `index.query` to select one; the default is
+`bge-small-en-v1.5`. Each model auto-downloads on first `index.build` when
+`search.onnx.autoDownload=true`.
+
+| Model id | Language | Footprint | Notes |
+|---|---|---|---|
+| `bge-small-en-v1.5` (default) | English | ~33 MB ONNX | Top of the 384-dim retrieval tier. |
+| `snowflake-arctic-embed-s` | English | ~33 MB ONNX | Same family as BGE; slight quality difference; pick when BGE underperforms. |
+| `multilingual-e5-small` | 100+ languages | ~118 MB ONNX | Use for non-English transcripts. |
+
+```json
+{
+  "runDirectory": "<artifactDirectory>",
+  "backend": "sqlite-onnx",
+  "onnxModel": "multilingual-e5-small"
+}
+```
+
+For custom local models, set `onnxModelPath` + `onnxTokenizerPath` and pass
+`onnxModelKind` as `bert`, `bge`, or `e5` to apply the right prefix and pooling.
+
+**Important**: indexes built with one model cannot be queried with another. If `onnxModel`
+differs from what the index was built with, the tool returns
+`SEARCH_INDEX_EMBEDDING_MISMATCH` and the recommended fix is to call `index.build` again
+with `force=true` (per-run rebuild) or pass `onnxModel: "<original-id>"` to pin the
+indexed model.
+
+The `index.build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
+`embeddingDimensions` so orchestrators can persist the index identity alongside the
+`indexPath`.
 
 Treat search results as evidence pointers. Open the referenced artifacts before making final claims.
 

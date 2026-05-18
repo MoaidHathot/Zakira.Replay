@@ -14,7 +14,6 @@ public sealed class PortableDependencyInstaller
     public const string Diarization = "diarization";
     public const string Vision = "vision";
     public const string All = "all";
-    public const string DefaultOnnxModelFile = "model_quantized.onnx";
 
     // RapidOCR PP-OCRv5 latin model files (matches RapidOcrNet defaults; see https://github.com/BobLd/RapidOcrNet).
     public const string OcrDetectionModelFile = "ch_PP-OCRv5_det_mobile.onnx";
@@ -33,7 +32,6 @@ public sealed class PortableDependencyInstaller
     private const string YtDlpLinuxArm64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
     private const string YtDlpMacOsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
     private const string FfmpegWindowsX64Url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
-    private const string OnnxRepositoryBaseUrl = "https://huggingface.co/Xenova/all-MiniLM-L6-v2/resolve/main";
 
     // RapidAI's RapidOCR model store on ModelScope; same SHA-pinned tag the upstream Python package uses.
     private const string RapidOcrModelBaseUrl = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0";
@@ -91,6 +89,28 @@ public sealed class PortableDependencyInstaller
         return Path.Combine(Layout.OnnxModelDirectory, "vocab.txt");
     }
 
+    /// <summary>
+    /// Returns the tokenizer file path for the currently-configured search-embedding model.
+    /// For BGE / arctic / generic-BERT models this is the same as
+    /// <see cref="GetOnnxVocabularyPath"/>; for E5 / XLM-R it points at the SentencePiece
+    /// binary model file instead.
+    /// </summary>
+    public string GetOnnxTokenizerPath()
+    {
+        var entry = ResolveSearchEmbeddingModel(config);
+        return Path.Combine(Layout.OnnxModelDirectory, entry?.TokenizerFileName ?? "vocab.txt");
+    }
+
+    /// <summary>
+    /// Returns the active search-embedding model entry from the registry, or null when the
+    /// user has configured an arbitrary <c>search.onnx.model</c> id that's not in
+    /// <see cref="KnownSearchEmbeddingModels"/>.
+    /// </summary>
+    public KnownSearchEmbeddingModel? GetActiveSearchEmbeddingModel()
+    {
+        return ResolveSearchEmbeddingModel(config);
+    }
+
     public string GetOcrDetectionModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrDetectionModelFile);
 
     public string GetOcrClassificationModelPath() => Path.Combine(Layout.OcrModelDirectory, OcrClassificationModelFile);
@@ -137,11 +157,6 @@ public sealed class PortableDependencyInstaller
     public static string GetDefaultPortableDirectory()
     {
         return Path.Combine(GetDefaultDataDirectory(), "portable");
-    }
-
-    public static string GetDefaultOnnxModelDirectory()
-    {
-        return Path.Combine(GetDefaultPortableDirectory(), "models", "all-MiniLM-L6-v2");
     }
 
     public static string GetDefaultOcrModelDirectory()
@@ -345,24 +360,26 @@ public sealed class PortableDependencyInstaller
 
     private async Task<PortableDependencyInstallItem> InstallOnnxAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
     {
+        // Resolve the active known model entry. Custom user-supplied models (no registry
+        // hit) cannot be auto-downloaded — for those the user has already pointed
+        // search.onnx.modelPath / tokenizerPath at their own files.
+        var entry = ResolveSearchEmbeddingModel(config)
+            ?? throw new ReplayException(
+                $"search.onnx.model='{config.Search.Onnx.Model}' is not a known model id ({string.Join(", ", KnownSearchEmbeddingModels.Ids)}). " +
+                "Either choose a known id or set search.onnx.modelPath / tokenizerPath explicitly and skip `deps install onnx`.");
+
         var modelDirectory = Layout.OnnxModelDirectory;
         Directory.CreateDirectory(modelDirectory);
-        var modelFile = GetOnnxModelFile(config);
-        var files = new[]
-        {
-            new OnnxDownloadFile("model.onnx", $"{OnnxRepositoryBaseUrl}/onnx/{Uri.EscapeDataString(modelFile)}?download=true"),
-            new OnnxDownloadFile("vocab.txt", $"{OnnxRepositoryBaseUrl}/vocab.txt?download=true"),
-            new OnnxDownloadFile("config.json", $"{OnnxRepositoryBaseUrl}/config.json?download=true"),
-            new OnnxDownloadFile("tokenizer_config.json", $"{OnnxRepositoryBaseUrl}/tokenizer_config.json?download=true")
-        };
 
         var installed = false;
-        foreach (var file in files)
+        foreach (var file in entry.Files)
         {
-            installed |= await DownloadFileAsync(file.Url, Path.Combine(modelDirectory, file.Name), force, progress, cancellationToken).ConfigureAwait(false);
+            var url = $"{entry.RepositoryBaseUrl}/{file.RemotePath}?download=true";
+            var localPath = Path.Combine(modelDirectory, file.LocalName);
+            installed |= await DownloadFileAsync(url, localPath, force, progress, cancellationToken).ConfigureAwait(false);
         }
 
-        return new PortableDependencyInstallItem(Onnx, modelDirectory, installed, OnnxRepositoryBaseUrl, installed ? "downloaded" : "already exists");
+        return new PortableDependencyInstallItem(Onnx, modelDirectory, installed, entry.RepositoryBaseUrl, installed ? $"downloaded {entry.Id}" : $"already exists ({entry.Id})");
     }
 
     private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallOcrModelsAsync(string? languagePack, bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -615,10 +632,30 @@ public sealed class PortableDependencyInstaller
 
     private static string GetOnnxModelDirectory(ReplayConfig config)
     {
+        // Explicit overrides win first; otherwise the directory follows the active
+        // search-embedding model id so a user who flips `search.onnx.model` between
+        // bge-small-en-v1.5 / snowflake-arctic-embed-s / multilingual-e5-small can keep
+        // all three model bundles side-by-side under `<portable>/models/<id>/`.
         return Path.GetFullPath(Environment.ExpandEnvironmentVariables(FirstNonEmpty(
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY"),
             config.Search.Onnx.ModelDirectory,
-            GetDefaultOnnxModelDirectory())!));
+            GetActiveSearchModelDirectory(config))!));
+    }
+
+    private static string GetActiveSearchModelDirectory(ReplayConfig config)
+    {
+        var entry = ResolveSearchEmbeddingModel(config);
+        var directoryName = entry?.DirectoryName ?? KnownSearchEmbeddingModels.DefaultModel;
+        return Path.Combine(GetDefaultPortableDirectory(), "models", directoryName);
+    }
+
+    private static KnownSearchEmbeddingModel? ResolveSearchEmbeddingModel(ReplayConfig config)
+    {
+        var id = FirstNonEmpty(
+            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL"),
+            config.Search.Onnx.Model,
+            KnownSearchEmbeddingModels.DefaultModel);
+        return KnownSearchEmbeddingModels.TryGet(id, out var entry) ? entry : null;
     }
 
     private static string GetOcrModelDirectory(ReplayConfig config)
@@ -645,14 +682,6 @@ public sealed class PortableDependencyInstaller
             Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_DIARIZATION_MODEL_DIRECTORY"),
             config.Diarization.ModelDirectory,
             GetDefaultDiarizationModelDirectory())!));
-    }
-
-    private static string GetOnnxModelFile(ReplayConfig config)
-    {
-        return FirstNonEmpty(
-            Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_FILE"),
-            config.Search.Onnx.ModelFile,
-            DefaultOnnxModelFile)!;
     }
 
     private static string GetExecutableFileName(string executableName)

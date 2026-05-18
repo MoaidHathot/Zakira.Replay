@@ -7,6 +7,121 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.10.0] — Configurable search-embedding model (breaking for `sqlite-onnx` indexes)
+
+The `sqlite-onnx` search backend now drives off a registry of known search-embedding models
+instead of the single hardcoded `Xenova/all-MiniLM-L6-v2`. New users get a materially better
+default (`bge-small-en-v1.5`); existing users can switch via a single config key or per-call
+flag. Existing `sqlite-onnx` indexes built against `all-MiniLM-L6-v2` need to be rebuilt
+once with the new model; the runtime detects the mismatch and refuses to mix vector spaces.
+
+### Added
+
+- **Known-model registry** for `zakira-replay deps install onnx`. Three entries shipping at
+  0.10.0:
+  - `bge-small-en-v1.5` (default; English; 384-dim; ~33 MB; BERT WordPiece tokenizer; CLS pooling).
+  - `snowflake-arctic-embed-s` (English; 384-dim; ~33 MB; BERT WordPiece tokenizer; CLS pooling).
+  - `multilingual-e5-small` (multilingual; 384-dim; ~118 MB; XLM-RoBERTa SentencePiece tokenizer; mean pooling).
+- **`search.onnx.model`** config key (and `ZAKIRA_REPLAY_ONNX_MODEL` env var). Defaults to
+  `bge-small-en-v1.5`. Pick a known id or a free-form string when paired with
+  `search.onnx.modelPath` + `search.onnx.tokenizerPath`.
+- **`search.onnx.modelKind`** config key (and `ZAKIRA_REPLAY_ONNX_MODEL_KIND` env var) —
+  embedding scheme override: `bert`, `bge`, or `e5`. Auto-derived from
+  `search.onnx.model` when omitted via
+  `OnnxSearchEmbeddingProvider.ResolveKind(modelId, explicitKind)`.
+- **`search.onnx.tokenizerPath`** config key (and `ZAKIRA_REPLAY_ONNX_TOKENIZER_PATH`
+  env var) — points at the tokenizer file (`vocab.txt` for BERT, `sentencepiece.bpe.model`
+  for XLM-R). The 0.9.x `search.onnx.vocabularyPath` / `ZAKIRA_REPLAY_ONNX_VOCAB_PATH` /
+  `--onnx-vocab` knobs are preserved as aliases.
+- **CLI**:
+  - `zakira-replay deps install onnx --model <id>` — explicit per-call override.
+  - `zakira-replay index build|query --onnx-model <id>` (selector, was a path) plus
+    `--onnx-model-kind <bert|bge|e5>`, `--onnx-model-path <file>` (renamed from the
+    historical path-only `--onnx-model`), and `--onnx-tokenizer-path <file>`.
+  - `zakira-replay deps status` now reports the resolved search-embedding model and
+    `ONNX tokenizer:` path alongside the legacy ONNX model path.
+- **MCP** `index.build` / `index.query` tools take new parameters: `onnxModel`,
+  `onnxModelKind`, `onnxModelPath`, `onnxTokenizerPath` (plus the legacy `onnxVocab`).
+  `index.build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
+  `embeddingDimensions` so MCP clients can persist the index identity.
+- **`SEARCH_INDEX_EMBEDDING_MISMATCH`** error code. Querying a `sqlite-onnx` index built
+  with model A using a runtime configured for model B raises this typed exception (HTTP
+  400-equivalent) and recommends `index build --force` or pinning the original model via
+  `--onnx-model <id>`. The vector spaces produced by different embedding models are not
+  interchangeable even when dimensions match, so cross-model querying is intentionally
+  refused.
+- **Side-aware `ISearchEmbeddingProvider.EmbedAsync(text, side, ct)`** overload.
+  Document-side and query-side calls now flow through this overload so asymmetric models
+  (BGE, E5) apply the right prefix. The historical single-arg overload still works for
+  third-party providers; the default implementation forwards to it with `side =
+  Document`, matching the legacy behaviour.
+
+### Changed
+
+- **Default search-embedding model**: `all-MiniLM-L6-v2` → `bge-small-en-v1.5`.
+- **Tokenizer library**: hand-rolled `WordPieceTokenizer` (~110 LOC inside
+  `OnnxSearchEmbeddingProvider`) replaced with `Microsoft.ML.Tokenizers` 2.0.0
+  (`BertTokenizer.Create(vocab.txt)` for BERT-family; `SentencePieceTokenizer.Create(stream)`
+  for XLM-R-family). Removes a parallel implementation we were maintaining; no behaviour
+  change against the legacy `all-MiniLM-L6-v2` workload.
+- **Pooling strategy** is now per-model-kind: CLS pooling for `bge`, mean pooling (over the
+  attention mask) for `bert` and `e5`. Matches each upstream model's training-time pooling
+  head; using the wrong head measurably degrades retrieval quality.
+- **Prefixes**: BGE query side gets `"Represent this sentence for searching relevant
+  passages: "`; E5 sides get `"query: "` / `"passage: "`. Generic BERT models (legacy
+  `all-MiniLM-L6-v2`-style) get no prefix on either side. Applied in
+  `OnnxSearchEmbeddingProvider.ApplyPrefix(text, side)`.
+- **SQLite index metadata** schema bumped from `0.1` to `0.2`. Three new rows in the
+  `metadata` table: `embeddingModel`, `embeddingModelKind`, `embeddingDimensions`.
+  `search-index.schema.json` extended with optional `embeddingModel`,
+  `embeddingModelKind`, `embeddingDimensions` fields.
+- **`<portable>/models/` layout**: each known search-embedding model now lives in its own
+  directory (`<portable>/models/bge-small-en-v1.5/`, `<portable>/models/snowflake-arctic-embed-s/`,
+  `<portable>/models/multilingual-e5-small/`). Switching `search.onnx.model` between known
+  ids picks up the corresponding bundle automatically — no config rewrite, and all three
+  can coexist on disk.
+
+### Removed
+
+- **Bundled `models/all-MiniLM-L6-v2/`** (22 MB ONNX + vocab + config blobs). The model
+  was already auto-downloaded by `PortableDependencyInstaller` for production use; the
+  in-repo copy only made the git history heavier. New default
+  (`bge-small-en-v1.5`) is auto-downloaded the same way on first `index build`.
+- **`scripts/download-onnx-model.ps1`**. Auto-download covers the same flow; the script
+  was a leftover from the pre-installer days.
+- **`PortableDependencyInstaller.DefaultOnnxModelFile`** constant and the
+  `GetDefaultOnnxModelDirectory()` static helper. Replaced by per-model layout via the
+  registry.
+- **`ZAKIRA_REPLAY_ONNX_MODEL_FILE`** env var. No longer needed — the file name is fixed
+  by the model's registry entry.
+- **`search.onnx.modelFile`** config key continues to load from disk (preserved for
+  forward-compat) but is no longer consulted by the installer.
+
+### Migration
+
+Existing `sqlite-onnx` indexes built under 0.9.x and earlier need a one-time rebuild
+because vectors produced by `all-MiniLM-L6-v2` and vectors produced by `bge-small-en-v1.5`
+are not interchangeable. The pipeline tells you exactly what to do:
+
+```text
+[error] SEARCH_INDEX_EMBEDDING_MISMATCH:
+  index was built with all-MiniLM-L6-v2 (bert, ?d); runtime is bge-small-en-v1.5 (bge).
+  The vector spaces are not interchangeable. Fix one of two ways:
+    (1) rebuild with the runtime model:  zakira-replay index build <run-dir> --force
+    (2) pin the indexed model for this query:  --onnx-model all-MiniLM-L6-v2
+```
+
+For users who want to stay on the legacy model: keep your `<portable>/models/all-MiniLM-L6-v2/`
+directory (or restore it from a 0.9.x install) and run `zakira-replay config set
+search.onnx.model all-MiniLM-L6-v2` plus `zakira-replay config set
+search.onnx.modelPath <path>/model.onnx` and `zakira-replay config set
+search.onnx.vocabularyPath <path>/vocab.txt`. The runtime will treat it as a custom model
+(kind `bert`, mean pooling, no prefixes — matching the 0.9.x behaviour).
+
+For users analysing non-English content: `zakira-replay config set search.onnx.model
+multilingual-e5-small` switches to the XLM-RoBERTa-based multilingual variant; first
+`index build` after that triggers the ~118 MB model download.
+
 ## [0.9.0] — MCP + CLI modernization (breaking)
 
 This release is a deliberate hard break of the MCP and CLI surfaces. The hand-rolled

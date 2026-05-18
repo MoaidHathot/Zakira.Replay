@@ -41,25 +41,44 @@ public sealed partial class SearchIndexService
         await CreateSqliteSchemaAsync(connection, cancellationToken).ConfigureAwait(false);
         using var transaction = connection.BeginTransaction();
         var createdAt = DateTimeOffset.UtcNow;
-        await InsertMetadataAsync(connection, transaction, "schemaVersion", "0.1", cancellationToken).ConfigureAwait(false);
+        await InsertMetadataAsync(connection, transaction, "schemaVersion", "0.2", cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "backend", options.Backend, cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "runId", evidence.RunId, cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "createdAt", createdAt.ToString("O", CultureInfo.InvariantCulture), cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "documentCount", documents.Length.ToString(CultureInfo.InvariantCulture), cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "embeddingProvider", provider?.Name ?? "none", cancellationToken).ConfigureAwait(false);
+        // 0.10.0: persist the embedding model identity so a later query against the same
+        // index can detect cross-model vector incompatibility (vectors trained against
+        // bge-small are not interchangeable with vectors trained against multilingual-e5
+        // even when both produce 384-dim outputs).
+        if (provider is not null)
+        {
+            await InsertMetadataAsync(connection, transaction, "embeddingModel", provider.ModelId, cancellationToken).ConfigureAwait(false);
+            await InsertMetadataAsync(connection, transaction, "embeddingModelKind", provider.ModelKind, cancellationToken).ConfigureAwait(false);
+            await InsertMetadataAsync(connection, transaction, "embeddingDimensions", provider.Dimensions.ToString(CultureInfo.InvariantCulture), cancellationToken).ConfigureAwait(false);
+        }
 
         foreach (var document in documents)
         {
             var rowId = await InsertDocumentAsync(connection, transaction, document, cancellationToken).ConfigureAwait(false);
             if (provider is not null)
             {
-                var vector = await provider.EmbedAsync(document.Text, cancellationToken).ConfigureAwait(false);
+                var vector = await provider.EmbedAsync(document.Text, SearchEmbeddingSide.Document, cancellationToken).ConfigureAwait(false);
                 await InsertEmbeddingAsync(connection, transaction, rowId, vector, cancellationToken).ConfigureAwait(false);
             }
         }
 
         transaction.Commit();
-        return new SearchIndexBuildResult(options.Backend, evidence.RunId, documents.Length, indexPath, createdAt);
+        return new SearchIndexBuildResult(
+            options.Backend,
+            evidence.RunId,
+            documents.Length,
+            indexPath,
+            createdAt,
+            Manifest: null,
+            EmbeddingModel: provider?.ModelId,
+            EmbeddingModelKind: provider?.ModelKind,
+            EmbeddingDimensions: provider?.Dimensions);
     }
 
     private async Task<SearchQueryResult> QuerySqliteAsync(string indexPathOrRunDirectory, string query, int top, SearchIndexQueryOptions options, CancellationToken cancellationToken)
@@ -236,7 +255,25 @@ public sealed partial class SearchIndexService
             return [];
         }
 
-        var queryVector = await provider.EmbedAsync(query, cancellationToken).ConfigureAwait(false);
+        // 0.10.0: refuse to mix vectors across embedding models. The geometry is incomparable
+        // even when dimensions match, so a query with the wrong model would return
+        // plausible-looking but meaningless results. Caller fix is `index build --force`
+        // (rebuild) or `--onnx-model <id>` (pin the index's model for this query).
+        var indexedModel = await ReadMetadataAsync(connection, "embeddingModel", cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(indexedModel)
+            && !string.Equals(indexedModel, provider.ModelId, StringComparison.OrdinalIgnoreCase))
+        {
+            var indexedKind = await ReadMetadataAsync(connection, "embeddingModelKind", cancellationToken).ConfigureAwait(false);
+            var indexedDims = await ReadMetadataAsync(connection, "embeddingDimensions", cancellationToken).ConfigureAwait(false);
+            throw new SearchIndexEmbeddingMismatchException(
+                indexedModel!,
+                indexedKind ?? "unknown",
+                provider.ModelId,
+                provider.ModelKind,
+                indexedDims);
+        }
+
+        var queryVector = await provider.EmbedAsync(query, SearchEmbeddingSide.Query, cancellationToken).ConfigureAwait(false);
         if (queryVector.Length == 0)
         {
             return [];
@@ -258,6 +295,15 @@ public sealed partial class SearchIndexService
         }
 
         return scores;
+    }
+
+    private static async Task<string?> ReadMetadataAsync(SqliteConnection connection, string key, CancellationToken cancellationToken)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT value FROM metadata WHERE key = $key LIMIT 1;";
+        command.Parameters.AddWithValue("$key", key);
+        var result = await command.ExecuteScalarAsync(cancellationToken).ConfigureAwait(false);
+        return result is string text ? text : null;
     }
 
     private static async Task<bool> HasEmbeddingsAsync(SqliteConnection connection, CancellationToken cancellationToken)
@@ -307,11 +353,17 @@ public sealed partial class SearchIndexService
         var config = SearchEmbeddingConfig.From(options);
         if (config.HasOnnxConfiguration)
         {
-            return new OnnxSearchEmbeddingProvider(config.ModelPath!, config.VocabularyPath!, config.MaxSequenceLength, config.EmbeddingDimensions);
+            return new OnnxSearchEmbeddingProvider(
+                config.ModelPath!,
+                config.TokenizerPath!,
+                config.MaxSequenceLength,
+                config.EmbeddingDimensions,
+                config.ModelKind,
+                config.ModelId);
         }
 
         return require
-            ? throw new ReplayException("The sqlite-onnx search backend requires an ONNX model path and vocabulary path. Use --onnx-model and --onnx-vocab, set ZAKIRA_REPLAY_ONNX_MODEL_PATH and ZAKIRA_REPLAY_ONNX_VOCAB_PATH, or configure search.onnx.modelPath and search.onnx.vocabularyPath.")
+            ? throw new ReplayException("The sqlite-onnx search backend requires an ONNX model path and tokenizer path. Set search.onnx.model to a known id (`bge-small-en-v1.5`, `snowflake-arctic-embed-s`, `multilingual-e5-small`) with `search.onnx.autoDownload=true`, or pass --onnx-model-path and --onnx-tokenizer-path, or set ZAKIRA_REPLAY_ONNX_MODEL_PATH and ZAKIRA_REPLAY_ONNX_TOKENIZER_PATH explicitly.")
             : null;
     }
 
@@ -325,11 +377,17 @@ public sealed partial class SearchIndexService
         var config = SearchEmbeddingConfig.From(options);
         if (config.HasOnnxConfiguration)
         {
-            return new OnnxSearchEmbeddingProvider(config.ModelPath!, config.VocabularyPath!, config.MaxSequenceLength, config.EmbeddingDimensions);
+            return new OnnxSearchEmbeddingProvider(
+                config.ModelPath!,
+                config.TokenizerPath!,
+                config.MaxSequenceLength,
+                config.EmbeddingDimensions,
+                config.ModelKind,
+                config.ModelId);
         }
 
         return require
-            ? throw new ReplayException("The sqlite-onnx search backend requires an ONNX model path and vocabulary path for querying. Use --onnx-model and --onnx-vocab, set ZAKIRA_REPLAY_ONNX_MODEL_PATH and ZAKIRA_REPLAY_ONNX_VOCAB_PATH, or configure search.onnx.modelPath and search.onnx.vocabularyPath.")
+            ? throw new ReplayException("The sqlite-onnx search backend requires an ONNX model path and tokenizer path for querying. Set search.onnx.model to a known id, or pass --onnx-model-path and --onnx-tokenizer-path, or set ZAKIRA_REPLAY_ONNX_MODEL_PATH and ZAKIRA_REPLAY_ONNX_TOKENIZER_PATH explicitly.")
             : null;
     }
 

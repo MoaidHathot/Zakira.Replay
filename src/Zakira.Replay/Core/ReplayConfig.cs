@@ -541,6 +541,31 @@ public sealed class OnnxEmbeddingConfig
     public string? ModelDirectory { get; set; }
 
     public string? ModelFile { get; set; }
+
+    /// <summary>
+    /// Identifier of the search-embedding model the <c>sqlite-onnx</c> backend uses. One of
+    /// the registry entries in <see cref="KnownSearchEmbeddingModels"/>
+    /// (<c>bge-small-en-v1.5</c> by default in 0.10.0,
+    /// also <c>snowflake-arctic-embed-s</c> and <c>multilingual-e5-small</c>),
+    /// or a free-form string for a user-supplied model when paired with explicit
+    /// <see cref="ModelPath"/> + <see cref="VocabularyPath"/>.
+    /// </summary>
+    public string? Model { get; set; }
+
+    /// <summary>
+    /// Embedding scheme override: one of <c>bert</c>, <c>bge</c>, <c>e5</c>. When null the
+    /// kind is auto-derived from <see cref="Model"/> (or from the model directory name when
+    /// only paths are configured) via
+    /// <see cref="OnnxSearchEmbeddingProvider.ResolveKind(string?, string?)"/>.
+    /// </summary>
+    public string? ModelKind { get; set; }
+
+    /// <summary>
+    /// Tokenizer-file path override. Defaults to the model directory's <c>vocab.txt</c>
+    /// (BERT WordPiece for bge/arctic/bert) or <c>sentencepiece.bpe.model</c> (XLM-R
+    /// SentencePiece for multilingual-e5). Set this when pointing at a non-standard layout.
+    /// </summary>
+    public string? TokenizerPath { get; set; }
 }
 
 public sealed class LlmConfig
@@ -734,8 +759,12 @@ public sealed class ConfigStore
                 Onnx = new OnnxEmbeddingConfig
                 {
                     AutoDownload = false,
-                    ModelDirectory = PortableDependencyInstaller.GetDefaultOnnxModelDirectory(),
-                    ModelFile = PortableDependencyInstaller.DefaultOnnxModelFile
+                    // 0.10.0 default; matches KnownSearchEmbeddingModels.DefaultModel. We
+                    // intentionally don't set ModelDirectory / ModelFile here so the
+                    // installer resolves the directory from the configured model id at
+                    // call time — that way switching `search.onnx.model` between known ids
+                    // automatically picks up the new layout without a config rewrite.
+                    Model = KnownSearchEmbeddingModels.DefaultModel
                 }
             },
             Llm = new LlmConfig
@@ -1011,6 +1040,26 @@ public sealed class ConfigStore
             case "search.onnx.modelfile":
             case "search.onnx.model-file":
                 config.Search.Onnx.ModelFile = NormalizeNonEmpty(value, key);
+                break;
+            case "search.onnx.model":
+            case "search.onnx.modelname":
+            case "search.onnx.model-name":
+                // Stored as-is so users can swap between known ids and custom strings without
+                // path normalization mangling them.
+                config.Search.Onnx.Model = NormalizeNonEmpty(value, key);
+                break;
+            case "search.onnx.modelkind":
+            case "search.onnx.model-kind":
+            case "search.onnx.kind":
+                // Validate up-front so a typo doesn't survive into a silent fallback at
+                // embed time. ParseKind throws ReplayException on unknown values.
+                _ = OnnxSearchEmbeddingProvider.ParseKind(value);
+                config.Search.Onnx.ModelKind = value.Trim().ToLowerInvariant();
+                break;
+            case "search.onnx.tokenizerpath":
+            case "search.onnx.tokenizer-path":
+            case "search.onnx.tokenizer":
+                config.Search.Onnx.TokenizerPath = NormalizeFilePath(value);
                 break;
             case "llm.provider":
                 config.Llm.Provider = LlmProviderFactory.Normalize(value);
@@ -1422,6 +1471,9 @@ public sealed class ConfigStore
             "search.onnx.autodownload" or "search.onnx.auto-download" => config.Search.Onnx.AutoDownload.ToString(),
             "search.onnx.modeldirectory" or "search.onnx.model-directory" => config.Search.Onnx.ModelDirectory,
             "search.onnx.modelfile" or "search.onnx.model-file" => config.Search.Onnx.ModelFile,
+            "search.onnx.model" or "search.onnx.modelname" or "search.onnx.model-name" => config.Search.Onnx.Model,
+            "search.onnx.modelkind" or "search.onnx.model-kind" or "search.onnx.kind" => config.Search.Onnx.ModelKind,
+            "search.onnx.tokenizerpath" or "search.onnx.tokenizer-path" or "search.onnx.tokenizer" => config.Search.Onnx.TokenizerPath,
             "llm.provider" => config.Llm.Provider,
             "llm.openai.baseurl" or "llm.openai.base-url" => config.Llm.OpenAi.BaseUrl,
             "llm.openai.apikeyenvvars" or "llm.openai.api-key-env-vars" or "llm.openai.apikeyenvironmentvariables" or "llm.openai.api-key-environment-variables" => FormatEnvironmentVariableNames(config.Llm.OpenAi.ApiKeyEnvironmentVariables),
@@ -1529,6 +1581,9 @@ public sealed class ConfigStore
             ["search.onnx.autoDownload"] = config.Search.Onnx.AutoDownload.ToString(),
             ["search.onnx.modelDirectory"] = config.Search.Onnx.ModelDirectory,
             ["search.onnx.modelFile"] = config.Search.Onnx.ModelFile,
+            ["search.onnx.model"] = config.Search.Onnx.Model,
+            ["search.onnx.modelKind"] = config.Search.Onnx.ModelKind,
+            ["search.onnx.tokenizerPath"] = config.Search.Onnx.TokenizerPath,
             ["llm.provider"] = config.Llm.Provider,
             ["llm.openai.apiKeyEnvVars"] = FormatEnvironmentVariableNames(config.Llm.OpenAi.ApiKeyEnvironmentVariables),
             ["llm.openai.baseUrlEnvVars"] = FormatEnvironmentVariableNames(config.Llm.OpenAi.BaseUrlEnvironmentVariables),

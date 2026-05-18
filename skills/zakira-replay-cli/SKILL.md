@@ -282,7 +282,38 @@ Backend choice:
 
 - `json`: portable sparse TF-IDF fallback.
 - `sqlite`: SQLite FTS5 keyword search.
-- `sqlite-onnx`: semantic search, best for natural-language retrieval, requires ONNX model and vocabulary.
+- `sqlite-onnx`: semantic search via local ONNX embedding model, best for natural-language retrieval.
+
+Search-embedding model choice (0.10.0+): three models ship in the known-model registry; the
+runtime auto-downloads the chosen one on first `index build` when `search.onnx.autoDownload=true`.
+
+| Model id | Language | Footprint | Notes |
+|---|---|---|---|
+| `bge-small-en-v1.5` (default) | English | ~33 MB ONNX | BERT WordPiece tokenizer; CLS pooling; query-side prefix. Top of the 384-dim retrieval tier. |
+| `snowflake-arctic-embed-s` | English | ~33 MB ONNX | Same architecture as BGE (same tokenizer, same pooling); slight quality difference; pick if BGE underperforms on your corpus. |
+| `multilingual-e5-small` | 100+ languages | ~118 MB ONNX | XLM-RoBERTa SentencePiece tokenizer; mean pooling; query+passage prefixes. Use for non-English transcripts. |
+
+Pick a model once via config, or per-call via `--onnx-model`:
+
+```powershell
+# Persistent default
+zakira-replay config set search.onnx.model multilingual-e5-small
+zakira-replay deps install onnx                       # downloads the configured model
+
+# Per-call override (no config change)
+zakira-replay index build runs\<run-id> --backend sqlite-onnx --onnx-model multilingual-e5-small
+zakira-replay index query runs\<run-id> "<question>" --backend sqlite-onnx --onnx-model multilingual-e5-small
+```
+
+For custom local models that aren't in the registry, point `--onnx-model-path` and
+`--onnx-tokenizer-path` at your files and set `--onnx-model-kind {bert|bge|e5}` so the
+provider applies the right prefix and pooling.
+
+**Important**: indexes built with one model cannot be queried with another. If you change
+`search.onnx.model` after having built indexes, the next query raises
+`SEARCH_INDEX_EMBEDDING_MISMATCH`. Recover with `zakira-replay index build runs\<run-id> --force`
+to rebuild against the new model, or pass `--onnx-model <original-id>` to pin the index's
+model for this query.
 
 Treat search matches as pointers into evidence, not final answers by themselves.
 

@@ -53,7 +53,7 @@ zakira-replay deps install media
 zakira-replay deps install ocr              # RapidOCR PP-OCRv5 latin pack (~30 MB)
 zakira-replay deps install whisper-model    # local Whisper ggml model for --llm-provider local-whisper
 zakira-replay deps install diarization      # pyannote-segmentation + 3D-Speaker ONNX (for --diarize)
-zakira-replay deps install onnx             # all-MiniLM-L6-v2 search embedding model (for sqlite-onnx)
+zakira-replay deps install onnx             # configurable search-embedding model (bge-small-en-v1.5 default; arctic-embed-s / multilingual-e5-small)
 
 # Or install everything at once:
 zakira-replay deps install all
@@ -161,7 +161,7 @@ Zakira.Replay has six independent `autoDownload` flags. **System tools and the s
 | Flag | Default | Triggers when |
 |---|---|---|
 | `dependencies.autoDownload` | `false` | `yt-dlp` / `ffmpeg` / `ffprobe` are needed and missing (portable `ffmpeg` is Windows-x64 only) |
-| `search.onnx.autoDownload` | `false` | The `sqlite-onnx` search backend needs the all-MiniLM-L6-v2 embedding model |
+| `search.onnx.autoDownload` | `false` | The `sqlite-onnx` search backend needs the configured search-embedding model (default `bge-small-en-v1.5`) |
 | `ocr.local.autoDownload` | **`true`** | A local OCR run needs the RapidOCR PP-OCRv5 language pack |
 | `llm.localWhisper.autoDownload` | **`true`** | `--llm-provider local-whisper` needs a Whisper ggml model |
 | `diarization.autoDownload` | **`true`** | `--diarize` needs the sherpa-onnx (pyannote + 3D-Speaker) models |
@@ -246,7 +246,7 @@ zakira-replay config set dependencies.portableDirectory C:\tools\zakira-replay
 zakira-replay config set search.onnx.modelPath C:\models\embedding.onnx
 zakira-replay config set search.onnx.vocabularyPath C:\models\vocab.txt
 zakira-replay config set search.onnx.autoDownload true
-zakira-replay config set search.onnx.modelDirectory C:\models\all-MiniLM-L6-v2
+zakira-replay config set search.onnx.modelDirectory C:\models\bge-small-en-v1.5
 zakira-replay config set llm.provider openai
 zakira-replay config set llm.openai.model gpt-4o-mini
 zakira-replay config set llm.openai.apiKeyEnvVars OPENAI_API_KEY,WORK_OPENAI_API_KEY
@@ -940,7 +940,7 @@ SQLite search is also available. `sqlite` builds `search/index.sqlite` with FTS5
 
 ```bash
 zakira-replay index build runs\example-run --backend sqlite
-zakira-replay index build runs\example-run --backend sqlite-onnx --onnx-model C:\models\embedding.onnx --onnx-vocab C:\models\vocab.txt
+zakira-replay index build runs\example-run --backend sqlite-onnx --onnx-model bge-small-en-v1.5
 zakira-replay index query runs\example-run "secure tunnel performance" --backend auto --top 5
 ```
 
@@ -950,10 +950,9 @@ Download a compatible local ONNX embedding model with either command:
 
 ```powershell
 zakira-replay deps install onnx
-.\scripts\download-onnx-model.ps1 -Configure
-```
+# Or use the built-in installer (recommended):  zakira-replay deps install onnx --model bge-small-en-v1.5```
 
-Both download `Xenova/all-MiniLM-L6-v2` files. The built-in installer uses the configured `search.onnx.modelDirectory`; the script downloads under repository-local `models/`, which is ignored by git.
+The 0.10.0 installer registry knows three search-embedding models out of the box: `bge-small-en-v1.5` (default, English, ~33 MB), `snowflake-arctic-embed-s` (English, ~33 MB), and `multilingual-e5-small` (~118 MB, XLM-R tokenizer for non-English transcripts). Pick one via `zakira-replay config set search.onnx.model <id>` or per-call via `--onnx-model <id>` on `index build|query`. Each model lands under `<portableDirectory>/models/<model-id>/` so the three can coexist on disk. Indexes built with one model are not query-compatible with another \u2014 the runtime emits a `SEARCH_INDEX_EMBEDDING_MISMATCH` error and recommends `index build --force` to rebuild.
 
 Chapter detection builds deterministic offline lexical chapters from transcript topic shifts and duration constraints:
 

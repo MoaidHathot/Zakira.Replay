@@ -17,6 +17,7 @@
     <PackageVersion Include="Microsoft.Extensions.Logging" Version="10.0.8" />
     <PackageVersion Include="Microsoft.Extensions.Logging.Console" Version="10.0.8" />
     <PackageVersion Include="Microsoft.ML.OnnxRuntime" Version="1.25.1" />
+    <PackageVersion Include="Microsoft.ML.Tokenizers" Version="2.0.0" />
     <PackageVersion Include="Microsoft.Playwright" Version="1.59.0" />
     <PackageVersion Include="ModelContextProtocol" Version="1.3.0" />
     <PackageVersion Include="ModelContextProtocol.AspNetCore" Version="1.3.0" />

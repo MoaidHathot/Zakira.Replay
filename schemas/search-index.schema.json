@@ -6,10 +6,23 @@
   "additionalProperties": false,
   "required": ["schemaVersion", "runId", "createdAt", "documentCount", "documents"],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.1" },
+    "schemaVersion": { "type": "string", "enum": ["0.1", "0.2"] },
     "runId": { "type": "string", "minLength": 1 },
     "createdAt": { "type": "string", "format": "date-time" },
     "documentCount": { "type": "integer", "minimum": 0 },
+    "embeddingModel": {
+      "type": ["string", "null"],
+      "description": "Identity of the search-embedding model the documents were embedded with (e.g. 'bge-small-en-v1.5'). Null for the json/sqlite backends, which don't store dense vectors."
+    },
+    "embeddingModelKind": {
+      "type": ["string", "null"],
+      "enum": ["bert", "bge", "e5", null],
+      "description": "Embedding scheme family. Null when no embedding model was used."
+    },
+    "embeddingDimensions": {
+      "type": ["integer", "null"],
+      "minimum": 1
+    },
     "documents": {
       "type": "array",
       "items": {
@@ -33,3 +46,4 @@
     }
   }
 }
+

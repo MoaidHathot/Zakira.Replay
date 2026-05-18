@@ -671,8 +671,18 @@ public static class CliApp
     private static Command BuildIndexCommand(TextWriter stdout, Option<string> outputFormat)
     {
         var backend = new Option<string?>("--backend") { Description = "Search backend." };
-        var onnxModel = new Option<string?>("--onnx-model") { Description = "ONNX embedding model path (sqlite-onnx)." };
-        var onnxVocab = new Option<string?>("--onnx-vocab") { Description = "ONNX vocabulary path (sqlite-onnx)." };
+        // 0.10.0: `--onnx-model` is now a known-id selector (bge-small-en-v1.5 etc.). The
+        // historical path-style flag is renamed to `--onnx-model-path` to keep the surface
+        // unambiguous. `--onnx-vocab` is kept as an alias for `--onnx-tokenizer-path` so
+        // existing scripts pointing at vocab.txt still work for BERT-family models.
+        var onnxModel = new Option<string?>("--onnx-model")
+        {
+            Description = "Search-embedding model id. Known: " + string.Join(", ", KnownSearchEmbeddingModels.Ids) + ". Defaults to " + KnownSearchEmbeddingModels.DefaultModel + "."
+        };
+        var onnxModelKind = new Option<string?>("--onnx-model-kind") { Description = "Embedding scheme override: bert, bge, or e5. Auto-derived from --onnx-model when omitted." };
+        var onnxModelPath = new Option<string?>("--onnx-model-path") { Description = "Explicit path to the ONNX model file (overrides --onnx-model)." };
+        var onnxTokenizerPath = new Option<string?>("--onnx-tokenizer-path") { Description = "Explicit path to the tokenizer file (vocab.txt for BERT, sentencepiece.bpe.model for XLM-R)." };
+        var onnxVocab = new Option<string?>("--onnx-vocab") { Description = "Alias for --onnx-tokenizer-path; preserved for 0.9.x compatibility." };
         var onnxMaxSequenceLength = new Option<int?>("--onnx-max-sequence-length") { Description = "ONNX tokenizer sequence length." };
         var embeddingDimensions = new Option<int?>("--embedding-dimensions") { Description = "Embedding dimension hint." };
 
@@ -681,6 +691,9 @@ public static class CliApp
         build.Arguments.Add(buildRunDirectory);
         build.Options.Add(backend);
         build.Options.Add(onnxModel);
+        build.Options.Add(onnxModelKind);
+        build.Options.Add(onnxModelPath);
+        build.Options.Add(onnxTokenizerPath);
         build.Options.Add(onnxVocab);
         build.Options.Add(onnxMaxSequenceLength);
         build.Options.Add(embeddingDimensions);
@@ -688,15 +701,22 @@ public static class CliApp
         {
             var options = new SearchIndexBuildOptions(
                 Backend: parseResult.GetValue(backend) ?? SearchBackends.Json,
-                OnnxModelPath: parseResult.GetValue(onnxModel),
+                OnnxModelPath: parseResult.GetValue(onnxModelPath),
                 OnnxVocabularyPath: parseResult.GetValue(onnxVocab),
+                OnnxTokenizerPath: parseResult.GetValue(onnxTokenizerPath),
                 OnnxMaxSequenceLength: parseResult.GetValue(onnxMaxSequenceLength),
-                EmbeddingDimensions: parseResult.GetValue(embeddingDimensions));
+                EmbeddingDimensions: parseResult.GetValue(embeddingDimensions),
+                OnnxModel: parseResult.GetValue(onnxModel),
+                OnnxModelKind: parseResult.GetValue(onnxModelKind));
             var result = await new SearchIndexService().BuildAsync(
                 Path.GetFullPath(parseResult.GetValue(buildRunDirectory)!),
                 options,
                 cancellationToken).ConfigureAwait(false);
             stdout.WriteLine($"Indexed {result.DocumentCount} document(s) with {result.Backend} backend.");
+            if (!string.IsNullOrWhiteSpace(result.EmbeddingModel))
+            {
+                stdout.WriteLine($"Embedding model: {result.EmbeddingModel} ({result.EmbeddingModelKind}, {result.EmbeddingDimensions}d)");
+            }
             stdout.WriteLine($"Index: {result.IndexPath}");
             return 0;
         });
@@ -710,6 +730,9 @@ public static class CliApp
         query.Options.Add(top);
         query.Options.Add(backend);
         query.Options.Add(onnxModel);
+        query.Options.Add(onnxModelKind);
+        query.Options.Add(onnxModelPath);
+        query.Options.Add(onnxTokenizerPath);
         query.Options.Add(onnxVocab);
         query.Options.Add(onnxMaxSequenceLength);
         query.Options.Add(embeddingDimensions);
@@ -717,10 +740,13 @@ public static class CliApp
         {
             var options = new SearchIndexQueryOptions(
                 Backend: parseResult.GetValue(backend) ?? SearchBackends.Auto,
-                OnnxModelPath: parseResult.GetValue(onnxModel),
+                OnnxModelPath: parseResult.GetValue(onnxModelPath),
                 OnnxVocabularyPath: parseResult.GetValue(onnxVocab),
+                OnnxTokenizerPath: parseResult.GetValue(onnxTokenizerPath),
                 OnnxMaxSequenceLength: parseResult.GetValue(onnxMaxSequenceLength),
-                EmbeddingDimensions: parseResult.GetValue(embeddingDimensions));
+                EmbeddingDimensions: parseResult.GetValue(embeddingDimensions),
+                OnnxModel: parseResult.GetValue(onnxModel),
+                OnnxModelKind: parseResult.GetValue(onnxModelKind));
             var result = await new SearchIndexService().QueryAsync(
                 Path.GetFullPath(parseResult.GetValue(queryTarget)!),
                 parseResult.GetValue(queryString)!,
@@ -874,17 +900,33 @@ public static class CliApp
         var whisperModel = new Option<string?>("--whisper-model") { Description = "Whisper model size." };
         var language = new Option<string?>("--language") { Description = "OCR language pack." };
         var mode = new Option<string?>("--mode") { Description = "Local vision mode." };
+        // 0.10.0: which search-embedding model `deps install onnx` should download. Known
+        // ids: bge-small-en-v1.5 (default), snowflake-arctic-embed-s, multilingual-e5-small.
+        // When omitted the installer consults search.onnx.model from the user config so
+        // users can switch the default once and forget. Only consumed by the onnx target.
+        var searchModel = new Option<string?>("--model")
+        {
+            Description = "Search-embedding model id for the onnx target. Known: " + string.Join(", ", KnownSearchEmbeddingModels.Ids) + ". Defaults to the configured search.onnx.model."
+        };
         var force = new Option<bool>("--force") { Description = "Re-download even if already installed." };
         targets.Arity = ArgumentArity.ZeroOrMore;
         install.Arguments.Add(targets);
         install.Options.Add(whisperModel);
         install.Options.Add(language);
         install.Options.Add(mode);
+        install.Options.Add(searchModel);
         install.Options.Add(force);
         install.SetAction(async (parseResult, cancellationToken) =>
         {
             var store = new ConfigStore();
             var config = await store.EnsureExistsAsync(cancellationToken).ConfigureAwait(false);
+            // Apply the per-call search-model override before constructing the installer so
+            // Layout.OnnxModelDirectory and InstallOnnxAsync both see the chosen model id.
+            var searchModelOverride = parseResult.GetValue(searchModel);
+            if (!string.IsNullOrWhiteSpace(searchModelOverride))
+            {
+                config.Search.Onnx.Model = searchModelOverride;
+            }
             var installer = new PortableDependencyInstaller(config);
             var resolvedTargets = parseResult.GetValue(targets);
             var list = resolvedTargets is null || resolvedTargets.Length == 0 ? new[] { "media" } : resolvedTargets;
@@ -922,9 +964,11 @@ public static class CliApp
             stdout.WriteLine($"yt-dlp: {installer.GetPortableExecutablePath(PortableDependencyInstaller.YtDlp)}");
             stdout.WriteLine($"ffmpeg: {installer.GetPortableExecutablePath(PortableDependencyInstaller.Ffmpeg)}");
             stdout.WriteLine($"ffprobe: {installer.GetPortableExecutablePath(PortableDependencyInstaller.Ffprobe)}");
+            var activeSearchModel = installer.GetActiveSearchEmbeddingModel();
+            stdout.WriteLine($"Search embedding model: {activeSearchModel?.Id ?? (config.Search.Onnx.Model ?? "<custom>")} (kind={activeSearchModel?.ModelKind.ToString().ToLowerInvariant() ?? "?"})");
             stdout.WriteLine($"ONNX model directory: {installer.Layout.OnnxModelDirectory}");
             stdout.WriteLine($"ONNX model: {installer.GetOnnxModelPath()}");
-            stdout.WriteLine($"ONNX vocabulary: {installer.GetOnnxVocabularyPath()}");
+            stdout.WriteLine($"ONNX tokenizer: {installer.GetOnnxTokenizerPath()}");
             stdout.WriteLine($"OCR model directory: {installer.Layout.OcrModelDirectory}");
             stdout.WriteLine($"OCR detection: {installer.GetOcrDetectionModelPath()}");
             stdout.WriteLine($"OCR classification: {installer.GetOcrClassificationModelPath()}");

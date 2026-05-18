@@ -199,12 +199,35 @@ public sealed class CoreTests
         await store.SetAsync("search.onnx.autoDownload", "yes", CancellationToken.None);
         await store.SetAsync("search.onnx.modelDirectory", modelDirectory, CancellationToken.None);
         await store.SetAsync("search.onnx.modelFile", "model.onnx", CancellationToken.None);
+        // 0.10.0 keys for the configurable search-embedding model.
+        await store.SetAsync("search.onnx.model", "multilingual-e5-small", CancellationToken.None);
+        await store.SetAsync("search.onnx.modelKind", "e5", CancellationToken.None);
 
         Assert.Equal("True", await store.GetAsync("dependencies.autoDownload", CancellationToken.None));
         Assert.Equal(portableDirectory, await store.GetAsync("dependencies.portableDirectory", CancellationToken.None));
         Assert.Equal("True", await store.GetAsync("search.onnx.autoDownload", CancellationToken.None));
         Assert.Equal(modelDirectory, await store.GetAsync("search.onnx.modelDirectory", CancellationToken.None));
         Assert.Equal("model.onnx", await store.GetAsync("search.onnx.modelFile", CancellationToken.None));
+        Assert.Equal("multilingual-e5-small", await store.GetAsync("search.onnx.model", CancellationToken.None));
+        Assert.Equal("e5", await store.GetAsync("search.onnx.modelKind", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ConfigStoreRejectsUnknownSearchOnnxModelKind()
+    {
+        using var temp = new TestTempDirectory();
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        var previous = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            var store = new ConfigStore();
+            await Assert.ThrowsAsync<ReplayException>(() => store.SetAsync("search.onnx.modelKind", "totally-bogus", CancellationToken.None));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previous);
+        }
     }
 
     [Fact]
@@ -334,30 +357,43 @@ public sealed class CoreTests
     {
         using var temp = new TestTempDirectory();
         var previousOnnxModelDirectory = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY");
-        var previousOnnxModelFile = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_FILE");
+        var previousOnnxModel = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL");
         try
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY", null);
-            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_FILE", null);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL", null);
             using var handler = new RecordingHttpMessageHandler(_ => new ByteArrayContent([1, 2, 3]));
+            // 0.10.0: the installer now drives off a known-model registry. Pin
+            // bge-small-en-v1.5 explicitly so this test exercises the default path
+            // independently of the runtime config's value.
             var config = new ReplayConfig
             {
-                Search = new SearchConfig { Onnx = new OnnxEmbeddingConfig { ModelDirectory = temp.GetPath("models"), ModelFile = "model.onnx" } }
+                Search = new SearchConfig
+                {
+                    Onnx = new OnnxEmbeddingConfig
+                    {
+                        ModelDirectory = temp.GetPath("models"),
+                        Model = KnownSearchEmbeddingModels.BgeSmallEnV15
+                    }
+                }
             };
             var installer = new PortableDependencyInstaller(config, new HttpClient(handler, disposeHandler: false));
 
             var result = await installer.InstallAsync([PortableDependencyInstaller.Onnx], force: false, progress: null, CancellationToken.None);
 
             Assert.Single(result.Items);
+            // The bge entry downloads model.onnx + vocab.txt + tokenizer_config.json + config.json.
             Assert.True(File.Exists(System.IO.Path.Combine(temp.GetPath("models"), "model.onnx")));
             Assert.True(File.Exists(System.IO.Path.Combine(temp.GetPath("models"), "vocab.txt")));
             Assert.Equal(4, handler.Requests.Count);
-            Assert.Contains(handler.Requests, request => request.RequestUri!.ToString().Contains("/onnx/model.onnx", StringComparison.Ordinal));
+            // The known-model entry points at Xenova's quantized ONNX export.
+            Assert.Contains(handler.Requests, request => request.RequestUri!.ToString().Contains("/onnx/model_quantized.onnx", StringComparison.Ordinal));
+            Assert.Contains(handler.Requests, request => request.RequestUri!.ToString().Contains("bge-small-en-v1.5", StringComparison.Ordinal));
         }
         finally
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY", previousOnnxModelDirectory);
-            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_FILE", previousOnnxModelFile);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL", previousOnnxModel);
         }
     }
 

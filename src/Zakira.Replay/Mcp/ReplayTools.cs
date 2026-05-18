@@ -418,18 +418,24 @@ public sealed class ReplayTools
     public async Task<string> IndexBuildAsync(
         [Description("Completed Zakira.Replay run directory containing evidence.json.")] string runDirectory,
         [Description("Search backend: json (default), sqlite, sqlite-onnx.")] string? backend = null,
-        [Description("Optional ONNX embedding model path.")] string? onnxModel = null,
-        [Description("Optional WordPiece vocabulary path.")] string? onnxVocab = null,
+        [Description("Search-embedding model id (bge-small-en-v1.5, snowflake-arctic-embed-s, multilingual-e5-small). Defaults to the user config; new users get bge-small-en-v1.5.")] string? onnxModel = null,
+        [Description("Embedding scheme override: bert, bge, or e5. Auto-derived from onnxModel when omitted.")] string? onnxModelKind = null,
+        [Description("Explicit ONNX model file path (overrides onnxModel for custom local models).")] string? onnxModelPath = null,
+        [Description("Explicit tokenizer file path (vocab.txt for BERT, sentencepiece.bpe.model for XLM-R).")] string? onnxTokenizerPath = null,
+        [Description("Alias for onnxTokenizerPath; 0.9.x-style WordPiece vocabulary path.")] string? onnxVocab = null,
         [Description("Optional ONNX tokenizer sequence length.")] int? onnxMaxSequenceLength = null,
         [Description("Optional embedding dimension hint.")] int? embeddingDimensions = null,
         CancellationToken cancellationToken = default)
     {
         var options = new SearchIndexBuildOptions(
             Backend: backend ?? SearchBackends.Json,
-            OnnxModelPath: onnxModel,
+            OnnxModelPath: onnxModelPath,
             OnnxVocabularyPath: onnxVocab,
+            OnnxTokenizerPath: onnxTokenizerPath,
             OnnxMaxSequenceLength: onnxMaxSequenceLength,
-            EmbeddingDimensions: embeddingDimensions);
+            EmbeddingDimensions: embeddingDimensions,
+            OnnxModel: onnxModel,
+            OnnxModelKind: onnxModelKind);
         var result = await searchService.BuildAsync(runDirectory, options, cancellationToken).ConfigureAwait(false);
         return Serialize(new
         {
@@ -438,7 +444,10 @@ public sealed class ReplayTools
             indexPath = result.IndexPath,
             manifest = result.Manifest,
             documentCount = result.DocumentCount,
-            createdAt = result.CreatedAt
+            createdAt = result.CreatedAt,
+            embeddingModel = result.EmbeddingModel,
+            embeddingModelKind = result.EmbeddingModelKind,
+            embeddingDimensions = result.EmbeddingDimensions
         });
     }
 
@@ -449,18 +458,24 @@ public sealed class ReplayTools
         [Description("Search query string.")] string query,
         [Description("Maximum matches.")] int top = 5,
         [Description("Search backend: auto (default), json, sqlite, sqlite-onnx.")] string? backend = null,
-        [Description("Optional ONNX embedding model path.")] string? onnxModel = null,
-        [Description("Optional WordPiece vocabulary path.")] string? onnxVocab = null,
+        [Description("Search-embedding model id (bge-small-en-v1.5, snowflake-arctic-embed-s, multilingual-e5-small). Must match the model the index was built with.")] string? onnxModel = null,
+        [Description("Embedding scheme override: bert, bge, or e5.")] string? onnxModelKind = null,
+        [Description("Explicit ONNX model file path.")] string? onnxModelPath = null,
+        [Description("Explicit tokenizer file path.")] string? onnxTokenizerPath = null,
+        [Description("Alias for onnxTokenizerPath; 0.9.x-style WordPiece vocabulary path.")] string? onnxVocab = null,
         [Description("Optional ONNX tokenizer sequence length.")] int? onnxMaxSequenceLength = null,
         [Description("Optional embedding dimension hint.")] int? embeddingDimensions = null,
         CancellationToken cancellationToken = default)
     {
         var options = new SearchIndexQueryOptions(
             Backend: backend ?? SearchBackends.Auto,
-            OnnxModelPath: onnxModel,
+            OnnxModelPath: onnxModelPath,
             OnnxVocabularyPath: onnxVocab,
+            OnnxTokenizerPath: onnxTokenizerPath,
             OnnxMaxSequenceLength: onnxMaxSequenceLength,
-            EmbeddingDimensions: embeddingDimensions);
+            EmbeddingDimensions: embeddingDimensions,
+            OnnxModel: onnxModel,
+            OnnxModelKind: onnxModelKind);
         var result = await searchService.QueryAsync(target, query, top, options, cancellationToken).ConfigureAwait(false);
         return Serialize(result);
     }

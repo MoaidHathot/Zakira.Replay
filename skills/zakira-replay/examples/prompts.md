@@ -181,6 +181,46 @@ Agent behavior:
 }
 ```
 
+## SharePoint Stream / Microsoft Stream Meeting Recordings
+
+These are hosted on SharePoint-backed Stream (`*-my.sharepoint.com/.../stream.aspx?id=...`). The Stream player does NOT use the HTML5 `textTracks` API or serve captions as plain `.vtt`/`.srt` URLs, so the generic interceptors miss them. Zakira's **Stream-specific layer** is the only reliable path: it observes the `_api/v2.X/.../media/transcripts` metadata response (or, if the player happens not to query it during automation, proactively fetches it using `(drive-id, item-id)` harvested from any other SharePoint REST call), then follows each transcript's `temporaryDownloadUrl` with the `?isformatjson=true&transcriptkey=<id>` URL variant the player itself uses to coax out the Microsoft Teams transcript JSON. The JSON carries `speakerDisplayName` per entry, which lands in `transcript.md` as `<v Speaker>` voice spans and proper `[Speaker Name]` prefixes.
+
+User prompt:
+
+```text
+Analyze this Teams meeting recording on SharePoint Stream and tell me who said what:
+https://microsofteur-my.sharepoint.com/personal/.../stream.aspx?id=...
+```
+
+Agent behavior:
+
+- The user must first run `zakira-replay auth init-edge-profile --url https://microsofteur-my.sharepoint.com/` (or whichever Stream origin they use) on their machine once per machine. This is **preferred over `auth login`** for Microsoft sources: cookies stay DPAPI-encrypted in Edge's native storage, refresh in place during use, and the persistent-context Edge profile auto-activates for every subsequent run \u2014 no `authProfile` argument required from MCP.
+- Then pass `captureMode: "browser"` and any combination of `ocr`/`vision`/`stt` flags as the question warrants. The Stream transcript layer runs automatically and produces a speaker-attributed transcript when one exists.
+
+```json
+{
+  "name": "create_analysis_job",
+  "arguments": {
+    "source": "https://microsofteur-my.sharepoint.com/personal/.../stream.aspx?id=...",
+    "visionInstruction": "Extract slide content and visual evidence from this Teams meeting.",
+    "frames": 30,
+    "frameStrategy": "scene",
+    "captureMode": "browser",
+    "smartCrop": true,
+    "smartCropProfile": "teams",
+    "ocr": true,
+    "ocrProvider": "local",
+    "vision": true,
+    "visionProvider": "local",
+    "cache": true
+  }
+}
+```
+
+After the job succeeds, read `manifest.json` for `CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED` (info) confirming the speaker-attributed transcript was fetched. The raw Teams JSON is preserved alongside the converted VTT at `captions/stream-NNNN-<lang>.json` for audit (carries `speakerId`, `confidence`, `roomId`, ISO 8601 `startOffset`/`endOffset` per entry).
+
+If the Stream player doesn't expose a transcript at all (recording made without auto-captioning), the run will skip the Stream layer (no `CAPTURE_STREAM_TRANSCRIPT_DISCOVERED`) and `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` will record that the DASH-encrypted audio cannot be re-downloaded for STT. Recommend the user enable auto-captioning for future meetings.
+
 ## Authenticated Video (yt-dlp Cookies)
 
 User prompt:

@@ -91,6 +91,14 @@ names.
 
 ### Added — reliability
 
+- **`runs.directory` config key + `ZAKIRA_REPLAY_RUNS_DIRECTORY` env var** — pins the
+  output folder for every `runs/<run-id>/` artifact tree instead of inheriting whatever
+  the current working directory happened to be. Stored env-var literals are preserved
+  (`%LOCALAPPDATA%\Zakira.Replay\runs` stays literal in the JSON; the value is expanded
+  at read time) so a single config file is portable across machines. Resolution
+  precedence: env var → config → legacy `<cwd>/runs`. `info` reports the resolved
+  absolute path; `config get runs.directory` returns the stored literal. Same shape as
+  the existing `dependencies.portableDirectory` knob.
 - **Atomic artifact writes** — `ArtifactStore.WriteJsonAsync` and `WriteTextAsync` now
   write to a sibling `.tmp` file and rename it over the destination. Same-volume rename
   is atomic on every supported filesystem, so a Ctrl-C / crash mid-serialization can no

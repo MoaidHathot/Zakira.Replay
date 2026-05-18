@@ -44,7 +44,7 @@ internal static class CliDiagnostics
             Name: AppInfo.Name,
             Version: AppInfo.Version,
             ConfigPath: configStore.ConfigPath,
-            RunsDirectory: ArtifactStore.GetDefaultRootDirectory(),
+            RunsDirectory: ArtifactStore.ResolveRootDirectory(config),
             LlmProvider: LlmProviderFactory.GetConfiguredProvider(config),
             DefaultModel: LlmProviderFactory.GetDefaultModel(null, config),
             Schemas:

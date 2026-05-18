@@ -70,7 +70,8 @@ Dependency path overrides, if needed:
 - `ZAKIRA_REPLAY_ONNX_VOCAB_PATH`
 - `ZAKIRA_REPLAY_OCR_MODEL_DIRECTORY` (plus per-file `*_DETECTION_MODEL_PATH`, `*_CLASSIFICATION_MODEL_PATH`, `*_RECOGNITION_MODEL_PATH`, `*_DICTIONARY_PATH`)
 - `ZAKIRA_REPLAY_EDGE_USER_DATA_DIR` (overrides `capture.browser.edgeUserDataDir`)
-- Config keys: `yt-dlp.path`, `ffmpeg.path`, `ffprobe.path`, `search.onnx.*`, `ocr.local.*`, `capture.browser.edge{UserDataDir,ProfileDirectory}`
+- `ZAKIRA_REPLAY_RUNS_DIRECTORY` (overrides `runs.directory`; pins where every `runs/<run-id>/` artifact tree lands instead of inheriting `<cwd>/runs`)
+- Config keys: `yt-dlp.path`, `ffmpeg.path`, `ffprobe.path`, `search.onnx.*`, `ocr.local.*`, `capture.browser.edge{UserDataDir,ProfileDirectory}`, `dependencies.portableDirectory` (where models / yt-dlp / ffmpeg land), `runs.directory` (where analysis artifacts land; env-var literals like `%LOCALAPPDATA%\Zakira.Replay\runs` are preserved verbatim and expanded at read time)
 
 Do not put secret values in JSON config. Config stores environment variable names for provider secrets.
 

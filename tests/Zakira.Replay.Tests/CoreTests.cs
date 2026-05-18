@@ -361,7 +361,7 @@ public sealed class CoreTests
         }
     }
 
-    [Fact]
+    [SkippableFact]
     public async Task PortableDependencyInstallerExtractsFfmpegArchiveWithFakeHttpOnWindows()
     {
         Skip.IfNot(OperatingSystem.IsWindows() && System.Runtime.InteropServices.RuntimeInformation.ProcessArchitecture == System.Runtime.InteropServices.Architecture.X64);

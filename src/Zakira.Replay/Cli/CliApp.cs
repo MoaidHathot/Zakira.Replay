@@ -460,7 +460,7 @@ public static class CliApp
         var list = new Command("list", "Lists analysis runs under the runs/ directory.");
         list.SetAction(parseResult =>
         {
-            var root = ArtifactStore.GetDefaultRootDirectory();
+            var root = ResolveRunsRoot();
             if (!Directory.Exists(root))
             {
                 stdout.WriteLine($"No runs directory: {root}");
@@ -501,7 +501,7 @@ public static class CliApp
         show.SetAction(async (parseResult, cancellationToken) =>
         {
             var id = parseResult.GetValue(showId)!;
-            var directory = Path.Combine(ArtifactStore.GetDefaultRootDirectory(), id);
+            var directory = Path.Combine(ResolveRunsRoot(), id);
             if (!Directory.Exists(directory))
             {
                 throw new ReplayException($"Run '{id}' not found at {directory}.");
@@ -539,7 +539,7 @@ public static class CliApp
         delete.SetAction(parseResult =>
         {
             var id = parseResult.GetValue(deleteId)!;
-            var directory = Path.Combine(ArtifactStore.GetDefaultRootDirectory(), id);
+            var directory = Path.Combine(ResolveRunsRoot(), id);
             if (!Directory.Exists(directory))
             {
                 throw new ReplayException($"Run '{id}' not found at {directory}.");
@@ -562,7 +562,7 @@ public static class CliApp
         export.SetAction(async (parseResult, cancellationToken) =>
         {
             var id = parseResult.GetValue(exportId)!;
-            var directory = Path.Combine(ArtifactStore.GetDefaultRootDirectory(), id);
+            var directory = Path.Combine(ResolveRunsRoot(), id);
             var formatValue = parseResult.GetValue(format)!;
             if (!Directory.Exists(directory))
             {
@@ -1423,7 +1423,7 @@ public static class CliApp
     {
         var dependencies = new DependencyResolver();
         var runner = new ProcessRunner();
-        var store = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+        var store = new ArtifactStore(ResolveRunsRoot());
         var ytDlp = new YtDlpClient(dependencies, runner);
         var ffmpeg = new FfmpegClient(dependencies, runner);
         var browser = new PlaywrightVideoCaptureClient(dependencies);
@@ -1434,7 +1434,7 @@ public static class CliApp
     {
         var dependencies = new DependencyResolver();
         var runner = new ProcessRunner();
-        var store = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+        var store = new ArtifactStore(ResolveRunsRoot());
         return new ClipExtractionService(store, new YtDlpClient(dependencies, runner), new FfmpegClient(dependencies, runner));
     }
 
@@ -1442,7 +1442,27 @@ public static class CliApp
     {
         var dependencies = new DependencyResolver();
         var runner = new ProcessRunner();
-        var store = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+        var store = new ArtifactStore(ResolveRunsRoot());
         return new FrameCaptureService(store, new YtDlpClient(dependencies, runner), new FfmpegClient(dependencies, runner));
+    }
+
+    /// <summary>
+    /// Resolves the runs output directory in this precedence: env var
+    /// <c>ZAKIRA_REPLAY_RUNS_DIRECTORY</c> → <c>runs.directory</c> in the user config →
+    /// <c>&lt;cwd&gt;/runs</c>. Config load is best-effort so the CLI still works when the
+    /// config file is missing or unparseable; the env var still wins in those cases.
+    /// </summary>
+    private static string ResolveRunsRoot()
+    {
+        ReplayConfig? config = null;
+        try
+        {
+            config = new ConfigStore().Load();
+        }
+        catch
+        {
+            // Best-effort: env-var or default still applies.
+        }
+        return ArtifactStore.ResolveRootDirectory(config);
     }
 }

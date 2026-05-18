@@ -22,9 +22,11 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(provider => new DependencyResolver(provider.GetRequiredService<ReplayConfig>()));
         services.AddSingleton<ProcessRunner>();
 
-        // Artifact store roots at `<cwd>/runs` by default so deterministic run IDs land in
-        // the well-known location agents already know.
-        services.AddSingleton(_ => new ArtifactStore(ArtifactStore.GetDefaultRootDirectory()));
+        // Artifact store roots at the configured runs directory (env var > config >
+        // <cwd>/runs default). Resolving here means every DI consumer — pipeline, MCP host,
+        // runs CLI group — sees the same answer.
+        services.AddSingleton(provider => new ArtifactStore(
+            ArtifactStore.ResolveRootDirectory(provider.GetService<ReplayConfig>())));
 
         // Subprocess clients
         services.AddSingleton<IYtDlpClient>(provider => new YtDlpClient(

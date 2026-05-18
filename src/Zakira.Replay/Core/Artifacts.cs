@@ -7,6 +7,10 @@ namespace Zakira.Replay.Core;
 
 public sealed class ArtifactStore
 {
+    /// <summary>Environment variable that pins the runs output directory, overriding both
+    /// the user config and the legacy <c>&lt;cwd&gt;/runs</c> default.</summary>
+    public const string RunsDirectoryEnvironmentVariable = "ZAKIRA_REPLAY_RUNS_DIRECTORY";
+
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         WriteIndented = true,
@@ -20,9 +24,32 @@ public sealed class ArtifactStore
 
     public string RootDirectory { get; }
 
+    /// <summary>
+    /// Resolves the runs output directory in the documented precedence order:
+    /// <c>$ZAKIRA_REPLAY_RUNS_DIRECTORY</c> → <c>config.Runs.Directory</c> →
+    /// <c>&lt;cwd&gt;/runs</c>. Environment variables inside the config value are expanded
+    /// here so the stored config can stay portable across machines.
+    /// </summary>
+    public static string ResolveRootDirectory(ReplayConfig? config)
+    {
+        var envValue = Environment.GetEnvironmentVariable(RunsDirectoryEnvironmentVariable);
+        if (!string.IsNullOrWhiteSpace(envValue))
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(envValue.Trim().Trim('"')));
+        }
+
+        var configured = config?.Runs?.Directory;
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return Path.GetFullPath(Environment.ExpandEnvironmentVariables(configured.Trim().Trim('"')));
+        }
+
+        return Path.Combine(Environment.CurrentDirectory, "runs");
+    }
+
     public static string GetDefaultRootDirectory()
     {
-        return Path.Combine(Environment.CurrentDirectory, "runs");
+        return ResolveRootDirectory(config: null);
     }
 
     public VideoRun CreateRun(string source, string? requestedRunId = null)

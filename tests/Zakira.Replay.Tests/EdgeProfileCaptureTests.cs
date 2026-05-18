@@ -20,16 +20,32 @@ public sealed class EdgeProfileCaptureTests
     [Fact]
     public void ResolveEdgeUserDataDirExpandsEnvironmentVariables()
     {
-        var browser = new BrowserCaptureConfig
+        // Use a test-owned env var so the assertion works on every OS. Windows-only vars
+        // like %TEMP% / %LOCALAPPDATA% / %USERPROFILE% are not set on Linux + macOS CI
+        // runners, which would leave the literal in place and make the test platform-
+        // dependent. A custom var sidesteps that and still exercises the same code path
+        // through Environment.ExpandEnvironmentVariables.
+        const string key = "ZAKIRA_REPLAY_TEST_EDGE_BASE";
+        var expectedRoot = Path.Combine(Path.GetTempPath(), "zakira-edge-expand-test");
+        var previous = Environment.GetEnvironmentVariable(key);
+        try
         {
-            // Use %TEMP% which is guaranteed to exist on every test environment.
-            EdgeUserDataDir = "%TEMP%/zakira-edge-test"
-        };
+            Environment.SetEnvironmentVariable(key, expectedRoot);
+            var browser = new BrowserCaptureConfig
+            {
+                EdgeUserDataDir = $"%{key}%/zakira-edge-test"
+            };
 
-        var resolved = browser.ResolveEdgeUserDataDir();
+            var resolved = browser.ResolveEdgeUserDataDir();
 
-        Assert.False(resolved.Contains("%TEMP%", StringComparison.OrdinalIgnoreCase));
-        Assert.True(Path.IsPathFullyQualified(resolved));
+            Assert.False(resolved.Contains($"%{key}%", StringComparison.OrdinalIgnoreCase));
+            Assert.True(Path.IsPathFullyQualified(resolved));
+            Assert.StartsWith(Path.GetFullPath(expectedRoot), resolved, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable(key, previous);
+        }
     }
 
     [Fact]
@@ -314,32 +330,44 @@ public sealed class EdgeProfileCaptureTests
     [Fact]
     public async Task ConfigSetPreservesEnvVarLiteralsForEdgeUserDataDir()
     {
+        // Use a test-owned env var instead of %LOCALAPPDATA% so the resolve assertion
+        // works on Linux + macOS CI runners (those platforms don't have a
+        // %LOCALAPPDATA% env var, so Environment.ExpandEnvironmentVariables leaves the
+        // literal in place — the assertion is about config-store behaviour, not the
+        // existence of that particular Windows-only variable).
+        const string envKey = "ZAKIRA_REPLAY_TEST_EDGE_PRESERVE";
+        var expandedRoot = Path.Combine(Path.GetTempPath(), "zakira-replay-edge-preserve");
         using var temp = new TestTempDirectory();
         var configFile = temp.GetPath("Zakira.Replay.json");
-        var previous = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousEnv = Environment.GetEnvironmentVariable(envKey);
         try
         {
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable(envKey, expandedRoot);
+            var literal = $"%{envKey}%/Zakira.Replay/edge-profile";
             var store = new ConfigStore();
-            await store.SetAsync("capture.browser.edgeUserDataDir", "%LOCALAPPDATA%/Zakira.Replay/edge-profile", CancellationToken.None);
+            await store.SetAsync("capture.browser.edgeUserDataDir", literal, CancellationToken.None);
 
             // The value persisted to disk should preserve the env-var literal.
             var raw = await File.ReadAllTextAsync(configFile);
-            Assert.Contains("%LOCALAPPDATA%", raw);
+            Assert.Contains($"%{envKey}%", raw);
 
             // GetAsync returns the raw stored value as well.
             var fetched = await store.GetAsync("capture.browser.edgeUserDataDir", CancellationToken.None);
-            Assert.Equal("%LOCALAPPDATA%/Zakira.Replay/edge-profile", fetched);
+            Assert.Equal(literal, fetched);
 
             // ResolveEdgeUserDataDir expands the env var at read time.
             var loaded = store.Load();
             var resolved = loaded.Capture.Browser.ResolveEdgeUserDataDir();
-            Assert.DoesNotContain("%LOCALAPPDATA%", resolved, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain($"%{envKey}%", resolved, StringComparison.OrdinalIgnoreCase);
             Assert.True(Path.IsPathFullyQualified(resolved));
+            Assert.StartsWith(Path.GetFullPath(expandedRoot), resolved, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
-            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previous);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable(envKey, previousEnv);
         }
     }
 

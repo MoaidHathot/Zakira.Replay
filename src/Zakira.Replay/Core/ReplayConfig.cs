@@ -29,6 +29,30 @@ public sealed class ReplayConfig
     public AuthConfig Auth { get; set; } = new();
 
     public DiarizationConfig Diarization { get; set; } = new();
+
+    /// <summary>
+    /// Output-folder controls for <c>runs/&lt;run-id&gt;/</c> artifacts. Empty by default, in
+    /// which case the pipeline falls back to <c>$ZAKIRA_REPLAY_RUNS_DIRECTORY</c> or
+    /// <c>&lt;cwd&gt;/runs</c>.
+    /// </summary>
+    public RunsConfig Runs { get; set; } = new();
+}
+
+/// <summary>
+/// Runs-output configuration. Lets you pin the root folder where every
+/// <c>runs/&lt;run-id&gt;/</c> artifact tree lands instead of inheriting the current working
+/// directory. Resolution precedence (highest wins):
+/// <list type="number">
+///   <item><description>Environment variable <c>ZAKIRA_REPLAY_RUNS_DIRECTORY</c></description></item>
+///   <item><description><c>runs.directory</c> in the user config file</description></item>
+///   <item><description><c>&lt;cwd&gt;/runs</c> (legacy default)</description></item>
+/// </list>
+/// Same env-var-literal preservation as <c>dependencies.portableDirectory</c>:
+/// <c>%LOCALAPPDATA%\Zakira.Replay\runs</c> is stored verbatim and expanded at read time.
+/// </summary>
+public sealed class RunsConfig
+{
+    public string? Directory { get; set; }
 }
 
 public sealed class DiarizationConfig
@@ -940,6 +964,15 @@ public sealed class ConfigStore
             case "dependencies.directory":
                 config.Dependencies.PortableDirectory = NormalizeDirectoryPath(value);
                 break;
+            case "runs.directory":
+            case "runs.dir":
+            case "runs.outputdirectory":
+            case "runs.output-directory":
+                // Preserve env-var literals so the config is portable across machines whose
+                // %LOCALAPPDATA% / $HOME expand differently. Resolution happens at read time
+                // via ArtifactStore.ResolveRootDirectory(config).
+                config.Runs.Directory = NormalizePathPreservingEnvVars(value, key);
+                break;
             case "ffmpeg.path":
                 config.Dependencies.FfmpegPath = NormalizeExecutablePath(value, "ffmpeg.exe");
                 break;
@@ -1378,6 +1411,7 @@ public sealed class ConfigStore
             "yt-dlp.path" => config.Dependencies.YtDlpPath,
             "dependencies.autodownload" or "dependencies.auto-download" => config.Dependencies.AutoDownload.ToString(),
             "dependencies.portabledirectory" or "dependencies.portable-directory" or "dependencies.directory" => config.Dependencies.PortableDirectory,
+            "runs.directory" or "runs.dir" or "runs.outputdirectory" or "runs.output-directory" => config.Runs.Directory,
             "ffmpeg.path" => config.Dependencies.FfmpegPath,
             "ffprobe.path" => config.Dependencies.FfprobePath,
             "edge.path" => config.Dependencies.EdgePath,
@@ -1484,6 +1518,7 @@ public sealed class ConfigStore
             ["yt-dlp.path"] = config.Dependencies.YtDlpPath,
             ["dependencies.autoDownload"] = config.Dependencies.AutoDownload.ToString(),
             ["dependencies.portableDirectory"] = config.Dependencies.PortableDirectory,
+            ["runs.directory"] = config.Runs.Directory,
             ["ffmpeg.path"] = config.Dependencies.FfmpegPath,
             ["ffprobe.path"] = config.Dependencies.FfprobePath,
             ["edge.path"] = config.Dependencies.EdgePath,

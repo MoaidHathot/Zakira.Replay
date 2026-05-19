@@ -96,23 +96,28 @@ For one-off ad-hoc operations without a full analyze run, see `zakira-replay fra
 ## Commands
 
 ```bash
-zakira-replay doctor [--json]
-zakira-replay info [--json]
+zakira-replay doctor [--output-format json|text]
+zakira-replay info [--output-format json|text]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--preset meeting|lecture|demo|interview|raw] [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
-zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--json]
+zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--output-format json|text]
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
-zakira-replay index build <run-directory> [--backend json|sqlite|sqlite-onnx]
-zakira-replay index query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx]
+zakira-replay runs list [--output-format json|text]
+zakira-replay runs show <run-id> [--output-format json|text]
+zakira-replay runs delete <run-id> --force
+zakira-replay runs export <run-id> --format md|jsonl
+zakira-replay index build <run-directory> [--backend json|sqlite|sqlite-onnx] [--onnx-model <id>] [--onnx-model-kind bert|bge|e5] [--onnx-model-path <path>] [--onnx-tokenizer-path <path>]
+zakira-replay index query <run-directory-or-index> <query> [--top <n>] [--backend auto|json|sqlite|sqlite-onnx] [--onnx-model <id>] [--onnx-model-kind bert|bge|e5] [--onnx-model-path <path>] [--onnx-tokenizer-path <path>]
 zakira-replay chapters build <run-directory> [--min-duration <seconds>] [--max-duration <seconds>]
 zakira-replay align build <run-directory>
 zakira-replay discover <url> [--browser] [--output <path>]
 zakira-replay batch run <manifest.json>
 zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
 zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
-zakira-replay queue status [--queue-id <id>] [--json]
-zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--force]
+zakira-replay queue status [--queue-id <id>] [--output-format json|text]
+zakira-replay llm chat "<prompt>" [--llm-provider <name>] [--model <id>] [--attach <path>]
+zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|vision|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--language <pack>] [--mode heuristic|clip|clip-caption] [--model <search-embedding-id>] [--force]
 zakira-replay deps status
 zakira-replay auth login <profile-name> [--url <start-url>]
 zakira-replay auth init-edge-profile [--url <start-url>] [--user-data-dir <path>] [--profile-directory <name>]
@@ -121,8 +126,11 @@ zakira-replay auth show <profile-name>
 zakira-replay auth clear <profile-name>
 zakira-replay auth path [profile-name]
 zakira-replay config <path|list|get|set> ...
-zakira-replay mcp serve
+zakira-replay mcp serve [--transport stdio|http|sse] [--port <n>]
+zakira-replay completion {bash|zsh|pwsh|fish}
 ```
+
+Recursive global flags (accepted on every command above): `--output-format text|json|ndjson` (replaces the 0.8.x per-command `--json` flag), `--log-file <path>`, `--log-level info|debug|trace`, `--correlation-id <string>`.
 
 ## Defaults
 
@@ -154,6 +162,18 @@ Zakira.Replay resolves dependency paths in this order:
 
 Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr [--language <pack>]` to download a RapidOCR PP-OCRv5 language pack for the local OCR provider (default `latin`; other packs: `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`), `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path, or `zakira-replay deps install diarization` to download the pyannote-segmentation-3.0 and 3D-Speaker ONNX models used by the `--diarize` flag. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, the configured OCR language pack, the default Whisper model, and the diarization models.
 
+### Runs output directory
+
+By default every analysis lands under `<cwd>/runs/<run-id>/`. To pin a stable location (recommended for daemon-style use), set `runs.directory` once:
+
+```bash
+zakira-replay config set runs.directory %LOCALAPPDATA%\Zakira.Replay\runs    # Windows
+zakira-replay config set runs.directory ~/Library/Application\ Support/Zakira.Replay/runs    # macOS
+zakira-replay config set runs.directory $XDG_DATA_HOME/Zakira.Replay/runs    # Linux
+```
+
+Environment-variable literals (e.g. `%LOCALAPPDATA%`, `$HOME`) are preserved verbatim in the JSON and expanded at read time so a single config file is portable between machines. Resolution precedence: `ZAKIRA_REPLAY_RUNS_DIRECTORY` env var > `runs.directory` config > legacy `<cwd>/runs`. `zakira-replay info` reports the resolved absolute path; `zakira-replay config get runs.directory` returns the stored literal. Same behaviour as the existing `dependencies.portableDirectory` knob.
+
 ### Auto-download flags
 
 Zakira.Replay has six independent `autoDownload` flags. **System tools and the search model are opt-in (default `false`); local-provider models are opt-out (default `true`).** Each flag triggers fetch-on-first-use without requiring an upfront `deps install` run:
@@ -184,10 +204,13 @@ Environment variables:
 - `ZAKIRA_REPLAY_FFPROBE_PATH`
 - `ZAKIRA_REPLAY_EDGE_PATH`
 - `ZAKIRA_REPLAY_PORTABLE_DIRECTORY`
+- `ZAKIRA_REPLAY_RUNS_DIRECTORY` (pins where every `runs/<run-id>/` artifact tree lands; overrides `runs.directory` config and the legacy `<cwd>/runs` default)
+- `ZAKIRA_REPLAY_ONNX_MODEL` (0.10.0+: search-embedding model id — `bge-small-en-v1.5` default, `snowflake-arctic-embed-s`, `multilingual-e5-small`, or a custom string paired with explicit paths)
+- `ZAKIRA_REPLAY_ONNX_MODEL_KIND` (0.10.0+: embedding scheme override — `bert`, `bge`, or `e5`; auto-derived from the model id when unset)
 - `ZAKIRA_REPLAY_ONNX_MODEL_PATH`
-- `ZAKIRA_REPLAY_ONNX_VOCAB_PATH`
+- `ZAKIRA_REPLAY_ONNX_TOKENIZER_PATH` (0.10.0+: tokenizer file — `vocab.txt` for BERT, `sentencepiece.bpe.model` for XLM-R)
+- `ZAKIRA_REPLAY_ONNX_VOCAB_PATH` (legacy alias for `ZAKIRA_REPLAY_ONNX_TOKENIZER_PATH`; preserved for 0.9.x compatibility)
 - `ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY`
-- `ZAKIRA_REPLAY_ONNX_MODEL_FILE`
 - `ZAKIRA_REPLAY_ONNX_MAX_SEQUENCE_LENGTH`
 - `ZAKIRA_REPLAY_ONNX_EMBEDDING_DIMENSIONS`
 - `ZAKIRA_REPLAY_OCR_PROVIDER`
@@ -243,8 +266,10 @@ zakira-replay config set yt-dlp.path C:\tools\yt-dlp\yt-dlp.exe
 zakira-replay config set ffmpeg.path C:\tools\ffmpeg\bin\ffmpeg.exe
 zakira-replay config set dependencies.autoDownload true
 zakira-replay config set dependencies.portableDirectory C:\tools\zakira-replay
-zakira-replay config set search.onnx.modelPath C:\models\embedding.onnx
-zakira-replay config set search.onnx.vocabularyPath C:\models\vocab.txt
+zakira-replay config set runs.directory %LOCALAPPDATA%\Zakira.Replay\runs
+zakira-replay config set search.onnx.model bge-small-en-v1.5
+zakira-replay config set search.onnx.modelPath C:\models\bge-small-en-v1.5\model.onnx
+zakira-replay config set search.onnx.tokenizerPath C:\models\bge-small-en-v1.5\vocab.txt
 zakira-replay config set search.onnx.autoDownload true
 zakira-replay config set search.onnx.modelDirectory C:\models\bge-small-en-v1.5
 zakira-replay config set llm.provider openai
@@ -952,7 +977,9 @@ Download a compatible local ONNX embedding model with either command:
 zakira-replay deps install onnx
 # Or use the built-in installer (recommended):  zakira-replay deps install onnx --model bge-small-en-v1.5```
 
-The 0.10.0 installer registry knows three search-embedding models out of the box: `bge-small-en-v1.5` (default, English, ~33 MB), `snowflake-arctic-embed-s` (English, ~33 MB), and `multilingual-e5-small` (~118 MB, XLM-R tokenizer for non-English transcripts). Pick one via `zakira-replay config set search.onnx.model <id>` or per-call via `--onnx-model <id>` on `index build|query`. Each model lands under `<portableDirectory>/models/<model-id>/` so the three can coexist on disk. Indexes built with one model are not query-compatible with another \u2014 the runtime emits a `SEARCH_INDEX_EMBEDDING_MISMATCH` error and recommends `index build --force` to rebuild.
+The 0.10.0 installer registry knows three search-embedding models out of the box: `bge-small-en-v1.5` (default, English, ~33 MB), `snowflake-arctic-embed-s` (English, ~33 MB), and `multilingual-e5-small` (~118 MB, XLM-R tokenizer for non-English transcripts). Pick one via `zakira-replay config set search.onnx.model <id>` or per-call via `--onnx-model <id>` on `index build|query`. Each model lands under `<portableDirectory>/models/<model-id>/` so the three can coexist on disk. Indexes built with one model are not query-compatible with another — the runtime emits a `SEARCH_INDEX_EMBEDDING_MISMATCH` error and recommends `index build --force` to rebuild.
+
+Tokenization is handled by `Microsoft.ML.Tokenizers` 2.0 (BERT WordPiece for the BGE / arctic / generic-BERT family; SentencePiece BPE for the XLM-R-based multilingual-e5 family). The library auto-detects the right path based on the tokenizer file extension (`vocab.txt` vs `sentencepiece.bpe.model`), so swapping `search.onnx.model` between known ids does not require any user-side tokenizer configuration. Custom user models that come with a `tokenizer.json` should be paired with explicit `--onnx-tokenizer-path` and `--onnx-model-kind {bert|bge|e5}` to keep the prefix-and-pooling behaviour predictable.
 
 Chapter detection builds deterministic offline lexical chapters from transcript topic shifts and duration constraints:
 
@@ -964,21 +991,42 @@ It writes `chapters/chapters.json` and `chapters/chapters.md`.
 
 ## MCP Jobs
 
-MCP exposes both a blocking compatibility tool and non-blocking job tools:
+MCP exposes both a blocking compatibility tool and non-blocking job tools (all renamed to `verb.noun` in 0.9.0):
 
 - `analyze`: starts analysis and waits for completion. Use only for short videos.
 - `analyze.start`: starts analysis in the background and returns a `jobId`.
 - `analyze.status`: returns status and recent logs.
 - `analyze.result`: returns the completed manifest and artifact directory.
 - `analyze.cancel`: cancels a running job.
-- `clip`: extracts a timestamped video clip.
-- `index.build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`.
-- `index.query`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`.
+- `clip` / `frames`: extracts a timestamped video clip / ad-hoc stills.
+- `index.build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`; pass `onnxModel`, `onnxModelKind`, `onnxModelPath`, and `onnxTokenizerPath` to control the embedding model for `sqlite-onnx`.
+- `index.query`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`. Mismatched embedding models raise `SEARCH_INDEX_EMBEDDING_MISMATCH`.
 - `chapters.build`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
+- `align`: builds the cross-modal `evidence-aligned/by-chapter.json` and `by-slide.json` views.
+- `queue.enqueue` / `queue.run` / `queue.status`: persistent local queue for many videos.
+- `discover` / `doctor`: surface dependency status and probe a page for video URLs.
 
 Agents should prefer the job tools for long videos or LLM-backed OCR/vision work.
 
-MCP job snapshots are persisted under `runs/.mcp/jobs/`. Completed job status and results survive MCP server restarts. Jobs that were pending or running when the server stopped are restored as failed with a restart message.
+In addition to tools, the MCP server exposes **resources** under the `replay://` URI scheme (added in 0.9.0). Resources are readable without firing a tool call, which is the right path for agents that just need to inspect existing artifacts:
+
+- `replay://runs` — index of every run.
+- `replay://runs/{id}/{manifest|evidence|transcript|chapters}` — top-level run artifacts.
+- `replay://runs/{id}/aligned/{by-chapter|by-slide}` — cross-modal alignment views.
+- `replay://runs/{id}/frames/{frameId}/{ocr|vision}` — per-frame OCR / vision JSON.
+- `replay://jobs/{jobId}/logs` — live log buffer of an MCP analyze job.
+
+The MCP server supports three transports out of the box:
+
+```bash
+zakira-replay mcp serve                                  # stdio (default; Claude Desktop / Cursor / VS Code Copilot)
+zakira-replay mcp serve --transport http --port 8765     # Streamable HTTP for hosted agent platforms
+zakira-replay mcp serve --transport sse --port 8765      # alias for the Streamable HTTP endpoint (legacy SSE clients)
+```
+
+Stateless mode is used for the HTTP/SSE transports so multiple replicas can serve a load-balanced agent fleet.
+
+MCP job snapshots are persisted under `runs/.mcp/jobs/` (or the configured `runs.directory`). Completed job status and results survive MCP server restarts. Jobs that were pending or running when the server stopped are restored as failed with a restart message.
 
 ## Agent Skills
 

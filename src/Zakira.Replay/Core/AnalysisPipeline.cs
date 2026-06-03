@@ -1378,7 +1378,11 @@ public sealed class AnalysisPipeline
             // HAR to runs/<id>/debug/. Off by default; opt in per-run via --capture-debug or
             // persistently via `config set capture.browser.debug true`.
             Debug: request.CaptureDebug ?? config.Capture.Browser.Debug,
-            DebugMaxBodyBytes: config.Capture.Browser.DebugMaxBodyBytes);
+            DebugMaxBodyBytes: config.Capture.Browser.DebugMaxBodyBytes,
+            // Resolved subtitle-language preference order, forwarded so platform-specific
+            // interceptors (e.g. Medius) that advertise many languages download only the
+            // relevant one(s) rather than every track.
+            CaptionLanguagePreferences: ResolveSubtitleLanguages(request.CaptionLanguages, info));
 
         var result = await browserCaptureClient.CaptureAsync(browserCaptureRequest, progress, cancellationToken).ConfigureAwait(false);
         foreach (var warning in result.Warnings)
@@ -1678,7 +1682,19 @@ public sealed class AnalysisPipeline
             var allowFallback = captureModeHint == CaptureModes.Browser || captureModeHint == CaptureModes.Auto;
             if (!allowFallback)
             {
-                throw;
+                // yt-dlp couldn't resolve the URL and the caller didn't permit a browser
+                // fallback, so the run can't proceed. Surface an actionable error instead of
+                // letting the raw ProcessFailedException (a wall of yt-dlp stderr) bubble up:
+                // the most common cause is a JS-rendered / auth-gated player (SharePoint Stream,
+                // Microsoft Medius, Teams, custom portals) that yt-dlp can't reach but browser
+                // capture can. Preserve the original exception as InnerException for diagnostics.
+                throw new ReplayException(
+                    $"yt-dlp could not resolve metadata for '{request.Source}'. " +
+                    $"If this is a JS-rendered or auth-gated player (SharePoint Stream, Microsoft " +
+                    $"Medius, Teams, or a custom enterprise portal), retry with `--capture-mode browser` " +
+                    $"(add `--auth-profile <name>` or run `auth init-edge-profile` first for sign-in-gated " +
+                    $"sources). Original yt-dlp error: {ex.Message.Trim()}",
+                    ex);
             }
 
             warnings.Add(new ReplayWarning(

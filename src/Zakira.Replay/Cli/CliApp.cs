@@ -1446,7 +1446,31 @@ public static class CliApp
     {
         var pipeline = CreatePipeline();
         var progress = new Progress<string>(stdout.WriteLine);
-        var result = await pipeline.AnalyzeAsync(request, progress, cancellationToken).ConfigureAwait(false);
+        AnalyzeResult result;
+        try
+        {
+            result = await pipeline.AnalyzeAsync(request, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (MissingDependencyException ex)
+        {
+            // Render dependency / pipeline errors cleanly. Without this catch the exception
+            // escapes to System.CommandLine's default handler, which prints a raw stack trace
+            // ("Unhandled exception: ...") rather than the actionable message and exit code we
+            // surface elsewhere (Program.cs only sees exceptions thrown OUTSIDE the command action).
+            Console.Error.WriteLine(ex.ToDisplayString());
+            return 2;
+        }
+        catch (OperationCanceledException)
+        {
+            Console.Error.WriteLine("Error: operation cancelled.");
+            return 130;
+        }
+        catch (ReplayException ex)
+        {
+            Console.Error.WriteLine($"Error: {ex.Message}");
+            return 1;
+        }
+
         stdout.WriteLine();
         stdout.WriteLine(result.Reused ? $"Reused run: {result.Run.Id}" : $"Completed run: {result.Run.Id}");
         stdout.WriteLine($"Artifacts: {result.Run.Directory}");

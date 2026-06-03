@@ -157,6 +157,29 @@ public static class ReplayWarningCodes
     /// </summary>
     public const string CaptureStreamTranscriptParseFailed = "CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED";
 
+    /// <summary>
+    /// Browser capture parsed a Microsoft Medius embed page and found the inline
+    /// <c>captionsConfiguration.languageList</c> block listing one or more SAS-signed caption
+    /// (<c>Caption_&lt;lang&gt;.vtt</c>) URLs. Severity is <c>info</c>; reports how many
+    /// languages were advertised. Unlike playback-driven interception, this works even when the
+    /// MSE/Shaka player never boots, because the URLs are embedded in the initial HTML document.
+    /// </summary>
+    public const string CaptureMediusTranscriptDiscovered = "CAPTURE_MEDIUS_TRANSCRIPT_DISCOVERED";
+
+    /// <summary>
+    /// A Medius caption file referenced by the embed page's <c>captionsConfiguration</c> was
+    /// downloaded via its self-authorising SAS URL and landed under <c>captions/</c>. Severity
+    /// is <c>info</c>; reports the language, byte count, and output path.
+    /// </summary>
+    public const string CaptureMediusTranscriptDownloaded = "CAPTURE_MEDIUS_TRANSCRIPT_DOWNLOADED";
+
+    /// <summary>
+    /// A Medius caption URL from <c>captionsConfiguration</c> failed to download (network error
+    /// or non-200 response), or its body wasn't recognisable WebVTT. Severity is <c>warning</c>;
+    /// other advertised languages are still attempted.
+    /// </summary>
+    public const string CaptureMediusTranscriptFailed = "CAPTURE_MEDIUS_TRANSCRIPT_FAILED";
+
     public const string AuthProfileNotFound = "AUTH_PROFILE_NOT_FOUND";
 
     public const string AuthProfileStale = "AUTH_PROFILE_STALE";

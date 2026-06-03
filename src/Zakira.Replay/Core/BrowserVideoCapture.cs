@@ -32,7 +32,8 @@ public sealed record BrowserCaptureRequest(
     bool CaptureMediaForStt = false,
     long MaxMediaBytes = 0,
     bool Debug = false,
-    long DebugMaxBodyBytes = 1L * 1024 * 1024);
+    long DebugMaxBodyBytes = 1L * 1024 * 1024,
+    IReadOnlyList<string>? CaptionLanguagePreferences = null);
 
 public sealed record BrowserCaptureResult(
     IReadOnlyList<FrameArtifact> Frames,
@@ -221,6 +222,19 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 page.Response += streamInterceptor.OnResponse;
             }
 
+            // Microsoft Medius transcript interceptor. Medius embed pages carry a complete,
+            // SAS-signed caption manifest (`captionsConfiguration.languageList`) inline in the
+            // initial HTML document, so we can harvest transcripts even when the MSE/Shaka player
+            // never boots headlessly (the common case). Watches for the embed document response,
+            // parses the manifest, and downloads the preferred-language caption(s) afterward.
+            var mediusInterceptor = request.CaptureCaptions
+                ? new MediusTranscriptInterceptor(request, warnings)
+                : null;
+            if (mediusInterceptor is not null)
+            {
+                page.Response += mediusInterceptor.OnResponse;
+            }
+
             progress?.Report($"Navigating to {request.Url} (browser capture)...");
             await page.GotoAsync(request.Url, new PageGotoOptions
             {
@@ -254,6 +268,10 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 if (streamInterceptor is not null)
                 {
                     page.Response -= streamInterceptor.OnResponse;
+                }
+                if (mediusInterceptor is not null)
+                {
+                    page.Response -= mediusInterceptor.OnResponse;
                 }
                 if (debugRecorder is not null)
                 {
@@ -296,11 +314,31 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 {
                     page.Response -= streamInterceptor.OnResponse;
                 }
+                if (mediusInterceptor is not null)
+                {
+                    page.Response -= mediusInterceptor.OnResponse;
+                }
                 if (debugRecorder is not null)
                 {
                     page.Response -= debugRecorder.OnResponse;
                     await debugRecorder.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
+
+                // Medius (and similar MSE players) frequently never expose a finite
+                // video.duration headlessly, so we land here with zero frames. The transcript,
+                // however, is independent of playback: the embed page's inline caption manifest
+                // was already parsed during navigation, so download it now even though no frames
+                // were captured. This is what makes transcript-only Medius capture work.
+                if (earlyCaptions.Count == 0 && mediusInterceptor is not null && mediusInterceptor.HasDiscoveries)
+                {
+                    var mediusCaptions = await mediusInterceptor.DownloadAllAsync(
+                        context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
+                    if (mediusCaptions.Count > 0)
+                    {
+                        earlyCaptions = mediusCaptions;
+                    }
+                }
+
                 return new BrowserCaptureResult([], null, warnings, earlyCaptions);
             }
 
@@ -320,6 +358,10 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             if (streamInterceptor is not null)
             {
                 page.Response -= streamInterceptor.OnResponse;
+            }
+            if (mediusInterceptor is not null)
+            {
+                page.Response -= mediusInterceptor.OnResponse;
             }
             if (debugRecorder is not null)
             {
@@ -357,6 +399,19 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 if (streamCaptions.Count > 0)
                 {
                     captions = streamCaptions;
+                }
+            }
+
+            // Medius layer: when no captions came from layers 1-3, download the preferred caption
+            // from the inline `captionsConfiguration` manifest parsed during navigation. Works for
+            // Medius/Build/Ignite sessions whose Shaka player never fetched a .vtt on the wire.
+            if (captions.Count == 0 && mediusInterceptor is not null && mediusInterceptor.HasDiscoveries)
+            {
+                var mediusCaptions = await mediusInterceptor.DownloadAllAsync(
+                    context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
+                if (mediusCaptions.Count > 0)
+                {
+                    captions = mediusCaptions;
                 }
             }
 
@@ -487,6 +542,30 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
     {
         progress?.Report("Starting video playback...");
 
+        // MSE/HLS players (Microsoft Medius, Azure Media Player, Shaka) attach the <video>
+        // element late and only begin fetching media + caption sidecars once the player is
+        // engaged. Navigation uses WaitUntil=Load (streaming pages never reach NetworkIdle), so
+        // the player is typically still booting at this point. Wait for the element to attach so
+        // the play heuristics below have something to act on; without this the duration probe
+        // races ahead and reports CAPTURE_DURATION_UNRESOLVED because querySelector('video') was
+        // still null. 30s mirrors the slack the NetworkIdle-based discovery path relies on.
+        try
+        {
+            await page.WaitForSelectorAsync(
+                request.VideoElementSelector,
+                new PageWaitForSelectorOptions { State = WaitForSelectorState.Attached, Timeout = 30_000 }).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
+        {
+            // Element never attached in the top frame (e.g. nested-iframe player). The play
+            // heuristics still run; the duration probe will surface the failure if nothing starts.
+        }
+
+        // Resolve the frame that owns the <video> so the el.play() and forced-surface-click
+        // fallbacks below target the right document (the player may live inside an iframe).
+        // Falls back to the main frame, preserving the original single-frame behaviour.
+        var videoFrame = await ResolveVideoFrameAsync(page, request.VideoElementSelector).ConfigureAwait(false);
+
         if (!string.IsNullOrWhiteSpace(request.PlayButtonSelector))
         {
             try
@@ -494,8 +573,10 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 await page.Locator(request.PlayButtonSelector).First.ClickAsync(new LocatorClickOptions { Timeout = 10_000 }).ConfigureAwait(false);
                 return;
             }
-            catch (PlaywrightException ex)
+            catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
             {
+                // Playwright 1.59 throws System.TimeoutException (not a PlaywrightException) when a
+                // locator action times out, so both must be caught here or the run crashes outright.
                 warnings.Add(new ReplayWarning(
                     ReplayWarningCodes.CapturePlayButtonNotFound,
                     $"Configured play-button selector '{request.PlayButtonSelector}' did not match: {ex.Message}. Falling back to video.play().",
@@ -504,21 +585,33 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             }
         }
 
-        // Fallback 1: call the HTML5 video element's play() directly.
+        // Fallback 1: call the HTML5 video element's play() directly. el.play() returns a promise
+        // that only resolves once playback actually begins, which can hang indefinitely on a long
+        // or still-buffering video. EvaluateAsync has no default timeout, so awaiting it directly
+        // would block the whole pipeline forever. Race the play() promise against a short in-page
+        // timeout: we just need to kick playback, not wait for it to settle.
         try
         {
-            var played = await page.EvaluateAsync<bool>($@"
+            var played = await videoFrame.EvaluateAsync<bool>($@"
                 async (selector) => {{
                     const el = document.querySelector(selector);
                     if (!el) return false;
-                    try {{ await el.play(); return true; }} catch {{ return false; }}
+                    try {{
+                        const playPromise = Promise.resolve(el.play()).catch(() => {{}});
+                        const timeout = new Promise((resolve) => setTimeout(resolve, 3000));
+                        await Promise.race([playPromise, timeout]);
+                        // Only report success when playback actually engaged. Autoplay-with-sound
+                        // is blocked by default, in which case el.play() rejects silently and the
+                        // element stays paused — fall through to the click heuristics below.
+                        return !el.paused;
+                    }} catch {{ return false; }}
                 }}", request.VideoElementSelector).ConfigureAwait(false);
             if (played)
             {
                 return;
             }
         }
-        catch (PlaywrightException)
+        catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
         {
             // ignored — fall through to the aria-label heuristic
         }
@@ -528,13 +621,27 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
         {
             await page.Locator("button[aria-label*='play' i]").First.ClickAsync(new LocatorClickOptions { Timeout = 5_000 }).ConfigureAwait(false);
         }
-        catch (PlaywrightException ex)
+        catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
         {
             warnings.Add(new ReplayWarning(
                 ReplayWarningCodes.CapturePlayButtonNotFound,
                 $"Could not start playback: {ex.Message}. Capture may fail at the duration probe.",
                 Source: "playwright",
                 Severity: ReplayWarningSeverities.Warning));
+        }
+
+        // Fallback 3: click the player surface itself. MSE players (Medius / Azure Media Player)
+        // often bind click-to-play on the <video> element or a poster overlay rather than a
+        // button with an aria-label, so a direct (forced) click on the video surface starts
+        // playback where the heuristics above don't. Best-effort: failures are non-fatal.
+        try
+        {
+            await videoFrame.Locator(request.VideoElementSelector).First.ClickAsync(
+                new LocatorClickOptions { Timeout = 5_000, Force = true }).ConfigureAwait(false);
+        }
+        catch (Exception)
+        {
+            // ignored — the duration probe is the final arbiter of whether playback started.
         }
     }
 
@@ -855,7 +962,11 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             cancellationToken.ThrowIfCancellationRequested();
             try
             {
-                var duration = await page.EvaluateAsync<double?>($@"
+                // Re-resolve each iteration: MSE players (and the wrapper-page → iframe case)
+                // attach the <video> late and possibly in a child frame, so the frame that owns
+                // the element can change between polls.
+                var frame = await ResolveVideoFrameAsync(page, request.VideoElementSelector).ConfigureAwait(false);
+                var duration = await frame.EvaluateAsync<double?>($@"
                     (selector) => {{
                         const el = document.querySelector(selector);
                         if (!el) return null;
@@ -883,6 +994,56 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
         return null;
     }
 
+    /// <summary>
+    /// Find the frame whose DOM contains an element matching <paramref name="selector"/>. Players
+    /// embedded via an iframe (e.g. a Microsoft Medius player inside a build.microsoft.com session
+    /// page) expose the <c>&lt;video&gt;</c> inside a child frame, which <see cref="IPage.Locator"/>
+    /// and <see cref="IPage.EvaluateAsync"/> (both main-frame-scoped) never see. Playwright can
+    /// drive cross-origin child frames, so we iterate them. Falls back to the main frame when no
+    /// frame matches, preserving the single-frame behaviour exactly.
+    /// </summary>
+    private static async Task<IFrame> ResolveVideoFrameAsync(IPage page, string selector)
+    {
+        // Prefer the main frame: cheapest, and correct for the overwhelmingly common case where
+        // the player isn't iframed.
+        try
+        {
+            var inMain = await page.MainFrame.EvaluateAsync<bool>(
+                "(s) => document.querySelector(s) !== null", selector).ConfigureAwait(false);
+            if (inMain)
+            {
+                return page.MainFrame;
+            }
+        }
+        catch (PlaywrightException)
+        {
+            // fall through to scan child frames
+        }
+
+        foreach (var frame in page.Frames)
+        {
+            if (ReferenceEquals(frame, page.MainFrame))
+            {
+                continue;
+            }
+            try
+            {
+                var found = await frame.EvaluateAsync<bool>(
+                    "(s) => document.querySelector(s) !== null", selector).ConfigureAwait(false);
+                if (found)
+                {
+                    return frame;
+                }
+            }
+            catch (PlaywrightException)
+            {
+                // Frame may be detached / navigating / not yet evaluable; skip it.
+            }
+        }
+
+        return page.MainFrame;
+    }
+
     private static async Task<IReadOnlyList<FrameArtifact>> CaptureFramesAsync(
         IPage page,
         BrowserCaptureRequest request,
@@ -897,7 +1058,10 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
         Directory.CreateDirectory(framesDirectory);
 
         var seekWaitMs = (int)Math.Round(Math.Max(0.0, request.SeekWaitSeconds) * 1000);
-        var locator = page.Locator(request.VideoElementSelector).First;
+        // Resolve the frame that actually owns the <video> once up front; seek + screenshot must
+        // target that frame (the video may live inside an iframe). Falls back to the main frame.
+        var videoFrame = await ResolveVideoFrameAsync(page, request.VideoElementSelector).ConfigureAwait(false);
+        var locator = videoFrame.Locator(request.VideoElementSelector).First;
         var frames = new List<FrameArtifact>(timestamps.Count);
         var seekFailureSeen = false;
         for (var i = 0; i < timestamps.Count; i++)
@@ -911,7 +1075,7 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
 
             try
             {
-                await page.EvaluateAsync(
+                await videoFrame.EvaluateAsync(
                     $@"
                     (args) => {{
                         const el = document.querySelector(args.selector);

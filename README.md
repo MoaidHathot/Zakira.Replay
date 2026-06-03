@@ -911,6 +911,24 @@ Secrets themselves should stay out of JSON config. The config can store secret e
 
 The batch runner calls the same single-video pipeline for each item and writes a batch result under `runs/`. Both instructions are optional; the pipeline's baseline already extracts everything visible from frames and every readable piece of text.
 
+Every field maps to the matching CLI option, and can be set manifest-wide and/or overridden per item (item value wins, then manifest value, then the built-in default). Besides the basics above this includes `captureMode` (`auto` | `ytdlp` | `browser`), `authProfile`, `ocrProvider` (`copilot` | `local`), `smartCrop` / `smartCropProfile`, and diarization (`useDiarization`, `numSpeakers`, `diarizationThreshold`). For example, a transcript-only sweep of streamed conference sessions (e.g. Microsoft Build / Medius, which need browser capture) looks like:
+
+```json
+{
+  "batchId": "build-2026",
+  "frames": 0,
+  "includeTranscript": true,
+  "captureMode": "browser",
+  "captionLanguages": ["en"],
+  "items": [
+    { "source": "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions", "runId": "KEY01" },
+    { "source": "https://build.microsoft.com/en-US/sessions/BRK101?source=sessions", "runId": "BRK101" }
+  ]
+}
+```
+
+Note that `batch run` is sequential. To process many sessions in parallel, enqueue them and use [`queue run --concurrency N`](#queue--worker-mode) instead.
+
 ## Vision and OCR Steering
 
 OCR and vision both have comprehensive baselines. Out of the box (no instruction provided) they extract:

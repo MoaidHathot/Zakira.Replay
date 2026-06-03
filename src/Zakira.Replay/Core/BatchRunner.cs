@@ -50,29 +50,7 @@ public sealed class BatchRunner
 
             try
             {
-                var request = new AnalyzeRequest(
-                    Source: item.Source,
-                    VisionInstruction: item.VisionInstruction ?? manifest.VisionInstruction ?? string.Empty,
-                    OcrInstruction: item.OcrInstruction ?? manifest.OcrInstruction ?? string.Empty,
-                    IncludeTranscript: item.IncludeTranscript ?? manifest.IncludeTranscript ?? true,
-                    FrameCount: item.Frames ?? manifest.Frames ?? 7,
-                    RunId: item.RunId,
-                    ExtractAudio: item.ExtractAudio ?? manifest.ExtractAudio ?? false,
-                    UseSpeechToText: item.UseSpeechToText ?? manifest.UseSpeechToText ?? false,
-                    UseOcr: item.UseOcr ?? manifest.UseOcr ?? false,
-                    UseVision: item.UseVision ?? manifest.UseVision ?? false,
-                    MaxAiFrames: item.MaxAiFrames ?? manifest.MaxAiFrames ?? 5,
-                    Model: item.Model ?? manifest.Model ?? LlmProviderFactory.GetDefaultModel(item.LlmProvider ?? manifest.LlmProvider),
-                    LlmProvider: LlmProviderFactory.Normalize(item.LlmProvider ?? manifest.LlmProvider),
-                    UseCache: item.UseCache ?? manifest.UseCache ?? false,
-                    FrameStrategy: item.FrameStrategy ?? manifest.FrameStrategy ?? FrameSelectionStrategies.Interval,
-                    CookiesPath: item.CookiesPath ?? manifest.CookiesPath,
-                    CookiesFromBrowser: item.CookiesFromBrowser ?? manifest.CookiesFromBrowser,
-                    CaptionLanguages: item.CaptionLanguages ?? manifest.CaptionLanguages,
-                    SlideGrouping: item.SlideGrouping ?? manifest.SlideGrouping,
-                    SlideHashDistance: item.SlideHashDistance ?? manifest.SlideHashDistance,
-                    FramesPerMinute: item.FramesPerMinute ?? manifest.FramesPerMinute,
-                    SceneSafetyCap: item.SceneSafetyCap ?? manifest.SceneSafetyCap);
+                var request = BuildAnalyzeRequest(manifest, item);
 
                 var result = await pipelineFactory().AnalyzeAsync(request, progress, cancellationToken).ConfigureAwait(false);
                 itemResults.Add(new BatchItemResult(item.Source, true, result.Run.Id, result.Run.Directory, null));
@@ -94,6 +72,51 @@ public sealed class BatchRunner
 
         return resultManifest;
     }
+
+    /// <summary>
+    /// Build the per-item <see cref="AnalyzeRequest"/>, layering item overrides over manifest-level
+    /// defaults over the request record's own defaults. Extracted (and made internal) so the
+    /// manifest-binding contract — including capture mode, auth profile, and diarization — can be
+    /// asserted without spinning up the pipeline.
+    /// </summary>
+    internal static AnalyzeRequest BuildAnalyzeRequest(BatchManifest manifest, BatchItem item)
+        => new(
+            Source: item.Source,
+            VisionInstruction: item.VisionInstruction ?? manifest.VisionInstruction ?? string.Empty,
+            OcrInstruction: item.OcrInstruction ?? manifest.OcrInstruction ?? string.Empty,
+            IncludeTranscript: item.IncludeTranscript ?? manifest.IncludeTranscript ?? true,
+            FrameCount: item.Frames ?? manifest.Frames ?? 7,
+            RunId: item.RunId,
+            ExtractAudio: item.ExtractAudio ?? manifest.ExtractAudio ?? false,
+            UseSpeechToText: item.UseSpeechToText ?? manifest.UseSpeechToText ?? false,
+            UseOcr: item.UseOcr ?? manifest.UseOcr ?? false,
+            UseVision: item.UseVision ?? manifest.UseVision ?? false,
+            MaxAiFrames: item.MaxAiFrames ?? manifest.MaxAiFrames ?? 5,
+            Model: item.Model ?? manifest.Model ?? LlmProviderFactory.GetDefaultModel(item.LlmProvider ?? manifest.LlmProvider),
+            LlmProvider: LlmProviderFactory.Normalize(item.LlmProvider ?? manifest.LlmProvider),
+            UseCache: item.UseCache ?? manifest.UseCache ?? false,
+            FrameStrategy: item.FrameStrategy ?? manifest.FrameStrategy ?? FrameSelectionStrategies.Interval,
+            CookiesPath: item.CookiesPath ?? manifest.CookiesPath,
+            CookiesFromBrowser: item.CookiesFromBrowser ?? manifest.CookiesFromBrowser,
+            CaptionLanguages: item.CaptionLanguages ?? manifest.CaptionLanguages,
+            SlideGrouping: item.SlideGrouping ?? manifest.SlideGrouping,
+            SlideHashDistance: item.SlideHashDistance ?? manifest.SlideHashDistance,
+            FramesPerMinute: item.FramesPerMinute ?? manifest.FramesPerMinute,
+            SceneSafetyCap: item.SceneSafetyCap ?? manifest.SceneSafetyCap,
+            OcrProvider: OcrProviderFactory.Normalize(item.OcrProvider ?? manifest.OcrProvider),
+            SmartCrop: item.SmartCrop ?? manifest.SmartCrop,
+            SmartCropProfile: item.SmartCropProfile ?? manifest.SmartCropProfile,
+            CaptureMode: item.CaptureMode ?? manifest.CaptureMode,
+            AuthProfile: item.AuthProfile ?? manifest.AuthProfile,
+            UseDiarization: item.UseDiarization ?? manifest.UseDiarization ?? false,
+            NumSpeakers: item.NumSpeakers ?? manifest.NumSpeakers,
+            DiarizationThreshold: ResolveDiarizationThreshold(item.DiarizationThreshold ?? manifest.DiarizationThreshold));
+
+    // Mirror the CLI: a diarization threshold only takes effect when positive; otherwise leave it
+    // unset so the pipeline applies its configured default. Narrow double -> float to match
+    // AnalyzeRequest.DiarizationThreshold.
+    private static float? ResolveDiarizationThreshold(double? threshold)
+        => threshold is > 0 ? (float)threshold.Value : null;
 }
 
 public sealed class BatchManifest
@@ -139,6 +162,22 @@ public sealed class BatchManifest
     public int? FramesPerMinute { get; set; }
 
     public int? SceneSafetyCap { get; set; }
+
+    public string? OcrProvider { get; set; }
+
+    public bool? SmartCrop { get; set; }
+
+    public string? SmartCropProfile { get; set; }
+
+    public string? CaptureMode { get; set; }
+
+    public string? AuthProfile { get; set; }
+
+    public bool? UseDiarization { get; set; }
+
+    public int? NumSpeakers { get; set; }
+
+    public double? DiarizationThreshold { get; set; }
 
     public bool ContinueOnError { get; set; } = true;
 
@@ -190,6 +229,22 @@ public sealed class BatchItem
     public int? FramesPerMinute { get; set; }
 
     public int? SceneSafetyCap { get; set; }
+
+    public string? OcrProvider { get; set; }
+
+    public bool? SmartCrop { get; set; }
+
+    public string? SmartCropProfile { get; set; }
+
+    public string? CaptureMode { get; set; }
+
+    public string? AuthProfile { get; set; }
+
+    public bool? UseDiarization { get; set; }
+
+    public int? NumSpeakers { get; set; }
+
+    public double? DiarizationThreshold { get; set; }
 }
 
 public sealed record BatchResult(

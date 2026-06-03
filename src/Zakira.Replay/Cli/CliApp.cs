@@ -433,12 +433,20 @@ public static class CliApp
     {
         var run = new Command("run", "Runs a JSON-defined batch of analyses.");
         var manifest = new Argument<FileInfo>("manifest") { Description = "Path to the batch manifest JSON file." };
+        // Mirrors `queue run --concurrency`. Nullable so we can tell "not provided" (defer to the
+        // manifest's `concurrency` field, or the default of 1) apart from an explicit value.
+        var concurrency = new Option<int?>("--concurrency") { Description = "Concurrent items (overrides manifest 'concurrency'; default 1)." };
         run.Arguments.Add(manifest);
+        run.Options.Add(concurrency);
         run.SetAction(async (parseResult, cancellationToken) =>
         {
             var runner = new BatchRunner(CreatePipeline);
             var progress = new Progress<string>(stdout.WriteLine);
-            var result = await runner.RunAsync(parseResult.GetValue(manifest)!.FullName, progress, cancellationToken).ConfigureAwait(false);
+            var result = await runner.RunAsync(
+                parseResult.GetValue(manifest)!.FullName,
+                progress,
+                cancellationToken,
+                parseResult.GetValue(concurrency)).ConfigureAwait(false);
             stdout.WriteLine();
             stdout.WriteLine($"Completed batch: {result.BatchId}");
             stdout.WriteLine($"Batch artifacts: {result.BatchDirectory}");

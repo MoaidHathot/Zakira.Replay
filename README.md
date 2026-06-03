@@ -920,6 +920,7 @@ Every field maps to the matching CLI option, and can be set manifest-wide and/or
   "includeTranscript": true,
   "captureMode": "browser",
   "captionLanguages": ["en"],
+  "concurrency": 4,
   "items": [
     { "source": "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions", "runId": "KEY01" },
     { "source": "https://build.microsoft.com/en-US/sessions/BRK101?source=sessions", "runId": "BRK101" }
@@ -927,7 +928,9 @@ Every field maps to the matching CLI option, and can be set manifest-wide and/or
 }
 ```
 
-Note that `batch run` is sequential. To process many sessions in parallel, enqueue them and use [`queue run --concurrency N`](#queue--worker-mode) instead.
+Set `"concurrency": N` (manifest-wide) or pass `--concurrency N` to `batch run` (which overrides the manifest value) to process up to N items in parallel. Default is `1` (sequential, preserving the historical behaviour). When `continueOnError` is `false` (default `true`), the first failure cancels any items not yet started; in-flight items are best-effort cancelled and dropped from the result list (only the failure that triggered the stop is recorded). Item order in `batch-result.json` always mirrors manifest order regardless of completion order.
+
+For an evolving job set that needs to survive process restarts, use the [queue](#queue--worker-mode) instead — it adds persistence and per-job retries on top of the same concurrency model.
 
 ## Vision and OCR Steering
 

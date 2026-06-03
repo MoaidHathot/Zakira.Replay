@@ -39,6 +39,7 @@
     "numSpeakers": { "type": ["integer", "null"], "minimum": 1 },
     "diarizationThreshold": { "type": ["number", "null"], "exclusiveMinimum": 0 },
     "continueOnError": { "type": "boolean" },
+    "concurrency": { "type": ["integer", "null"], "minimum": 1 },
     "items": {
       "type": "array",
       "minItems": 1,

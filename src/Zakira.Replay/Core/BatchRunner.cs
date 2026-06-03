@@ -11,14 +11,36 @@ public sealed class BatchRunner
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull
     };
 
-    private readonly Func<AnalysisPipeline> pipelineFactory;
+    private readonly Func<AnalyzeRequest, IProgress<string>?, CancellationToken, Task<AnalyzeResult>> analyzer;
 
     public BatchRunner(Func<AnalysisPipeline> pipelineFactory)
+        : this((request, progress, ct) => pipelineFactory().AnalyzeAsync(request, progress, ct))
     {
-        this.pipelineFactory = pipelineFactory;
+    }
+
+    // Test seam: tests inject a controllable analyzer delegate (delay, failure, parallelism
+    // counter) without having to subclass the sealed AnalysisPipeline.
+    internal BatchRunner(Func<AnalyzeRequest, IProgress<string>?, CancellationToken, Task<AnalyzeResult>> analyzer)
+    {
+        this.analyzer = analyzer;
     }
 
     public async Task<BatchResult> RunAsync(string manifestPath, IProgress<string>? progress, CancellationToken cancellationToken)
+        => await RunAsync(manifestPath, progress, cancellationToken, concurrencyOverride: null).ConfigureAwait(false);
+
+    /// <summary>
+    /// Run a batch manifest with optional CLI-supplied concurrency. <paramref name="concurrencyOverride"/>
+    /// (when set) takes precedence over <see cref="BatchManifest.Concurrency"/>, which in turn beats
+    /// the built-in default of <c>1</c> (sequential). Items are dispatched via
+    /// <see cref="Parallel.ForEachAsync{TSource}(IEnumerable{TSource}, ParallelOptions, Func{TSource, CancellationToken, ValueTask})"/>
+    /// with <c>MaxDegreeOfParallelism</c> capped at the resolved concurrency; ordering of the
+    /// returned <see cref="BatchResult.Items"/> mirrors the manifest input order regardless of
+    /// completion order. When <see cref="BatchManifest.ContinueOnError"/> is <c>false</c>, the
+    /// first failure cancels an internal linked token so no further items start; in-flight items
+    /// are best-effort cancelled. User cancellation via <paramref name="cancellationToken"/>
+    /// always bubbles up unchanged.
+    /// </summary>
+    public async Task<BatchResult> RunAsync(string manifestPath, IProgress<string>? progress, CancellationToken cancellationToken, int? concurrencyOverride)
     {
         if (!File.Exists(manifestPath))
         {
@@ -34,6 +56,8 @@ public sealed class BatchRunner
             throw new ReplayException("Batch manifest contains no items.");
         }
 
+        var concurrency = ResolveConcurrency(manifest, concurrencyOverride);
+
         var batchId = string.IsNullOrWhiteSpace(manifest.BatchId)
             ? $"batch-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}"
             : Slug.Create(manifest.BatchId, 80);
@@ -41,29 +65,61 @@ public sealed class BatchRunner
         var batchDirectory = Path.Combine(ArtifactStore.GetDefaultRootDirectory(), batchId);
         Directory.CreateDirectory(batchDirectory);
 
-        var itemResults = new List<BatchItemResult>();
-        for (var i = 0; i < manifest.Items.Count; i++)
+        // One slot per input item — each task writes to its own index, so we get manifest-order
+        // results back without locking. Items that never start (e.g. stopped by continueOnError or
+        // cancelled mid-flight) leave their slot null and are dropped from the final list.
+        var resultSlots = new BatchItemResult?[manifest.Items.Count];
+
+        using var stopCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var parallelOptions = new ParallelOptions
         {
-            var item = manifest.Items[i];
-            cancellationToken.ThrowIfCancellationRequested();
-            progress?.Report($"[{i + 1}/{manifest.Items.Count}] {item.Source}");
+            MaxDegreeOfParallelism = concurrency,
+            CancellationToken = stopCts.Token,
+        };
 
-            try
-            {
-                var request = BuildAnalyzeRequest(manifest, item);
-
-                var result = await pipelineFactory().AnalyzeAsync(request, progress, cancellationToken).ConfigureAwait(false);
-                itemResults.Add(new BatchItemResult(item.Source, true, result.Run.Id, result.Run.Directory, null));
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                itemResults.Add(new BatchItemResult(item.Source, false, null, null, ex.Message));
-                if (!manifest.ContinueOnError)
+        try
+        {
+            await Parallel.ForEachAsync(
+                manifest.Items.Select((item, index) => (item, index)),
+                parallelOptions,
+                async (entry, itemToken) =>
                 {
-                    break;
-                }
-            }
+                    var (item, index) = entry;
+                    progress?.Report($"[{index + 1}/{manifest.Items.Count}] {item.Source}");
+
+                    try
+                    {
+                        var request = BuildAnalyzeRequest(manifest, item);
+                        var result = await analyzer(request, progress, itemToken).ConfigureAwait(false);
+                        resultSlots[index] = new BatchItemResult(item.Source, true, result.Run.Id, result.Run.Directory, null);
+                    }
+                    catch (OperationCanceledException)
+                    {
+                        // Either user cancellation or stop-on-failure: let it propagate so
+                        // ForEachAsync exits promptly. Don't synthesise a "failed" entry for an
+                        // item that was actively yanked.
+                        throw;
+                    }
+                    catch (Exception ex)
+                    {
+                        resultSlots[index] = new BatchItemResult(item.Source, false, null, null, ex.Message);
+                        if (!manifest.ContinueOnError)
+                        {
+                            // Signal sibling tasks (and any not-yet-started items) to stop. The
+                            // outer catch below swallows the resulting OCE when it's ours.
+                            stopCts.Cancel();
+                        }
+                    }
+                }).ConfigureAwait(false);
         }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            // Our own stop-on-failure cancellation tripped; the failure that triggered it is
+            // already recorded in resultSlots. User-initiated cancellation (outer token) falls
+            // through the `when` and propagates to the caller as before.
+        }
+
+        var itemResults = resultSlots.Where(slot => slot is not null).Cast<BatchItemResult>().ToList();
 
         var resultManifest = new BatchResult(batchId, batchDirectory, DateTimeOffset.UtcNow, itemResults);
         var resultPath = Path.Combine(batchDirectory, "batch-result.json");
@@ -71,6 +127,17 @@ public sealed class BatchRunner
         await File.AppendAllTextAsync(resultPath, Environment.NewLine, cancellationToken).ConfigureAwait(false);
 
         return resultManifest;
+    }
+
+    /// <summary>
+    /// Precedence: CLI <c>--concurrency</c> override beats <see cref="BatchManifest.Concurrency"/>
+    /// beats the default of <c>1</c> (sequential). Values below <c>1</c> are clamped to <c>1</c>
+    /// so a misconfigured manifest never deadlocks the run.
+    /// </summary>
+    internal static int ResolveConcurrency(BatchManifest manifest, int? concurrencyOverride)
+    {
+        var value = concurrencyOverride ?? manifest.Concurrency ?? 1;
+        return value < 1 ? 1 : value;
     }
 
     /// <summary>
@@ -180,6 +247,14 @@ public sealed class BatchManifest
     public double? DiarizationThreshold { get; set; }
 
     public bool ContinueOnError { get; set; } = true;
+
+    /// <summary>
+    /// Maximum number of items processed in parallel. <c>null</c> or <c>1</c> = sequential
+    /// (preserves historic batch behaviour). When &gt;1, items are dispatched via
+    /// <c>Parallel.ForEachAsync</c> with <c>MaxDegreeOfParallelism</c> capped at this value.
+    /// CLI <c>--concurrency</c> on <c>batch run</c> overrides this.
+    /// </summary>
+    public int? Concurrency { get; set; }
 
     public List<BatchItem> Items { get; set; } = [];
 }

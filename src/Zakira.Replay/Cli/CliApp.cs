@@ -730,7 +730,7 @@ public static class CliApp
         });
 
         var query = new Command("query", "Queries a search index or run directory.");
-        var queryTarget = new Argument<string>("target") { Description = "Run directory or index path." };
+        var queryTarget = new Argument<string>("target") { Description = "Run directory, index file path, or registered conference id." };
         var queryString = new Argument<string>("query") { Description = "Query string." };
         var top = new Option<int>("--top") { Description = "Number of matches.", DefaultValueFactory = _ => 5 };
         query.Arguments.Add(queryTarget);
@@ -755,8 +755,14 @@ public static class CliApp
                 EmbeddingDimensions: parseResult.GetValue(embeddingDimensions),
                 OnnxModel: parseResult.GetValue(onnxModel),
                 OnnxModelKind: parseResult.GetValue(onnxModelKind));
+            // Polymorphic target: literal file path, run directory (search/index.{json|sqlite}),
+            // or a conference id under <runs-root>/.indexes/<slug>/index.json. Fall back to the
+            // raw argument so the existing error path still fires for plain bad inputs.
+            var rawTarget = parseResult.GetValue(queryTarget)!;
+            var resolved = SearchIndexService.ResolveQueryTarget(rawTarget, ArtifactStore.GetDefaultRootDirectory())
+                ?? Path.GetFullPath(rawTarget);
             var result = await new SearchIndexService().QueryAsync(
-                Path.GetFullPath(parseResult.GetValue(queryTarget)!),
+                resolved,
                 parseResult.GetValue(queryString)!,
                 parseResult.GetValue(top),
                 options,
@@ -765,7 +771,98 @@ public static class CliApp
             return 0;
         });
 
-        return new Command("index", "Search index commands (replaces 0.8's `search` group).") { build, query };
+        // ----- index build-conference ------------------------------------------------------
+        var buildConference = new Command("build-conference", "Aggregates evidence.json from multiple runs into one searchable conference index.");
+        var conferenceId = new Argument<string>("conference-id") { Description = "Stable id for the conference index (e.g. 'build-2026'). Slugified on disk." };
+        var conferenceRuns = new Option<string>("--runs") { Description = "Comma- or semicolon-separated list of run directory paths or globs. Use 'runs/*' to ingest every run under the default artifact root.", Required = true };
+        buildConference.Arguments.Add(conferenceId);
+        buildConference.Options.Add(conferenceRuns);
+        buildConference.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var raw = parseResult.GetValue(conferenceRuns)!;
+            var artifactRoot = ArtifactStore.GetDefaultRootDirectory();
+            var runDirs = ExpandRunDirectories(raw, artifactRoot);
+            if (runDirs.Count == 0)
+            {
+                stdout.WriteLine($"No run directories matched '--runs {raw}'.");
+                return 1;
+            }
+
+            var result = await new SearchIndexService().BuildConferenceAsync(
+                parseResult.GetValue(conferenceId)!,
+                runDirs,
+                artifactRoot,
+                cancellationToken).ConfigureAwait(false);
+
+            stdout.WriteLine($"Conference index: {result.ConferenceId}");
+            stdout.WriteLine($"Ingested {result.IncludedRuns.Count} run(s), {result.DocumentCount} documents.");
+            if (result.Skipped.Count > 0)
+            {
+                stdout.WriteLine($"Skipped {result.Skipped.Count} run(s):");
+                foreach (var s in result.Skipped)
+                {
+                    stdout.WriteLine($"  - {s.RunDirectory}: {s.Reason}");
+                }
+            }
+            stdout.WriteLine($"Index: {result.IndexPath}");
+            return 0;
+        });
+
+        return new Command("index", "Search index commands (replaces 0.8's `search` group).") { build, query, buildConference };
+    }
+
+    /// <summary>
+    /// Expand a comma/semicolon-separated list of run-directory paths or globs into the set of
+    /// matching, on-disk directories. Bare names (no glob, no separator) are resolved against
+    /// <paramref name="artifactRoot"/> as a convenience so users can write
+    /// <c>--runs key01,brk101</c> instead of full paths.
+    /// </summary>
+    private static IReadOnlyList<string> ExpandRunDirectories(string raw, string artifactRoot)
+    {
+        var parts = raw.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in parts)
+        {
+            foreach (var dir in ExpandOne(part, artifactRoot))
+            {
+                var full = Path.GetFullPath(dir);
+                if (seen.Add(full)) result.Add(full);
+            }
+        }
+        return result;
+    }
+
+    private static IEnumerable<string> ExpandOne(string spec, string artifactRoot)
+    {
+        // Glob support is intentionally minimal: any '*' or '?' in the spec triggers a
+        // Directory.GetDirectories search rooted at the parent (or artifactRoot when relative).
+        if (spec.Contains('*') || spec.Contains('?'))
+        {
+            var (root, pattern) = SplitGlobRoot(spec, artifactRoot);
+            if (!Directory.Exists(root)) yield break;
+            foreach (var dir in Directory.EnumerateDirectories(root, pattern))
+            {
+                yield return dir;
+            }
+            yield break;
+        }
+
+        if (Directory.Exists(spec)) { yield return spec; yield break; }
+
+        var resolved = Path.Combine(artifactRoot, spec);
+        if (Directory.Exists(resolved)) yield return resolved;
+    }
+
+    private static (string Root, string Pattern) SplitGlobRoot(string spec, string artifactRoot)
+    {
+        var root = Path.GetDirectoryName(spec);
+        var pattern = Path.GetFileName(spec);
+        if (string.IsNullOrEmpty(root))
+        {
+            return (artifactRoot, pattern);
+        }
+        return (root!, pattern);
     }
 
     // ---------------------------------------------------------------------------------------
@@ -1311,6 +1408,7 @@ public static class CliApp
         var cookiesFromBrowser = new Option<string?>("--cookies-from-browser") { Description = "cookies-from-browser spec." };
         var browserAuth = new Option<string?>("--browser-auth") { Description = "Alias for --cookies-from-browser." };
         var captionLanguages = new Option<string?>("--caption-languages") { Description = "Caption languages, comma-separated." };
+        var secondaryTranscripts = new Option<string?>("--secondary-transcripts") { Description = "Comma-separated languages to also persist as transcript.<lang>.md (default: none)." };
         var noSlideGrouping = new Option<bool>("--no-slide-grouping") { Description = "Disable slide grouping." };
         var slideHashDistance = new Option<int?>("--slide-hash-distance") { Description = "Slide hash Hamming distance." };
         var framesPerMinute = new Option<int?>("--frames-per-minute") { Description = "Frames per minute for interval sampling." };
@@ -1323,7 +1421,7 @@ public static class CliApp
             visionInstruction, ocrInstruction, stt, audio, ocr, vision, diarize, numSpeakers, diarizeThreshold,
             maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode, smartCrop, smartCropProfile,
             captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser, browserAuth,
-            captionLanguages, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
+            captionLanguages, secondaryTranscripts, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
         };
 
         Func<ParseResult, string, bool, int, string?, AnalyzeRequest> apply = (parseResult, source, includeTranscript, frameCount, runId) =>
@@ -1339,6 +1437,7 @@ public static class CliApp
                 : (parseResult.GetValue(frameStrategy) ?? FrameSelectionStrategies.Scene);
             var resolvedCookiesFromBrowser = parseResult.GetValue(browserAuth) ?? parseResult.GetValue(cookiesFromBrowser);
             var captionLangs = ParseCaptionLanguages(parseResult.GetValue(captionLanguages));
+            var secondaryLangs = ParseCaptionLanguages(parseResult.GetValue(secondaryTranscripts));
             bool? slideGroupingValue = parseResult.GetValue(noSlideGrouping) ? false : null;
             float? diarizationThreshold = null;
             var threshold = parseResult.GetValue(diarizeThreshold);
@@ -1380,7 +1479,8 @@ public static class CliApp
                 NumSpeakers: parseResult.GetValue(numSpeakers),
                 DiarizationThreshold: diarizationThreshold,
                 VisionProvider: resolvedVisionProvider,
-                LocalVisionMode: parseResult.GetValue(localVisionMode));
+                LocalVisionMode: parseResult.GetValue(localVisionMode),
+                SecondaryCaptionLanguages: secondaryLangs);
         };
 
         return (options, apply);

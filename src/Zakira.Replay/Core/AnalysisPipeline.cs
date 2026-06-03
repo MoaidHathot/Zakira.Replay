@@ -257,6 +257,7 @@ public sealed class AnalysisPipeline
         var captureMode = ResolveCaptureMode(request, warnings);
         var browserCaptureAttempted = false;
         var browserDiscoveredCaptions = new List<BrowserCapturedCaption>();
+        SessionMetadata? sessionMetadata = null;
         if (requestedFrameCount > 0 || isSceneStrategy)
         {
             using var framesScope = timings.Measure(RunTimingStages.Frames);
@@ -268,9 +269,10 @@ public sealed class AnalysisPipeline
             if (captureMode == CaptureModes.Browser && !isLocalFile)
             {
                 browserCaptureAttempted = true;
-                var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
+                var (browserFrames, browserCaptions, browserAudio, browserSession) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                 frames = browserFrames;
                 browserDiscoveredCaptions.AddRange(browserCaptions);
+                sessionMetadata ??= browserSession;
                 if (browserAudio is not null && audioPath is null)
                 {
                     audioPath = browserAudio;
@@ -286,9 +288,10 @@ public sealed class AnalysisPipeline
                         "yt-dlp could not resolve a direct media URL; falling back to browser-based capture.",
                         Source: "playwright",
                         Severity: ReplayWarningSeverities.Info));
-                    var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
+                    var (browserFrames, browserCaptions, browserAudio, browserSession) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                     frames = browserFrames;
                     browserDiscoveredCaptions.AddRange(browserCaptions);
+                    sessionMetadata ??= browserSession;
                     if (browserAudio is not null && audioPath is null)
                     {
                         audioPath = browserAudio;
@@ -330,9 +333,10 @@ public sealed class AnalysisPipeline
                                 "Falling back to browser-based capture after ffmpeg and yt-dlp download both failed.",
                                 Source: "playwright",
                                 Severity: ReplayWarningSeverities.Info));
-                            var (browserFrames, browserCaptions, browserAudio) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
+                            var (browserFrames, browserCaptions, browserAudio, browserSession) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, requestedFrameCount, info, needsBrowserMediaForStt, warnings, progress, cancellationToken).ConfigureAwait(false);
                             frames = browserFrames;
                             browserDiscoveredCaptions.AddRange(browserCaptions);
+                            sessionMetadata ??= browserSession;
                             if (browserAudio is not null && audioPath is null)
                             {
                                 audioPath = browserAudio;
@@ -674,7 +678,19 @@ public sealed class AnalysisPipeline
             EvidencePath: "evidence.json",
             Frames: frames,
             Warnings: warnings,
-            Timings: timings.ToArtifact());
+            Timings: timings.ToArtifact(),
+            // Surface secondary transcripts on the manifest as relative paths so agents can
+            // discover them deterministically alongside the primary transcript.md.
+            SecondaryTranscripts: transcript?.Secondary?
+                .Select(t => new SecondaryTranscriptArtifact(
+                    t.Language,
+                    Path.GetRelativePath(run.Directory, t.MarkdownPath).Replace('\\', '/'),
+                    Path.GetRelativePath(run.Directory, t.SourcePath).Replace('\\', '/')))
+                .ToArray(),
+            // Deterministic page-derived metadata (title, speakers, abstract, …) extracted from
+            // the source page during browser capture. Null when not browser-captured or when no
+            // strategy produced any field.
+            SessionMetadata: sessionMetadata);
 
         await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, cancellationToken).ConfigureAwait(false);
         if (cacheKey is not null)
@@ -1284,11 +1300,11 @@ public sealed class AnalysisPipeline
         IProgress<string>? progress,
         CancellationToken cancellationToken)
     {
-        var (frames, _, _) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, frameCount, info, needsAudioForStt: false, warnings, progress, cancellationToken).ConfigureAwait(false);
+        var (frames, _, _, _) = await CaptureFramesAndCaptionsWithBrowserAsync(request, run, frameCount, info, needsAudioForStt: false, warnings, progress, cancellationToken).ConfigureAwait(false);
         return frames;
     }
 
-    private async Task<(IReadOnlyList<FrameArtifact> Frames, IReadOnlyList<BrowserCapturedCaption> Captions, string? AudioPath)> CaptureFramesAndCaptionsWithBrowserAsync(
+    private async Task<(IReadOnlyList<FrameArtifact> Frames, IReadOnlyList<BrowserCapturedCaption> Captions, string? AudioPath, SessionMetadata? SessionMetadata)> CaptureFramesAndCaptionsWithBrowserAsync(
         AnalyzeRequest request,
         VideoRun run,
         int frameCount,
@@ -1305,7 +1321,7 @@ public sealed class AnalysisPipeline
                 "Browser-capture mode was requested but no IBrowserVideoCaptureClient was provided. The CLI auto-wires PlaywrightVideoCaptureClient; tests must inject one explicitly.",
                 Source: "playwright",
                 Severity: ReplayWarningSeverities.Error));
-            return ([], [], null);
+            return ([], [], null, null);
         }
 
         var config = new ConfigStore().Load();
@@ -1417,7 +1433,7 @@ public sealed class AnalysisPipeline
             }
         }
 
-        return (result.Frames, result.Captions, audioPath);
+        return (result.Frames, result.Captions, audioPath, result.SessionMetadata);
     }
 
     private static string? ResolveAuthProfilePath(AnalyzeRequest request, ReplayConfig config, List<ReplayWarning> warnings)
@@ -1528,7 +1544,102 @@ public sealed class AnalysisPipeline
         var markdownPath = run.GetPath("transcript.md");
         await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
 
-        return new TranscriptArtifact(captionPath, markdownPath, "browser-network", segments);
+        // Opt-in secondary transcripts. The primary caption is always excluded; only captions
+        // whose inferred language matches one of the request's SecondaryCaptionLanguages prefs
+        // are persisted as transcript.<lang>.md. Default (no prefs) writes nothing here, so
+        // the historical single-transcript behaviour is preserved byte-for-byte.
+        var secondary = await WriteSecondaryTranscriptsAsync(
+            request, run, captions, pick, warnings, progress, cancellationToken).ConfigureAwait(false);
+
+        return new TranscriptArtifact(captionPath, markdownPath, "browser-network", segments, secondary);
+    }
+
+    /// <summary>
+    /// For each language in <see cref="AnalyzeRequest.SecondaryCaptionLanguages"/>, find the
+    /// first downloaded caption (excluding the primary <paramref name="primary"/>) whose
+    /// inferred language matches and write its parsed segments to <c>transcript.&lt;lang&gt;.md</c>.
+    /// Missing languages emit an info warning and are skipped (never fatal). Returns the
+    /// persisted records for manifest inclusion; null when none requested or none matched.
+    /// </summary>
+    private static async Task<IReadOnlyList<SecondaryTranscriptArtifact>?> WriteSecondaryTranscriptsAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        IReadOnlyList<BrowserCapturedCaption> captions,
+        BrowserCapturedCaption primary,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        var preferences = request.SecondaryCaptionLanguages;
+        if (preferences is null || preferences.Count == 0)
+        {
+            return null;
+        }
+
+        var produced = new List<SecondaryTranscriptArtifact>();
+        var taken = new HashSet<string>(StringComparer.Ordinal) { primary.RelativePath };
+
+        foreach (var language in preferences)
+        {
+            if (string.IsNullOrWhiteSpace(language)) continue;
+
+            // Skip when the requested secondary IS the primary's language (no-op, would just
+            // overwrite transcript.md with itself under a different name).
+            if (!string.IsNullOrWhiteSpace(primary.InferredLanguage) &&
+                BrowserCaptionInterceptor.LanguageMatches(primary.InferredLanguage, language))
+            {
+                continue;
+            }
+
+            var match = captions.FirstOrDefault(caption =>
+                !taken.Contains(caption.RelativePath) &&
+                BrowserCaptionInterceptor.LanguageMatches(caption.InferredLanguage, language));
+            if (match is null)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.CaptionsBrowserNetworkParseFailed,
+                    $"Secondary transcript language '{language}' had no matching browser-discovered caption.",
+                    Source: "playwright",
+                    Severity: ReplayWarningSeverities.Info));
+                continue;
+            }
+
+            var captionPath = run.GetPath(match.RelativePath);
+            if (!File.Exists(captionPath))
+            {
+                continue;
+            }
+
+            IReadOnlyList<TranscriptSegment> segments;
+            try
+            {
+                segments = await SubtitleConverter.ParseSegmentsAsync(captionPath, cancellationToken).ConfigureAwait(false);
+            }
+            catch (Exception ex)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.CaptionsBrowserNetworkParseFailed,
+                    $"Failed to parse secondary caption {match.RelativePath} ({language}): {ex.Message}",
+                    Source: "playwright",
+                    Severity: ReplayWarningSeverities.Warning));
+                continue;
+            }
+            if (segments.Count == 0) continue;
+
+            var languageSlug = (match.InferredLanguage ?? language).Replace('/', '-').Replace('\\', '-').Trim();
+            var markdownPath = run.GetPath($"transcript.{languageSlug}.md");
+            await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
+
+            taken.Add(match.RelativePath);
+            produced.Add(new SecondaryTranscriptArtifact(
+                Language: match.InferredLanguage ?? language,
+                MarkdownPath: markdownPath,
+                SourcePath: captionPath));
+
+            progress?.Report($"Wrote secondary transcript ({languageSlug}, {match.RelativePath}).");
+        }
+
+        return produced.Count == 0 ? null : produced;
     }
 
     private static IReadOnlyList<FrameArtifact> ApplySmartCrop(
@@ -1996,7 +2107,8 @@ public sealed record AnalyzeRequest(
     float? DiarizationThreshold = null,
     string VisionProvider = VisionProviders.Copilot,
     string? LocalVisionMode = null,
-    bool? CaptureDebug = null);
+    bool? CaptureDebug = null,
+    IReadOnlyList<string>? SecondaryCaptionLanguages = null);
 
 public static class FrameSelectionStrategies
 {

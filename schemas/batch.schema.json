@@ -26,6 +26,11 @@
       "type": ["array", "null"],
       "items": { "type": "string", "minLength": 1 }
     },
+    "secondaryCaptionLanguages": {
+      "description": "Languages (BCP-47 primary subtag, or 'auto') to also persist as transcript.<lang>.md alongside the primary. Off by default.",
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    },
     "slideGrouping": { "type": ["boolean", "null"] },
     "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
     "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
@@ -66,6 +71,11 @@
           "cookiesPath": { "type": ["string", "null"] },
           "cookiesFromBrowser": { "type": ["string", "null"] },
           "captionLanguages": {
+            "type": ["array", "null"],
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "secondaryCaptionLanguages": {
+            "description": "Languages (BCP-47 primary subtag, or 'auto') to also persist as transcript.<lang>.md alongside the primary. Off by default.",
             "type": ["array", "null"],
             "items": { "type": "string", "minLength": 1 }
           },

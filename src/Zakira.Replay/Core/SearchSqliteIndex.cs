@@ -47,6 +47,13 @@ public sealed partial class SearchIndexService
         await InsertMetadataAsync(connection, transaction, "createdAt", createdAt.ToString("O", CultureInfo.InvariantCulture), cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "documentCount", documents.Length.ToString(CultureInfo.InvariantCulture), cancellationToken).ConfigureAwait(false);
         await InsertMetadataAsync(connection, transaction, "embeddingProvider", provider?.Name ?? "none", cancellationToken).ConfigureAwait(false);
+        // Persist the original session URL (WebpageUrl or Source) so QueryAsync can compose
+        // deep links per match without re-reading evidence.json. Skipped when neither is set.
+        var sourceUrl = string.IsNullOrWhiteSpace(evidence.WebpageUrl) ? evidence.Source : evidence.WebpageUrl;
+        if (!string.IsNullOrWhiteSpace(sourceUrl))
+        {
+            await InsertMetadataAsync(connection, transaction, "sourceUrl", sourceUrl, cancellationToken).ConfigureAwait(false);
+        }
         // 0.10.0: persist the embedding model identity so a later query against the same
         // index can detect cross-model vector incompatibility (vectors trained against
         // bge-small are not interchangeable with vectors trained against multilingual-e5
@@ -107,6 +114,11 @@ public sealed partial class SearchIndexService
         }
 
         var documents = await ReadSqliteDocumentsAsync(connection, rowIds, cancellationToken).ConfigureAwait(false);
+        // Read source URL + run ID from the metadata table so per-match deep links can be
+        // assembled. Both are nullable: a result without them still scores fine, just without
+        // a deep link or cross-run attribution.
+        var sourceUrl = await ReadMetadataAsync(connection, "sourceUrl", cancellationToken).ConfigureAwait(false);
+        var runId = await ReadMetadataAsync(connection, "runId", cancellationToken).ConfigureAwait(false);
         var matches = documents
             .Select(document => new SearchMatch(
                 document.Value.Id,
@@ -116,7 +128,10 @@ public sealed partial class SearchIndexService
                 document.Value.StartSeconds,
                 document.Value.EndSeconds,
                 document.Value.Timestamp,
-                document.Value.Path))
+                document.Value.Path,
+                DeepLink: DeepLink.For(sourceUrl, document.Value.StartSeconds ?? DeepLink.TryParseSeconds(document.Value.Timestamp) ?? 0),
+                RunId: runId,
+                SourceUrl: sourceUrl))
             .Where(match => match.Score > 0)
             .OrderByDescending(match => match.Score)
             .ThenBy(match => match.StartSeconds ?? double.MaxValue)

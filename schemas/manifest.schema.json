@@ -55,9 +55,64 @@
           }
         }
       ]
+    },
+    "secondaryTranscripts": {
+      "description": "Additional-language transcripts written alongside transcriptPath when the run was configured with --secondary-transcripts. Empty/absent when only the primary transcript was produced.",
+      "anyOf": [
+        { "type": "null" },
+        {
+          "type": "array",
+          "items": { "$ref": "#/$defs/secondaryTranscriptArtifact" }
+        }
+      ]
+    },
+    "sessionMetadata": {
+      "description": "Deterministic source-page-derived metadata about the session (title, speakers, abstract, etc.) extracted from JSON-LD/OpenGraph/HTML during browser capture. Null when not browser-captured or when nothing was parseable.",
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sessionMetadata" }
+      ]
     }
   },
   "$defs": {
+    "sessionMetadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "title": { "type": ["string", "null"] },
+        "description": { "type": ["string", "null"] },
+        "sessionCode": { "type": ["string", "null"] },
+        "track": { "type": ["string", "null"] },
+        "level": { "type": ["string", "null"] },
+        "publishedAt": { "type": ["string", "null"] },
+        "speakers": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "products": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "tags": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "sourceUrl": { "type": ["string", "null"] },
+        "sources": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["strategy", "fields"],
+            "properties": {
+              "strategy": { "type": "string", "minLength": 1 },
+              "fields": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+            }
+          }
+        }
+      }
+    },
+    "secondaryTranscriptArtifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["language", "markdownPath", "sourcePath"],
+      "properties": {
+        "language": { "type": "string", "minLength": 1 },
+        "markdownPath": { "type": "string", "minLength": 1 },
+        "sourcePath": { "type": "string", "minLength": 1 }
+      }
+    },
     "frameArtifact": {
       "type": "object",
       "additionalProperties": false,

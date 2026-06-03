@@ -23,6 +23,10 @@
       "type": ["integer", "null"],
       "minimum": 1
     },
+    "sourceUrl": {
+      "description": "Original session URL (evidence.WebpageUrl ?? evidence.Source) captured at build time so query results can carry deep links per match. Null when no URL was on file.",
+      "type": ["string", "null"]
+    },
     "documents": {
       "type": "array",
       "items": {

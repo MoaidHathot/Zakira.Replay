@@ -40,7 +40,8 @@ public sealed record BrowserCaptureResult(
     double? DurationSeconds,
     IReadOnlyList<ReplayWarning> Warnings,
     IReadOnlyList<BrowserCapturedCaption> Captions,
-    string? DownloadedMediaPath = null);
+    string? DownloadedMediaPath = null,
+    SessionMetadata? SessionMetadata = null);
 
 /// <summary>
 /// Playwright-backed implementation. Pins Chromium to the user's Edge installation (resolved by
@@ -222,17 +223,16 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 page.Response += streamInterceptor.OnResponse;
             }
 
-            // Microsoft Medius transcript interceptor. Medius embed pages carry a complete,
-            // SAS-signed caption manifest (`captionsConfiguration.languageList`) inline in the
-            // initial HTML document, so we can harvest transcripts even when the MSE/Shaka player
-            // never boots headlessly (the common case). Watches for the embed document response,
-            // parses the manifest, and downloads the preferred-language caption(s) afterward.
-            var mediusInterceptor = request.CaptureCaptions
-                ? new MediusTranscriptInterceptor(request, warnings)
-                : null;
-            if (mediusInterceptor is not null)
+            // Inline-caption interceptors (registry). Each profile in
+            // InlineCaptionInterceptorRegistry hooks page.Response, accumulates state, then
+            // downloads its discovered caption sidecars after navigation completes. Add a new
+            // streaming-player profile by appending it to the registry — no changes required
+            // here. Returns an empty list when CaptureCaptions is false, so the loops below are
+            // no-ops.
+            var inlineCaptionInterceptors = InlineCaptionInterceptorRegistry.CreateFor(request, warnings);
+            foreach (var interceptor in inlineCaptionInterceptors)
             {
-                page.Response += mediusInterceptor.OnResponse;
+                page.Response += interceptor.OnResponse;
             }
 
             progress?.Report($"Navigating to {request.Url} (browser capture)...");
@@ -248,6 +248,21 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             }).ConfigureAwait(false);
 
             await page.WaitForTimeoutAsync(1_000).ConfigureAwait(false);
+
+            // Snapshot the post-navigation HTML once. Deterministic session metadata (title,
+            // speakers, abstract, …) lives in <script type="application/ld+json">, OpenGraph
+            // meta tags and the <title>; extracting it here gives every exit path access to
+            // the metadata via the result record. Best-effort — failure must not abort capture.
+            SessionMetadata? sessionMetadata = null;
+            try
+            {
+                var html = await page.ContentAsync().ConfigureAwait(false);
+                sessionMetadata = SessionMetadataExtractor.Extract(html, request.Url);
+            }
+            catch (Exception ex) when (ex is PlaywrightException or TimeoutException)
+            {
+                // Page may have navigated away or been torn down; leave metadata null.
+            }
 
             // Inspect the post-navigation URL and page content to detect a sign-in redirect
             // BEFORE we attempt to drive playback. Without this check a missing/expired
@@ -269,16 +284,16 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 {
                     page.Response -= streamInterceptor.OnResponse;
                 }
-                if (mediusInterceptor is not null)
+                foreach (var interceptor in inlineCaptionInterceptors)
                 {
-                    page.Response -= mediusInterceptor.OnResponse;
+                    page.Response -= interceptor.OnResponse;
                 }
                 if (debugRecorder is not null)
                 {
                     page.Response -= debugRecorder.OnResponse;
                     await debugRecorder.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
-                return new BrowserCaptureResult([], null, warnings, authFailCaptions);
+                return new BrowserCaptureResult([], null, warnings, authFailCaptions, null, sessionMetadata);
             }
 
             await PlayVideoAsync(page, request, warnings, progress).ConfigureAwait(false);
@@ -314,9 +329,9 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 {
                     page.Response -= streamInterceptor.OnResponse;
                 }
-                if (mediusInterceptor is not null)
+                foreach (var interceptor in inlineCaptionInterceptors)
                 {
-                    page.Response -= mediusInterceptor.OnResponse;
+                    page.Response -= interceptor.OnResponse;
                 }
                 if (debugRecorder is not null)
                 {
@@ -327,19 +342,25 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 // Medius (and similar MSE players) frequently never expose a finite
                 // video.duration headlessly, so we land here with zero frames. The transcript,
                 // however, is independent of playback: the embed page's inline caption manifest
-                // was already parsed during navigation, so download it now even though no frames
-                // were captured. This is what makes transcript-only Medius capture work.
-                if (earlyCaptions.Count == 0 && mediusInterceptor is not null && mediusInterceptor.HasDiscoveries)
+                // was already parsed during navigation, so download whatever any registered
+                // interceptor discovered even though no frames were captured. This is what makes
+                // transcript-only Medius/Build/Ignite capture work.
+                if (earlyCaptions.Count == 0)
                 {
-                    var mediusCaptions = await mediusInterceptor.DownloadAllAsync(
-                        context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
-                    if (mediusCaptions.Count > 0)
+                    foreach (var interceptor in inlineCaptionInterceptors)
                     {
-                        earlyCaptions = mediusCaptions;
+                        if (!interceptor.HasDiscoveries) continue;
+                        var harvested = await interceptor.DownloadAsync(
+                            context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
+                        if (harvested.Count > 0)
+                        {
+                            earlyCaptions = harvested;
+                            break;
+                        }
                     }
                 }
 
-                return new BrowserCaptureResult([], null, warnings, earlyCaptions);
+                return new BrowserCaptureResult([], null, warnings, earlyCaptions, null, sessionMetadata);
             }
 
             var frames = await CaptureFramesAsync(page, request, duration.Value, warnings, progress, cancellationToken).ConfigureAwait(false);
@@ -359,9 +380,9 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             {
                 page.Response -= streamInterceptor.OnResponse;
             }
-            if (mediusInterceptor is not null)
+            foreach (var interceptor in inlineCaptionInterceptors)
             {
-                page.Response -= mediusInterceptor.OnResponse;
+                page.Response -= interceptor.OnResponse;
             }
             if (debugRecorder is not null)
             {
@@ -402,16 +423,23 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 }
             }
 
-            // Medius layer: when no captions came from layers 1-3, download the preferred caption
-            // from the inline `captionsConfiguration` manifest parsed during navigation. Works for
-            // Medius/Build/Ignite sessions whose Shaka player never fetched a .vtt on the wire.
-            if (captions.Count == 0 && mediusInterceptor is not null && mediusInterceptor.HasDiscoveries)
+            // Inline-caption-interceptor layer: when no captions came from layers 1-3, iterate
+            // every registered interceptor profile (Medius today, more to come) and adopt the
+            // first non-empty result. Works for Medius/Build/Ignite sessions whose Shaka player
+            // never fetched a .vtt on the wire; the registry approach lets future streaming
+            // platforms drop in without touching this loop.
+            if (captions.Count == 0)
             {
-                var mediusCaptions = await mediusInterceptor.DownloadAllAsync(
-                    context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
-                if (mediusCaptions.Count > 0)
+                foreach (var interceptor in inlineCaptionInterceptors)
                 {
-                    captions = mediusCaptions;
+                    if (!interceptor.HasDiscoveries) continue;
+                    var harvested = await interceptor.DownloadAsync(
+                        context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
+                    if (harvested.Count > 0)
+                    {
+                        captions = harvested;
+                        break;
+                    }
                 }
             }
 
@@ -425,7 +453,7 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                     context, warnings, progress, cancellationToken).ConfigureAwait(false);
             }
 
-            return new BrowserCaptureResult(frames, duration, warnings, captions, downloadedMediaPath);
+            return new BrowserCaptureResult(frames, duration, warnings, captions, downloadedMediaPath, sessionMetadata);
         }
         catch (PlaywrightException ex)
         {

@@ -109,6 +109,10 @@ public sealed class ChapterBuilder
 
     private static IEnumerable<Chapter> BuildChapters(EvidenceDocument evidence, IReadOnlyList<TranscriptSegment> transcript, IReadOnlyList<ChapterBoundary> boundaries)
     {
+        // WebpageUrl is the canonical anchor target for deep links (the original session page);
+        // fall back to Source. Null is fine — DeepLink.For returns null, downstream omits.
+        var deepLinkBase = string.IsNullOrWhiteSpace(evidence.WebpageUrl) ? evidence.Source : evidence.WebpageUrl;
+
         for (var i = 0; i < boundaries.Count; i++)
         {
             var start = boundaries[i].StartSeconds;
@@ -124,8 +128,17 @@ public sealed class ChapterBuilder
             }
 
             var chapterEvidence = segments.Take(4)
-                .Select(segment => new ChapterEvidence("transcript", segment.Timestamp ?? Timestamp.Format(segment.StartSeconds ?? start), segment.Text, null))
-                .Concat(FindFrameEvidence(evidence, start, end))
+                .Select(segment =>
+                {
+                    var segStart = segment.StartSeconds ?? start;
+                    return new ChapterEvidence(
+                        "transcript",
+                        segment.Timestamp ?? Timestamp.Format(segStart),
+                        segment.Text,
+                        Path: null,
+                        DeepLink: DeepLink.For(deepLinkBase, segStart));
+                })
+                .Concat(FindFrameEvidence(evidence, start, end, deepLinkBase))
                 .Take(6)
                 .ToArray();
             yield return new Chapter(
@@ -133,25 +146,26 @@ public sealed class ChapterBuilder
                 EndSeconds: Math.Max(start, end),
                 Timestamp: Timestamp.Format(start),
                 EndTimestamp: Timestamp.Format(Math.Max(start, end)),
-                Evidence: chapterEvidence);
+                Evidence: chapterEvidence,
+                DeepLink: DeepLink.For(deepLinkBase, start));
         }
     }
 
-    private static IEnumerable<ChapterEvidence> FindFrameEvidence(EvidenceDocument evidence, double start, double end)
+    private static IEnumerable<ChapterEvidence> FindFrameEvidence(EvidenceDocument evidence, double start, double end, string? deepLinkBase)
     {
         foreach (var ocr in evidence.Ocr.Where(item => item.TimestampSeconds >= start && item.TimestampSeconds < end).Take(1))
         {
-            yield return new ChapterEvidence("ocr", ocr.TimestampLabel, ocr.Text, ocr.FramePath);
+            yield return new ChapterEvidence("ocr", ocr.TimestampLabel, ocr.Text, ocr.FramePath, DeepLink.For(deepLinkBase, ocr.TimestampSeconds));
         }
 
         foreach (var vision in evidence.Vision.Where(item => item.TimestampSeconds >= start && item.TimestampSeconds < end).Take(1))
         {
-            yield return new ChapterEvidence("vision", vision.TimestampLabel, vision.Description, vision.FramePath);
+            yield return new ChapterEvidence("vision", vision.TimestampLabel, vision.Description, vision.FramePath, DeepLink.For(deepLinkBase, vision.TimestampSeconds));
         }
 
         foreach (var frame in evidence.Frames.Where(item => item.TimestampSeconds >= start && item.TimestampSeconds < end).Take(1))
         {
-            yield return new ChapterEvidence("frame", frame.TimestampLabel, "Representative frame", frame.Path);
+            yield return new ChapterEvidence("frame", frame.TimestampLabel, "Representative frame", frame.Path, DeepLink.For(deepLinkBase, frame.TimestampSeconds));
         }
     }
 
@@ -235,9 +249,10 @@ public sealed record Chapter(
     double EndSeconds,
     string Timestamp,
     string EndTimestamp,
-    IReadOnlyList<ChapterEvidence> Evidence);
+    IReadOnlyList<ChapterEvidence> Evidence,
+    string? DeepLink = null);
 
-public sealed record ChapterEvidence(string Kind, string Timestamp, string Text, string? Path);
+public sealed record ChapterEvidence(string Kind, string Timestamp, string Text, string? Path, string? DeepLink = null);
 
 internal sealed record ChapterWindow(double StartSeconds, double EndSeconds, string Text, IReadOnlyList<ChapterEvidence> Evidence);
 

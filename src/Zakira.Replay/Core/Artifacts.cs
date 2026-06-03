@@ -233,7 +233,9 @@ public sealed record ArtifactManifest(
     string? EvidencePath,
     IReadOnlyList<FrameArtifact> Frames,
     IReadOnlyList<ReplayWarning> Warnings,
-    RunTimingsArtifact? Timings = null);
+    RunTimingsArtifact? Timings = null,
+    IReadOnlyList<SecondaryTranscriptArtifact>? SecondaryTranscripts = null,
+    SessionMetadata? SessionMetadata = null);
 
 public sealed record FrameArtifact(
     string Id,

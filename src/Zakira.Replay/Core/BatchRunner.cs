@@ -177,7 +177,8 @@ public sealed class BatchRunner
             AuthProfile: item.AuthProfile ?? manifest.AuthProfile,
             UseDiarization: item.UseDiarization ?? manifest.UseDiarization ?? false,
             NumSpeakers: item.NumSpeakers ?? manifest.NumSpeakers,
-            DiarizationThreshold: ResolveDiarizationThreshold(item.DiarizationThreshold ?? manifest.DiarizationThreshold));
+            DiarizationThreshold: ResolveDiarizationThreshold(item.DiarizationThreshold ?? manifest.DiarizationThreshold),
+            SecondaryCaptionLanguages: item.SecondaryCaptionLanguages ?? manifest.SecondaryCaptionLanguages);
 
     // Mirror the CLI: a diarization threshold only takes effect when positive; otherwise leave it
     // unset so the pipeline applies its configured default. Narrow double -> float to match
@@ -221,6 +222,8 @@ public sealed class BatchManifest
     public string? CookiesFromBrowser { get; set; }
 
     public List<string>? CaptionLanguages { get; set; }
+
+    public List<string>? SecondaryCaptionLanguages { get; set; }
 
     public bool? SlideGrouping { get; set; }
 
@@ -296,6 +299,8 @@ public sealed class BatchItem
     public string? CookiesFromBrowser { get; set; }
 
     public List<string>? CaptionLanguages { get; set; }
+
+    public List<string>? SecondaryCaptionLanguages { get; set; }
 
     public bool? SlideGrouping { get; set; }
 

@@ -301,13 +301,135 @@ public sealed class BrowserVideoCaptureTests
     }
 
     [Fact]
-    public async Task AnalyzeAsyncEmitsCaptionsBrowserNetworkNoneWhenNoCaptionsCaptured()
+    public async Task AnalyzeAsyncWritesSecondaryTranscriptsWhenRequested()
     {
+        // Same two-caption setup as the primary test, but request 'fr' as a secondary
+        // language. Expect: transcript.md (primary, en), transcript.fr.md (secondary), and
+        // manifest.SecondaryTranscripts surfacing the fr entry as a relative path.
         using var temp = new TestTempDirectory();
         var store = new ArtifactStore(temp.GetPath("runs"));
 
         var browser = new FakeBrowserCapture
         {
+            DurationSeconds = 60.0,
+            FrameProducer = run =>
+            {
+                var framePath = "frames/scene-0001.jpg";
+                WriteJpeg(run.GetPath(framePath));
+                return [new FrameArtifact("scene-0001", framePath, 7.5, "00:07")];
+            },
+            CaptionProducer = run =>
+            {
+                var captionsDir = run.GetPath("captions");
+                Directory.CreateDirectory(captionsDir);
+                var enRelative = "captions/browser-0001.vtt";
+                var frRelative = "captions/browser-0002.vtt";
+                File.WriteAllText(run.GetPath(enRelative), VttFixture("Hello world"));
+                File.WriteAllText(run.GetPath(frRelative), VttFixture("Bonjour le monde"));
+                return
+                [
+                    new BrowserCapturedCaption(1, "https://cdn.test/Caption_en-US.vtt", enRelative, "en-US", "url-Caption_<lang>", 100, "h1", "text/vtt"),
+                    new BrowserCapturedCaption(2, "https://cdn.test/Caption_fr.vtt",    frRelative, "fr",    "url-Caption_<lang>", 100, "h2", "text/vtt")
+                ];
+            }
+        };
+        var ytDlp = new RecordingYtDlpClient
+        {
+            Info = new YtDlpInfo
+            {
+                Id = "test",
+                Title = "Test Video",
+                WebpageUrl = "https://example.test/private-portal/video123",
+                Language = "en"
+            },
+            ResolvedMediaUrl = null
+        };
+        var ffmpeg = new RecordingFfmpegClient();
+        var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg, _ => null, browser);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://example.test/private-portal/video123",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: true,
+            FrameCount: 1,
+            RunId: "browser-secondary-transcripts",
+            CaptureMode: CaptureModes.Browser,
+            SecondaryCaptionLanguages: ["fr"]),
+            progress: null, CancellationToken.None);
+
+        // Primary unchanged: transcript.md is the English one.
+        Assert.Equal("transcript.md", result.Manifest.TranscriptPath);
+        Assert.Contains("Hello world", await File.ReadAllTextAsync(result.Run.GetPath("transcript.md"), CancellationToken.None), StringComparison.Ordinal);
+
+        // Secondary: transcript.fr.md exists with the French cue content, and the manifest
+        // surfaces a relative path agents can read deterministically.
+        Assert.True(File.Exists(result.Run.GetPath("transcript.fr.md")));
+        Assert.Contains("Bonjour le monde", await File.ReadAllTextAsync(result.Run.GetPath("transcript.fr.md"), CancellationToken.None), StringComparison.Ordinal);
+
+        Assert.NotNull(result.Manifest.SecondaryTranscripts);
+        var secondary = Assert.Single(result.Manifest.SecondaryTranscripts!);
+        Assert.Equal("fr", secondary.Language);
+        Assert.Equal("transcript.fr.md", secondary.MarkdownPath);
+        // SourcePath is the original caption file, not the .md.
+        Assert.Equal("captions/browser-0002.vtt", secondary.SourcePath);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncOmitsSecondaryTranscriptsByDefault()
+    {
+        // Regression guard for the "off by default" contract: omitting
+        // SecondaryCaptionLanguages must produce zero secondary transcripts even when multiple
+        // languages are downloaded into captions/.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+
+        var browser = new FakeBrowserCapture
+        {
+            DurationSeconds = 60.0,
+            FrameProducer = run =>
+            {
+                var framePath = "frames/scene-0001.jpg";
+                WriteJpeg(run.GetPath(framePath));
+                return [new FrameArtifact("scene-0001", framePath, 7.5, "00:07")];
+            },
+            CaptionProducer = run =>
+            {
+                var captionsDir = run.GetPath("captions");
+                Directory.CreateDirectory(captionsDir);
+                var enRelative = "captions/browser-0001.vtt";
+                var frRelative = "captions/browser-0002.vtt";
+                File.WriteAllText(run.GetPath(enRelative), VttFixture("Hello world"));
+                File.WriteAllText(run.GetPath(frRelative), VttFixture("Bonjour le monde"));
+                return
+                [
+                    new BrowserCapturedCaption(1, "https://cdn.test/Caption_en-US.vtt", enRelative, "en-US", "url-Caption_<lang>", 100, "h1", "text/vtt"),
+                    new BrowserCapturedCaption(2, "https://cdn.test/Caption_fr.vtt",    frRelative, "fr",    "url-Caption_<lang>", 100, "h2", "text/vtt")
+                ];
+            }
+        };
+        var ytDlp = new RecordingYtDlpClient { Info = new YtDlpInfo { Id = "test", Language = "en" } };
+        var pipeline = new AnalysisPipeline(store, ytDlp, new RecordingFfmpegClient(), _ => null, browser);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://example.test/private-portal/no-secondary",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: true,
+            FrameCount: 1,
+            RunId: "browser-no-secondary",
+            CaptureMode: CaptureModes.Browser),
+            progress: null, CancellationToken.None);
+
+        Assert.False(File.Exists(result.Run.GetPath("transcript.fr.md")));
+        Assert.True(result.Manifest.SecondaryTranscripts is null || result.Manifest.SecondaryTranscripts.Count == 0);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncEmitsCaptionsBrowserNetworkNoneWhenNoCaptionsCaptured()
+    {
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+
+        var browser = new FakeBrowserCapture        {
             DurationSeconds = 60.0,
             FrameProducer = run =>
             {

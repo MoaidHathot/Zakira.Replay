@@ -33,7 +33,7 @@ namespace Zakira.Replay.Core;
 /// SAS URLs. Because the SAS token is embedded, the download needs no cookies and — crucially —
 /// no playback. This is the durable path for Medius/Ignite/Build session transcripts.</para>
 /// </remarks>
-internal sealed partial class MediusTranscriptInterceptor
+internal sealed partial class MediusTranscriptInterceptor : IInlineCaptionInterceptor
 {
     private readonly BrowserCaptureRequest request;
     private readonly List<ReplayWarning> warnings;
@@ -47,7 +47,10 @@ internal sealed partial class MediusTranscriptInterceptor
         this.warnings = warnings;
     }
 
-    /// <summary>True once at least one caption language has been discovered from an embed page.</summary>
+    /// <inheritdoc />
+    public string Name => "medius";
+
+    /// <inheritdoc />
     public bool HasDiscoveries
     {
         get { lock (lockObj) { return discovered.Count > 0; } }
@@ -189,7 +192,7 @@ internal sealed partial class MediusTranscriptInterceptor
     /// English, then the first advertised language, so a transcript is always produced when the
     /// page advertised any. Returns the persisted captions (empty when nothing downloaded).
     /// </summary>
-    public async Task<IReadOnlyList<BrowserCapturedCaption>> DownloadAllAsync(
+    public async Task<IReadOnlyList<BrowserCapturedCaption>> DownloadAsync(
         IBrowserContext context,
         IReadOnlyList<string> languagePreferences,
         CancellationToken cancellationToken)

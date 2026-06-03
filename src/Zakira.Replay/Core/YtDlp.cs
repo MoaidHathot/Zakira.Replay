@@ -220,7 +220,20 @@ public sealed record TranscriptArtifact(
     string SourcePath,
     string MarkdownPath,
     string Kind,
-    IReadOnlyList<TranscriptSegment>? Segments = null);
+    IReadOnlyList<TranscriptSegment>? Segments = null,
+    IReadOnlyList<SecondaryTranscriptArtifact>? Secondary = null);
+
+/// <summary>
+/// A non-primary-language transcript persisted alongside <c>transcript.md</c>. Emitted only when
+/// the caller opts in via <see cref="AnalyzeRequest.SecondaryCaptionLanguages"/> (default: none)
+/// and a matching caption was downloaded by the browser-capture or yt-dlp paths. The file is
+/// always written as <c>transcript.&lt;language&gt;.md</c>; the source caption path is
+/// preserved for traceability.
+/// </summary>
+public sealed record SecondaryTranscriptArtifact(
+    string Language,
+    string MarkdownPath,
+    string SourcePath);
 
 public sealed class YtDlpInfo
 {

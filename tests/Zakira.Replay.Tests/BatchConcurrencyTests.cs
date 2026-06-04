@@ -163,7 +163,7 @@ public sealed class BatchConcurrencyTests
 
         Assert.Equal(4, result.Items.Count);
         Assert.Equal(3, result.Items.Count(item => item.Succeeded));
-        var failure = Assert.Single(result.Items.Where(item => !item.Succeeded));
+        var failure = Assert.Single(result.Items, item => !item.Succeeded);
         Assert.Equal(harness.SourceAt(2), failure.Source);
         Assert.Equal("middle failed", failure.Error);
     }

@@ -1431,7 +1431,7 @@ public sealed class AnalysisPipeline
             {
                 var sidestepFrames = await ExtractFramesViaInlineMediaAsync(
                     probeResult.InlineMediaUrl!, request, run, frameCount, info, warnings, progress, source: "prefer-inline-media", cancellationToken).ConfigureAwait(false);
-                return (sidestepFrames, probeResult.Captions, audioPath: null, probeResult.SessionMetadata);
+                return (sidestepFrames, probeResult.Captions, AudioPath: null, probeResult.SessionMetadata);
             }
 
             warnings.Add(new ReplayWarning(

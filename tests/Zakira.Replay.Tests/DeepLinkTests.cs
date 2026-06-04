@@ -54,7 +54,7 @@ public sealed class DeepLinkTests
 
         Assert.NotNull(link);
         var matches = System.Text.RegularExpressions.Regex.Matches(link!, @"\bt=");
-        Assert.Equal(1, matches.Count);
+        Assert.Single(matches);
         Assert.Contains("t=200s", link);
     }
 

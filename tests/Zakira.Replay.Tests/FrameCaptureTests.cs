@@ -315,6 +315,102 @@ public sealed class FrameCaptureTests
             => Task.FromResult(DownloadedMediaPath);
     }
 
+    /// <summary>
+    /// Stand-in browser client. Returns whatever <see cref="InlineMediaUrl"/> is configured and
+    /// records the request it received so tests can assert MetadataOnly is set (the spot-frame
+    /// fast path) instead of falling back to a full capture.
+    /// </summary>
+    private sealed class FakeBrowserCaptureClientForSpotFrames : IBrowserVideoCaptureClient
+    {
+        public string? InlineMediaUrl { get; init; }
+        public BrowserCaptureRequest? LastRequest { get; private set; }
+
+        public Task<BrowserCaptureResult> CaptureAsync(BrowserCaptureRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
+        {
+            LastRequest = request;
+            return Task.FromResult(new BrowserCaptureResult(
+                Frames: [],
+                DurationSeconds: null,
+                Warnings: [],
+                Captions: [],
+                InlineMediaUrl: InlineMediaUrl));
+        }
+    }
+
+    [Fact]
+    public async Task BrowserProbeResolvesMediaUrlWhenYtDlpFails()
+    {
+        // Simulates the Build/Medius case: yt-dlp returns null for the source, the registered
+        // browser client comes back with an inline HLS URL, and ffmpeg gets that URL — no local
+        // download fallback, no FrameCaptureMediaUrlUnresolved error.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var ffmpeg = new RecordingFfmpegClient();
+        var browser = new FakeBrowserCaptureClientForSpotFrames
+        {
+            InlineMediaUrl = "https://stream.event.microsoft.com/prodwe/Content/HLS/VOD/x/y/master.m3u8"
+        };
+        var service = new FrameCaptureService(store, new FakeYtDlpClient(), ffmpeg, browser);
+
+        var result = await service.CaptureAsync(new FrameCaptureRequest(
+            Source: "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
+            Timestamps: [TimeSpan.FromSeconds(120)],
+            RunId: "browser-probe-fallback"), progress: null, CancellationToken.None);
+
+        // Browser was invoked in MetadataOnly mode (fast path: ~3-5s for Medius vs ~25s full).
+        Assert.NotNull(browser.LastRequest);
+        Assert.True(browser.LastRequest!.MetadataOnly);
+        // ffmpeg got the HLS URL straight from the inline interceptor — no local download.
+        Assert.Equal("https://stream.event.microsoft.com/prodwe/Content/HLS/VOD/x/y/master.m3u8", ffmpeg.LastMediaSource);
+        Assert.Single(result.Manifest.Frames);
+        // No "media URL unresolved" since the browser path succeeded.
+        Assert.DoesNotContain(result.Manifest.Warnings, w => w.Code == ReplayWarningCodes.FrameCaptureMediaUrlUnresolved);
+    }
+
+    [Fact]
+    public async Task BrowserProbeFallsThroughToLocalDownloadWhenNoInlineUrlFound()
+    {
+        // When yt-dlp can't resolve AND the browser probe also returns no inline URL, the
+        // service falls through to the local-download path with the historical info warning.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var ffmpeg = new RecordingFfmpegClient();
+        var browser = new FakeBrowserCaptureClientForSpotFrames { InlineMediaUrl = null };
+        var ytDlp = new FakeYtDlpClient { DownloadedMediaPath = "media/downloaded.mp4" };
+        var service = new FrameCaptureService(store, ytDlp, ffmpeg, browser);
+
+        var result = await service.CaptureAsync(new FrameCaptureRequest(
+            Source: "https://somewhere.test/private-thing",
+            Timestamps: [TimeSpan.FromSeconds(5)],
+            RunId: "browser-probe-noop"), progress: null, CancellationToken.None);
+
+        Assert.Equal("media/downloaded.mp4", ffmpeg.LastMediaSource);
+        // The info warning explains the fallback to local download.
+        Assert.Contains(result.Manifest.Warnings, w => w.Code == ReplayWarningCodes.FrameCaptureMediaUrlUnresolved);
+    }
+
+    [Fact]
+    public async Task BrowserProbeIsSkippedForLocalFiles()
+    {
+        // Local file paths never need a browser probe; the source IS the media. The browser
+        // client must not be invoked at all.
+        using var temp = new TestTempDirectory();
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "fake media", CancellationToken.None);
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var ffmpeg = new RecordingFfmpegClient();
+        var browser = new FakeBrowserCaptureClientForSpotFrames { InlineMediaUrl = "would-be-wrong.m3u8" };
+        var service = new FrameCaptureService(store, new FakeYtDlpClient(), ffmpeg, browser);
+
+        await service.CaptureAsync(new FrameCaptureRequest(
+            Source: sourcePath,
+            Timestamps: [TimeSpan.FromSeconds(1)],
+            RunId: "local-no-browser"), progress: null, CancellationToken.None);
+
+        Assert.Null(browser.LastRequest);
+        Assert.Equal(sourcePath, ffmpeg.LastMediaSource);
+    }
+
     private sealed class RecordingFfmpegClient : IFfmpegClient
     {
         public double? ProbedDuration { get; init; }

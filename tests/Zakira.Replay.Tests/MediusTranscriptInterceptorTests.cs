@@ -38,6 +38,65 @@ public sealed class MediusTranscriptInterceptorTests
     }
 
     [Fact]
+    public void TryExtractMediaUrlReturnsFirstMainManifest()
+    {
+        // Mirrors the real KEY01 embed: coreConfiguration with manifests.main[] (HLS) plus an
+        // asl[] (sign-language overlay) that must NOT be picked. Two main entries; the first
+        // wins (Medius orders by weight already).
+        var html = """
+        <script>
+        let coreConfiguration = {
+          "videoTitle": "Test Session",
+          "manifests": {
+            "main": [
+              { "manifest": "https://stream.event.microsoft.com/prodwe/Content/HLS/VOD/x/y/master.m3u8", "weight": 80 },
+              { "manifest": "https://stream.event.microsoft.com/prodnc/Content/HLS/VOD/x/y/master.m3u8", "weight": 20 }
+            ],
+            "asl": [
+              { "manifest": "https://stream.event.microsoft.com/prodwe/Content/HLS/VOD/asl/master.m3u8", "weight": 80 }
+            ]
+          }
+        };
+        </script>
+        """;
+
+        var url = MediusTranscriptInterceptor.TryExtractMediaUrl(html);
+
+        Assert.NotNull(url);
+        Assert.Equal("https://stream.event.microsoft.com/prodwe/Content/HLS/VOD/x/y/master.m3u8", url);
+    }
+
+    [Theory]
+    [InlineData("")]
+    [InlineData("<html>no core config</html>")]
+    [InlineData("let coreConfiguration = { malformed ")]
+    [InlineData("""let coreConfiguration = { "manifests": { "asl": [{"manifest":"x"}] } };""")] // no 'main' key
+    [InlineData("""let coreConfiguration = { "manifests": { "main": [] } };""")]                 // empty main
+    [InlineData("""let coreConfiguration = { "manifests": "not-an-object" };""")]
+    public void TryExtractMediaUrlReturnsNullForMissingOrMalformed(string html)
+    {
+        Assert.Null(MediusTranscriptInterceptor.TryExtractMediaUrl(html));
+    }
+
+    [Fact]
+    public void TryExtractMediaUrlSkipsEntriesWithoutManifest()
+    {
+        // First main[] entry has no "manifest" property; second one does — pick the second.
+        var html = """
+        let coreConfiguration = {
+          "manifests": { "main": [
+            { "weight": 80, "tooltipTitle": "Main" },
+            { "manifest": "https://cdn/second.m3u8", "weight": 20 }
+          ]}
+        };
+        """;
+
+        var url = MediusTranscriptInterceptor.TryExtractMediaUrl(html);
+
+        Assert.Equal("https://cdn/second.m3u8", url);
+    }
+
+    [Fact]
     public void TryExtractCaptionConfigParsesInlineLanguageList()
     {
         // Mirrors the real embed-page inline block: a JS assignment with a trailing semicolon,

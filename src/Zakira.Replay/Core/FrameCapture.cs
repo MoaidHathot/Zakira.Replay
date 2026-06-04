@@ -34,12 +34,23 @@ public sealed class FrameCaptureService : IFrameCaptureService
     private readonly ArtifactStore artifactStore;
     private readonly IYtDlpClient ytDlp;
     private readonly IFfmpegClient ffmpeg;
+    // Optional. When provided, a yt-dlp resolution failure falls back to a lightweight
+    // browser probe that extracts the playable URL from inline player config (Medius today,
+    // future profiles via IInlineCaptionInterceptor.DiscoveredMediaUrl). Null in unit tests
+    // and in headless environments that don't ship Playwright.
+    private readonly IBrowserVideoCaptureClient? browserCaptureClient;
 
     public FrameCaptureService(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg)
+        : this(artifactStore, ytDlp, ffmpeg, browserCaptureClient: null)
+    {
+    }
+
+    public FrameCaptureService(ArtifactStore artifactStore, IYtDlpClient ytDlp, IFfmpegClient ffmpeg, IBrowserVideoCaptureClient? browserCaptureClient)
     {
         this.artifactStore = artifactStore;
         this.ytDlp = ytDlp;
         this.ffmpeg = ffmpeg;
+        this.browserCaptureClient = browserCaptureClient;
     }
 
     public async Task<FrameCaptureResult> CaptureAsync(FrameCaptureRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -214,12 +225,79 @@ public sealed class FrameCaptureService : IFrameCaptureService
             return mediaUrl;
         }
 
+        // Browser probe: when yt-dlp can't resolve (Medius / Microsoft Build, custom MSE
+        // players, some private SharePoint Stream variants), navigate the page once with
+        // MetadataOnly=true and pull whatever URL the registered inline interceptors found
+        // in the page traffic. This typically completes in ~3-5s and yields an HLS m3u8
+        // ffmpeg can seek into with -ss N (~18s observed for KEY01 at 02:00).
+        var browserUrl = await TryResolveViaBrowserProbeAsync(request, run, warnings, progress, cancellationToken).ConfigureAwait(false);
+        if (browserUrl is not null)
+        {
+            return browserUrl;
+        }
+
         warnings.Add(new ReplayWarning(
             ReplayWarningCodes.FrameCaptureMediaUrlUnresolved,
             "Could not resolve a direct media URL; downloading media locally for frame capture.",
             Source: "yt-dlp",
             Severity: ReplayWarningSeverities.Info));
         return await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
+    }
+
+    /// <summary>
+    /// Fast metadata-only browser probe: navigate the source page, let the inline-caption
+    /// interceptor registry observe responses long enough to capture the player's inline
+    /// config, then return the first media URL any interceptor discovered. Returns null when
+    /// no browser client was injected, when the source is a local file, or when no profile
+    /// recognised an inline URL.
+    /// </summary>
+    private async Task<string?> TryResolveViaBrowserProbeAsync(
+        FrameCaptureRequest request,
+        VideoRun run,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (browserCaptureClient is null) return null;
+        if (SourceLocator.TryGetLocalFilePath(request.Source, out _)) return null;
+
+        progress?.Report("Probing source page for inline media URL (browser, metadata-only)...");
+
+        var config = new ConfigStore().Load();
+        var probeRequest = new BrowserCaptureRequest(
+            Url: request.Source,
+            Run: run,
+            FrameCount: 0,
+            PlayButtonSelector: config.Capture.Browser.PlayButtonSelector,
+            VideoElementSelector: string.IsNullOrWhiteSpace(config.Capture.Browser.VideoElementSelector) ? "video" : config.Capture.Browser.VideoElementSelector,
+            SeekWaitSeconds: config.Capture.Browser.SeekWaitSeconds,
+            DurationProbeTimeoutSeconds: config.Capture.Browser.DurationProbeTimeoutSeconds,
+            JpegQuality: config.Capture.Browser.JpegQuality,
+            // Captions on so the Medius interceptor registers — same response carries the
+            // m3u8 manifest URL we want. Cheap because MetadataOnly returns before download.
+            CaptureCaptions: true,
+            MaxCaptionBytes: config.Capture.Browser.MaxCaptionBytes,
+            MetadataOnly: true);
+
+        BrowserCaptureResult result;
+        try
+        {
+            result = await browserCaptureClient.CaptureAsync(probeRequest, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.FrameCaptureMediaUrlUnresolved,
+                $"Browser metadata-only probe failed: {ex.Message}",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Info));
+            return null;
+        }
+
+        // Propagate the probe's own warnings (e.g. CAPTURE_BROWSER_UNAVAILABLE, MEDIUS_TRANSCRIPT_DISCOVERED).
+        foreach (var w in result.Warnings) warnings.Add(w);
+
+        return string.IsNullOrWhiteSpace(result.InlineMediaUrl) ? null : result.InlineMediaUrl;
     }
 
     private static (IReadOnlyList<TimeSpan> Effective, IReadOnlyList<ReplayWarning> Warnings) ClampTimestamps(IReadOnlyList<TimeSpan> requested, double? duration)

@@ -37,6 +37,16 @@ internal interface IInlineCaptionInterceptor
     bool HasDiscoveries { get; }
 
     /// <summary>
+    /// First playable media URL (HLS master playlist, DASH manifest, etc.) discovered by this
+    /// interceptor in the page traffic, or <c>null</c> when the source format doesn't expose one
+    /// the interceptor recognises. The base contract is opt-in via the default implementation so
+    /// existing profiles don't have to advertise it; profiles whose embed pages inline the media
+    /// URL (e.g. <see cref="MediusTranscriptInterceptor.DiscoveredMediaUrl"/>) override this to
+    /// power ad-hoc spot-frame capture (<c>frames --at</c>) without requiring yt-dlp resolution.
+    /// </summary>
+    string? DiscoveredMediaUrl => null;
+
+    /// <summary>
     /// Playwright <c>page.Response</c> event handler. Fire-and-forget body reads are encouraged;
     /// this method must never throw — Playwright propagates handler exceptions as test failures.
     /// </summary>

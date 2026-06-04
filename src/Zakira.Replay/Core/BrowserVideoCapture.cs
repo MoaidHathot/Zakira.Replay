@@ -33,7 +33,13 @@ public sealed record BrowserCaptureRequest(
     long MaxMediaBytes = 0,
     bool Debug = false,
     long DebugMaxBodyBytes = 1L * 1024 * 1024,
-    IReadOnlyList<string>? CaptionLanguagePreferences = null);
+    IReadOnlyList<string>? CaptionLanguagePreferences = null,
+    // When true, the capture pass navigates, lets interceptors observe responses + extracts
+    // session metadata, then returns WITHOUT engaging the player or polling for duration.
+    // Used by FrameCaptureService for ad-hoc spot frames against sources where the only thing
+    // we need is the inline media URL the player config exposes (e.g. Medius / Build sessions
+    // whose HLS m3u8 ships inline in the embed HTML). Cuts a ~25s probe to ~3-5s.
+    bool MetadataOnly = false);
 
 public sealed record BrowserCaptureResult(
     IReadOnlyList<FrameArtifact> Frames,
@@ -41,7 +47,8 @@ public sealed record BrowserCaptureResult(
     IReadOnlyList<ReplayWarning> Warnings,
     IReadOnlyList<BrowserCapturedCaption> Captions,
     string? DownloadedMediaPath = null,
-    SessionMetadata? SessionMetadata = null);
+    SessionMetadata? SessionMetadata = null,
+    string? InlineMediaUrl = null);
 
 /// <summary>
 /// Playwright-backed implementation. Pins Chromium to the user's Edge installation (resolved by
@@ -293,7 +300,38 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                     page.Response -= debugRecorder.OnResponse;
                     await debugRecorder.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
-                return new BrowserCaptureResult([], null, warnings, authFailCaptions, null, sessionMetadata);
+                return new BrowserCaptureResult([], null, warnings, authFailCaptions, null, sessionMetadata,
+                    InlineMediaUrl: inlineCaptionInterceptors.Select(i => i.DiscoveredMediaUrl).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u)));
+            }
+
+            // MetadataOnly short-circuit. Skip play + duration probe + frame capture; just
+            // collect whatever the interceptors / metadata extractor discovered during
+            // navigation. Used by FrameCaptureService spot-frame probes that only need the
+            // inline media URL — a Medius/Build probe drops from ~25s (duration timeout) to
+            // ~3-5s (navigate + read HTML).
+            if (request.MetadataOnly)
+            {
+                // Give late-arriving response bodies (the Medius embed iframe document is
+                // typically last) a beat to land in the interceptor before we unsubscribe.
+                await page.WaitForTimeoutAsync(500).ConfigureAwait(false);
+                if (captionCollector is not null) page.Response -= captionCollector.OnResponse;
+                if (mediaCollector is not null) page.Response -= mediaCollector.OnResponse;
+                if (streamInterceptor is not null) page.Response -= streamInterceptor.OnResponse;
+                foreach (var interceptor in inlineCaptionInterceptors) page.Response -= interceptor.OnResponse;
+                if (debugRecorder is not null)
+                {
+                    page.Response -= debugRecorder.OnResponse;
+                    await debugRecorder.FlushAsync(cancellationToken).ConfigureAwait(false);
+                }
+
+                return new BrowserCaptureResult(
+                    Frames: [],
+                    DurationSeconds: null,
+                    Warnings: warnings,
+                    Captions: [],
+                    DownloadedMediaPath: null,
+                    SessionMetadata: sessionMetadata,
+                    InlineMediaUrl: inlineCaptionInterceptors.Select(i => i.DiscoveredMediaUrl).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u)));
             }
 
             await PlayVideoAsync(page, request, warnings, progress).ConfigureAwait(false);
@@ -360,7 +398,8 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                     }
                 }
 
-                return new BrowserCaptureResult([], null, warnings, earlyCaptions, null, sessionMetadata);
+                return new BrowserCaptureResult([], null, warnings, earlyCaptions, null, sessionMetadata,
+                    InlineMediaUrl: inlineCaptionInterceptors.Select(i => i.DiscoveredMediaUrl).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u)));
             }
 
             var frames = await CaptureFramesAsync(page, request, duration.Value, warnings, progress, cancellationToken).ConfigureAwait(false);
@@ -453,7 +492,8 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                     context, warnings, progress, cancellationToken).ConfigureAwait(false);
             }
 
-            return new BrowserCaptureResult(frames, duration, warnings, captions, downloadedMediaPath, sessionMetadata);
+            return new BrowserCaptureResult(frames, duration, warnings, captions, downloadedMediaPath, sessionMetadata,
+                InlineMediaUrl: inlineCaptionInterceptors.Select(i => i.DiscoveredMediaUrl).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u)));
         }
         catch (PlaywrightException ex)
         {

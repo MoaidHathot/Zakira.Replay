@@ -1619,7 +1619,11 @@ public static class CliApp
         var dependencies = new DependencyResolver();
         var runner = new ProcessRunner();
         var store = new ArtifactStore(ResolveRunsRoot());
-        return new FrameCaptureService(store, new YtDlpClient(dependencies, runner), new FfmpegClient(dependencies, runner));
+        // Wire the browser client so spot-frame requests against sources yt-dlp can't resolve
+        // (Medius / Microsoft Build, custom MSE players) fall back to a fast metadata-only
+        // browser probe that extracts the inline HLS URL and hands it to ffmpeg.
+        var browser = new PlaywrightVideoCaptureClient(dependencies);
+        return new FrameCaptureService(store, new YtDlpClient(dependencies, runner), new FfmpegClient(dependencies, runner), browser);
     }
 
     /// <summary>

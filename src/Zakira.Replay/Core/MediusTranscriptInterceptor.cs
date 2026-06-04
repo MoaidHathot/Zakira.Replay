@@ -40,6 +40,7 @@ internal sealed partial class MediusTranscriptInterceptor : IInlineCaptionInterc
     private readonly List<MediusCaption> discovered = [];
     private readonly object lockObj = new();
     private bool announced;
+    private string? mediaUrl;
 
     public MediusTranscriptInterceptor(BrowserCaptureRequest request, List<ReplayWarning> warnings)
     {
@@ -54,6 +55,23 @@ internal sealed partial class MediusTranscriptInterceptor : IInlineCaptionInterc
     public bool HasDiscoveries
     {
         get { lock (lockObj) { return discovered.Count > 0; } }
+    }
+
+    /// <summary>
+    /// First HLS master-playlist URL discovered in the embed page's <c>coreConfiguration</c>
+    /// block. Populated alongside the captions during the same response parse, so a caller
+    /// that only needs the media URL (e.g. for ad-hoc <c>frames --at</c> spot capture against
+    /// a Medius/Build session) can read it without paying for caption downloads.
+    /// </summary>
+    /// <remarks>
+    /// The URL is host-direct (<c>stream.event.microsoft.com/prod*/...master.m3u8</c>), not
+    /// SAS-signed — public Build/Ignite/Medius sessions accept it without cookies or proxy.
+    /// ffmpeg can <c>-ss N -i URL -frames:v 1</c> against it in single-digit seconds for
+    /// each clip near a keyframe (~18s observed for KEY01 at 02:00 on first call).
+    /// </remarks>
+    public string? DiscoveredMediaUrl
+    {
+        get { lock (lockObj) { return mediaUrl; } }
     }
 
     public void OnResponse(object? sender, IResponse response)
@@ -87,6 +105,19 @@ internal sealed partial class MediusTranscriptInterceptor : IInlineCaptionInterc
 
         if (body.Length == 0) return;
         var html = Encoding.UTF8.GetString(body);
+
+        // Same response carries both the captions manifest and the player's coreConfiguration
+        // (which holds the HLS master playlist URL). Extract both so a media-URL-only caller
+        // doesn't have to re-fetch the page just to learn the m3u8 location.
+        var discoveredMediaUrl = TryExtractMediaUrl(html);
+        if (discoveredMediaUrl is not null)
+        {
+            lock (lockObj)
+            {
+                mediaUrl ??= discoveredMediaUrl;
+            }
+        }
+
         var captions = TryExtractCaptionConfig(html);
         if (captions.Count == 0) return;
 
@@ -136,10 +167,67 @@ internal sealed partial class MediusTranscriptInterceptor : IInlineCaptionInterc
     }
 
     /// <summary>
-    /// Parse the <c>captionsConfiguration.languageList</c> array out of an embed page's HTML.
-    /// Pure function (no I/O) so the brace-matching and language inference can be unit-tested.
-    /// Returns an empty list when the block is absent or malformed.
+    /// Find the first HLS master-playlist URL inside the embed page's <c>coreConfiguration</c>
+    /// JS assignment. Pure (no I/O) so the brace-matching and JSON walk can be unit-tested.
+    /// Returns null when the block is absent or no manifest entry exposes a usable URL.
     /// </summary>
+    /// <remarks>
+    /// Shape we mine (verified against KEY01 / Microsoft Build):
+    /// <code>
+    /// let coreConfiguration = {
+    ///   "manifests": {
+    ///     "main": [
+    ///       { "manifest": "https://stream.event.microsoft.com/prodwe/.../master.m3u8", "weight": 80, ... },
+    ///       { "manifest": "https://stream.event.microsoft.com/prodnc/.../master.m3u8", "weight": 20, ... }
+    ///     ],
+    ///     "asl": [ ... ]   // American Sign Language stream; deliberately skipped
+    ///   }
+    /// };
+    /// </code>
+    /// We prefer <c>manifests.main</c> over <c>asl</c>/<c>isl</c>/<c>bsl</c> so spot-frames
+    /// reflect the speaker's slide content, not the sign-language overlay. Within <c>main</c>
+    /// the first entry wins (Medius orders by weight already).
+    /// </remarks>
+    internal static string? TryExtractMediaUrl(string html)
+    {
+        if (string.IsNullOrWhiteSpace(html)) return null;
+
+        var marker = html.IndexOf("coreConfiguration", StringComparison.Ordinal);
+        if (marker < 0) return null;
+
+        var open = html.IndexOf('{', marker);
+        if (open < 0) return null;
+        var json = ExtractBraceBalancedJson(html, open);
+        if (json is null) return null;
+
+        try
+        {
+            using var doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("manifests", out var manifests)
+                || manifests.ValueKind != JsonValueKind.Object)
+            {
+                return null;
+            }
+            if (!manifests.TryGetProperty("main", out var main) || main.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
+            foreach (var entry in main.EnumerateArray())
+            {
+                if (entry.ValueKind != JsonValueKind.Object) continue;
+                if (!entry.TryGetProperty("manifest", out var url)) continue;
+                if (url.ValueKind != JsonValueKind.String) continue;
+                var u = url.GetString();
+                if (!string.IsNullOrWhiteSpace(u)) return u;
+            }
+            return null;
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
     internal static IReadOnlyList<MediusCaption> TryExtractCaptionConfig(string html)
     {
         if (string.IsNullOrWhiteSpace(html)) return [];

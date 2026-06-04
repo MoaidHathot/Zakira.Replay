@@ -80,6 +80,10 @@ Tokenization for the `sqlite-onnx` search backend is handled by **`Microsoft.ML.
 
 Do not put secret values in JSON config. Config stores environment variable names for provider secrets.
 
+## Source-specific profiles
+
+When the source is a URL (not a local file), open `skills/zakira-replay/sources/README.md` and match the URL's host against the index. If a profile matches, read **that profile only** — it names the recommended capture mode, flag combinations, expected artifacts, known limitations, and warning codes specific to that source. Lookup is advisory: hosts not in the index use the defaults documented here. Adding a new source profile is one file + one row in the index — see the directory's README for the contribution shape.
+
 ## Recommended Analysis Commands
 
 General evidence extraction (relies on the new defaults: `--frame-strategy scene`, `--ocr-provider local`, `--max-ai-frames 50`, `--scene-safety-cap 5000`, deterministic run-id):

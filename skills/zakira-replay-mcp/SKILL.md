@@ -29,6 +29,10 @@ The MCP server reads + writes artifacts under the configured **runs directory**:
 
 Use `doctor` as the first tool when dependency or provider readiness is unknown.
 
+## Source-specific profiles
+
+When the `source` is a URL (not a local file), open `skills/zakira-replay/sources/README.md` and match the URL's host against the index. If a profile matches, read **that profile only** — it names the recommended capture mode, argument combinations, expected artifacts, known limitations, and warning codes specific to that source. Lookup is advisory: hosts not in the index use the defaults documented here. Adding a new source profile is one file + one row in the index — see the directory's README for the contribution shape.
+
 ## Tool Selection
 
 Prefer these tools:

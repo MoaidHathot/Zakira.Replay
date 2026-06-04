@@ -103,11 +103,14 @@ Schema (current `0.2`):
       "endSeconds": 120,
       "timestamp": "00:00",
       "endTimestamp": "02:00",
+      "deepLink": "https://example.com/v?t=0",
       "evidence": [
-        { "kind": "transcript", "timestamp": "00:12", "text": "..." },
-        { "kind": "frame", "timestamp": "01:05", "path": "frames/frame-001.jpg" }
+        { "kind": "transcript", "timestamp": "00:12", "text": "...", "deepLink": "https://example.com/v?t=12" },
+        { "kind": "frame", "timestamp": "01:05", "path": "frames/frame-001.jpg", "deepLink": "https://example.com/v?t=65" }
       ]
     }
   ]
 }
 ```
+
+The `deepLink` field on each `Chapter` and `ChapterEvidence` is a time-anchored URL constructed by `DeepLink.For(sourceUrl, seconds)` from the originating `evidence.json`'s `webpageUrl ?? source`. Site-specific shapes: YouTube `?t=Ns` (replaces any existing `t=`), SharePoint Stream / Microsoft Stream `?nav=t=HHhMMmSSs`, Vimeo `#t=Ns`, everything else the W3C Media Fragments fallback `#t=<seconds>`. Null when the source has no usable URL; absent from the JSON when null.

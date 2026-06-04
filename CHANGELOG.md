@@ -265,6 +265,174 @@ per-command `--json` with the global `--output-format json`.
 MCP transport upgrades: the new HTTP transport requires `ModelContextProtocol.AspNetCore`,
 which is already a direct dependency of the global tool nupkg. No extra install needed.
 
+## [Unreleased] — Conference-grade analysis, opt-in downloads, and MSE-player sidesteps
+
+Bundle of features motivated by ingesting a full Microsoft Build conference end-to-end as an
+agent-driven workflow. The headline shifts: the pipeline now extracts transcripts and frames
+from streaming-only sources (Medius / Microsoft Build's Shaka-based player) whose JavaScript
+player won't boot headlessly, **and never silently downloads source video** — every local-media
+write is now strictly opt-in.
+
+### Added
+
+- **Strictly-opt-in local downloads** — `--allow-media-download` on `analyze`, `transcribe`,
+  `frames`, `clip`, `queue enqueue`, `batch run`. New config key
+  `capture.allowMediaDownload` (default `false`). Without the flag/config, the four previously
+  silent download paths (yt-dlp `DownloadMediaForProcessing` in two call sites of
+  `AnalysisPipeline.GetDownloadedMediaSourceAsync`; `FrameCaptureService.ResolveRemoteMediaAsync`;
+  `ClipExtractionService.ExtractAsync`; the browser STT collector
+  `BrowserVideoCapture.MediaResponseCollector.TryDownloadBestCandidateAsync`) emit
+  `MEDIA_DOWNLOAD_DECLINED` and return null / throw clearly. Three-layer resolution
+  (per-run flag > `capture.allowMediaDownload` > `false`).
+  - **Breaking behaviour:** `--stt` no longer implicitly authorises a download. Combine with
+    `--allow-media-download` when no captions / audio source is reachable.
+- **`MediusTranscriptInterceptor`** — pulls the SAS-signed `Caption_<lang>.vtt` manifest
+  inlined in `medius.studios.ms` / `medius.microsoft.com` / `medius*.event.microsoft.com`
+  embed pages. Captures full transcripts for Microsoft Build / Ignite / public Medius sessions
+  whose Shaka MSE player never boots headlessly. Three new warning codes:
+  `CAPTURE_MEDIUS_TRANSCRIPT_DISCOVERED`, `CAPTURE_MEDIUS_TRANSCRIPT_DOWNLOADED`,
+  `CAPTURE_MEDIUS_TRANSCRIPT_FAILED`. Implements the new `IInlineCaptionInterceptor`
+  contract; selectable via `InlineCaptionInterceptorRegistry`.
+- **`IInlineCaptionInterceptor` registry** — pluggable extensibility surface for adding new
+  streaming-player profiles (Medius is the first profile). Adding a new platform is a one-line
+  entry in `InlineCaptionInterceptorRegistry`; `BrowserVideoCapture` iterates the registry
+  uniformly across all three exit paths (auth-fail / duration-unresolved / normal).
+- **Spot-frame capture for Medius/Build** — `frames --at "<ts1>,<ts2>"` now produces real
+  JPEGs from sources `yt-dlp` cannot resolve. `MediusTranscriptInterceptor.TryExtractMediaUrl`
+  reads the HLS master playlist from the embed page's inline `coreConfiguration`; surfaced as
+  `BrowserCaptureResult.InlineMediaUrl`. `FrameCaptureService` accepts an optional
+  `IBrowserVideoCaptureClient` (wired in the CLI) and runs a fast metadata-only browser probe
+  on yt-dlp failure. Verified end-to-end on KEY01: 3 frames at 35:55 / 01:11:50 / 01:47:45 in
+  ~71s, no auth, no full-video download.
+- **`analyze --frames N` sidestep fallback** — when the in-browser play+duration probe yields
+  no frames AND an inline-media URL was discovered, the pipeline transparently hands that URL
+  to `ffmpeg.ExtractFramesAsync` with the request's strategy / scene-safety cap. Emits
+  `CAPTURE_BROWSER_FALLBACK` info breadcrumb identifying the path (`duration-unresolved-fallback`).
+  Closes the "0 frames captured" gap for Build sessions analysed via `--capture-mode browser`.
+- **`--prefer-inline-media`** — opt-in primary path that skips the in-browser play+duration
+  probe entirely. `CaptureFramesAndCaptionsWithBrowserAsync` runs a `MetadataOnly` probe
+  (~3-5s, vs ~25s for the duration timeout), reads the inline URL, ffmpeg-seeks the requested
+  frames, AND downloads the inline captions in the same pass (single command yields frames +
+  transcript). Falls through to the regular full-capture path when no inline URL is discovered.
+- **Autoplay-policy override** (`--autoplay-policy <default|no-user-gesture-required>`) with
+  three-layer resolution: per-run flag > `capture.browser.autoplayPolicyByHost` (with exact
+  match + `*.<suffix>` wildcard, longest-match-wins) > `capture.browser.autoplayPolicy`
+  (global default). New `AutoplayPolicies` module (Default, NoUserGestureRequired); string
+  enum so future Chromium policies extend without schema bumps. Unknown values collapse to
+  `Default` so a typo never wedges the launch.
+- **Secondary-language transcripts** — `--secondary-transcripts <csv>` (e.g.
+  `--secondary-transcripts fr,he`). Persists `transcript.<lang>.md` per requested language
+  alongside the primary `transcript.md`. Sourced from already-downloaded captions; surfaced
+  on `manifest.secondaryTranscripts` as `{ language, markdownPath, sourcePath }[]` for agent
+  discovery. Off by default. Missing languages emit info warnings, never fail.
+- **Deterministic session-metadata extractor** (no LLM). New `SessionMetadataExtractor`
+  parses JSON-LD `VideoObject` / `LearningResource` / `@graph`, OpenGraph meta tags, and
+  `<title>` / `<meta name=description>` from the captured HTML. Merges with first-non-null-wins
+  per scalar + union-with-dedup per list. Surfaced on `manifest.sessionMetadata` with full
+  provenance under `sources[]` (which strategy supplied each field). Browser-capture only;
+  null when nothing parseable.
+- **Deep links** — `DeepLink.For(url, seconds)` builder with site profiles for YouTube
+  (`?t=Ns`, replaces existing `t=`), SharePoint Stream / Microsoft Stream
+  (`?nav=t=HHhMMmSSs`), Vimeo (`#t=Ns`), and a generic W3C Media Fragments fallback
+  (`#t=<seconds>`) for everything else (Build / Medius / arbitrary pages). Threaded through
+  `Chapter` and `ChapterEvidence` (carried in `chapters.json` / `chapters.md`),
+  `SearchMatch` (plus new `RunId` and `SourceUrl` fields), and `SearchIndexManifest.SourceUrl`
+  (persisted in both JSON and SQLite backends).
+- **Cross-run / conference search index** — `SearchIndexService.BuildConferenceAsync`
+  aggregates `evidence.json` from N runs into one JSON index at
+  `<runs-root>/.indexes/<conferenceId>/index.json` with per-document `RunId` and `SourceUrl`.
+  Cross-corpus TF-IDF (computed across the merged corpus, not per-run-then-merged) so
+  per-session rare terms rank correctly. New CLI subcommand
+  `zakira-replay index build-conference <id> --runs <paths-or-globs>`;
+  `SearchIndexService.ResolveQueryTarget` makes `index query <conference-id>` work alongside
+  the existing run-dir and file-path targets. Per-run ingest failures are non-fatal —
+  recorded in `SearchIndexConferenceBuildResult.Skipped[]`.
+- **Parallel `batch run`** — new top-level `BatchManifest.Concurrency` field and
+  `batch run --concurrency N` flag (overrides the manifest value). Items dispatched via
+  `Parallel.ForEachAsync` with `MaxDegreeOfParallelism` capped at the resolved value.
+  `batch-result.json` items always mirror manifest input order (index-keyed result slots)
+  regardless of completion order. `continueOnError=false` under parallelism cancels an
+  internal linked CTS so no further items start; in-flight items are best-effort cancelled
+  and dropped from the result. User cancellation propagates as `OperationCanceledException`
+  unchanged. Default is `1` — sequential, identical to historical behaviour byte-for-byte.
+- **Batch manifest field binding** — `BatchManifest` and `BatchItem` now actually bind the
+  schema-advertised fields that were silently dropped: `captureMode`, `authProfile`,
+  `ocrProvider`, `smartCrop`, `smartCropProfile`, `useDiarization`, `numSpeakers`,
+  `diarizationThreshold`. Item value > manifest value > built-in default. `batch run` can
+  finally drive Medius/Build sweeps (`captureMode: "browser"`).
+
+### Changed
+
+- **`AnalyzeRequest`** record gains nullable `PreferInlineMedia`, `AutoplayPolicy`,
+  `AllowMediaDownload`, `SecondaryCaptionLanguages` fields. All default `null` so existing
+  callers are unaffected.
+- **`BrowserCaptureRequest`** gains `MetadataOnly` (skip play + duration probe; navigate +
+  extract inline URL only) and `AutoplayPolicy` (resolved string passed through to launch).
+- **`BrowserCaptureResult`** gains `SessionMetadata` and `InlineMediaUrl`.
+- **`SearchMatch`** gains `DeepLink`, `RunId`, `SourceUrl`.
+- **`Chapter` / `ChapterEvidence`** gain `DeepLink`.
+- **`ArtifactManifest`** gains `SecondaryTranscripts` and `SessionMetadata`.
+- **`TranscriptArtifact`** gains optional `Secondary: IReadOnlyList<SecondaryTranscriptArtifact>?`.
+- **`SearchIndexDocument`** gains optional `RunId` and `SourceUrl` (set for conference
+  indexes; null for single-run).
+- **`SearchIndexManifest`** gains `SourceUrl`.
+- **`FrameCaptureService`** constructor accepts an optional `IBrowserVideoCaptureClient`
+  for the browser-probe fallback. The pre-existing `(store, ytDlp, ffmpeg)` ctor is preserved.
+- **`MediusTranscriptInterceptor.DownloadAllAsync` → `DownloadAsync`** to match the new
+  `IInlineCaptionInterceptor` contract. No callers outside the class held a reference to the
+  old name.
+- **Browser-capture launch args** centralised via `BuildChromiumArgs(request, …extras)` so
+  the persistent-context and ephemeral-StorageState paths uniformly honour the resolved
+  autoplay policy.
+
+### Schemas
+
+- **`manifest.schema.json`** (`0.8`) — adds `secondaryTranscripts` and `sessionMetadata`
+  (with full sub-schema covering speakers/products/tags/sources provenance).
+- **`search-index.schema.json`** — adds `sourceUrl` top-level field; documents now also carry
+  optional `runId` and `sourceUrl` (cross-run shape).
+- **`request.schema.json`** — adds `secondaryCaptionLanguages`, `preferInlineMedia`,
+  `autoplayPolicy`, `allowMediaDownload`, `captureDebug`.
+- **`queue.schema.json`** — embedded analyze request gains the same five fields.
+- **`batch.schema.json`** — manifest + item gain `secondaryCaptionLanguages`,
+  `preferInlineMedia`, `autoplayPolicy`, `allowMediaDownload`, plus the previously-dropped
+  `captureMode`, `authProfile`, `ocrProvider`, `smartCrop`, `smartCropProfile`,
+  `useDiarization`, `numSpeakers`, `diarizationThreshold`, and `concurrency`.
+
+### Fixed
+
+- **Browser-capture hang** — `el.play()` is now raced against a bounded 3s in-page timeout
+  (`Promise.race`); previously stalled indefinitely on long / still-buffering videos.
+- **Browser-capture crash** — `PlaywrightException` + `System.TimeoutException` both caught
+  on locator click actions (Playwright 1.59 throws the latter for locator timeouts).
+- **Nested-iframe `<video>` discovery** — `ResolveVideoFrameAsync` walks `page.Frames` so
+  duration probe, play heuristics, seek, and screenshot all target the frame that actually
+  owns the `<video>` element. Falls back to the main frame; existing single-frame behaviour
+  preserved exactly.
+- **`MetadataOnly` captions** — initial implementation returned empty captions; now downloads
+  inline captions during the metadata-only probe too, so `--prefer-inline-media` produces
+  both frames and a transcript in one pass.
+- **Clean error rendering** — `ReplayException` (exit 1), `MissingDependencyException`
+  (exit 2), and `OperationCanceledException` (exit 130) are surfaced cleanly through
+  `CliApp.RunPipelineAsync` instead of dumping stack traces via System.CommandLine's default
+  handler.
+- **Batch manifest schema/binding mismatch** — `BatchManifest` / `BatchItem` C# records now
+  bind every field the published schema advertised (see Batch manifest field binding above).
+  Eight fields that were silently dropped now actually take effect.
+
+### Notes for orchestrators
+
+- The `--allow-media-download` gate is the biggest behaviour change. Agent loops that
+  previously relied on the silent download fallback for `--stt` over a source with no captions
+  must now either (a) add the flag, (b) flip `capture.allowMediaDownload` in config, or (c)
+  catch `MEDIA_DOWNLOAD_DECLINED` and prompt their user.
+- `index build` (per-run) is unchanged. `index build-conference` is new and writes outside
+  the run directory (`<runs-root>/.indexes/<id>/index.json`) so it's safe to rebuild without
+  perturbing per-run artifacts.
+- `frames --at` against Build/Medius sources no longer fails with `MEDIA_URL_UNRESOLVED` —
+  the new browser-probe fallback resolves the HLS URL and ffmpeg seeks ~18s per spot frame
+  (one HLS keyframe download per requested timestamp).
+
 ## [Unreleased] — Dedicated Edge profile for browser capture
 
 ### Added

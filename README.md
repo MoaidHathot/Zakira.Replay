@@ -495,18 +495,127 @@ This is a "fit-for-purpose" fallback, not a general media downloader:
 - **Does NOT work** for HLS / DASH chunked streams: audio is split across hundreds of small `.m4s` fragments with no single addressable URL. Manifest parsing + segment reassembly is out of scope for now.
 - **Does NOT work** for DRM-protected streams (rare for internal corporate recordings).
 
-The media-collection side-channel is **off by default** and only activates when:
+The media-collection side-channel is **off by default** and only activates when **all three** of:
+
 - `--stt` was requested (`request.UseSpeechToText == true`), AND
 - The transcript step found no captions/subtitles, AND
-- No audio was otherwise resolved (no yt-dlp media URL, no sidecar)
+- No audio was otherwise resolved (no yt-dlp media URL, no sidecar), AND
+- **`--allow-media-download` is set** (or `capture.allowMediaDownload` is `true` in config — see [Strictly opt-in local downloads](#strictly-opt-in-local-downloads) below). `--stt` no longer implicitly authorises a local download.
 
-When the fallback runs but no candidate URL is observed, a `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) tells the orchestrator STT was skipped because the player streamed in fragments. When a candidate is found but the authenticated re-download fails (HTTP error, oversize, timeout), `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) fires.
+When the fallback runs but no candidate URL is observed, a `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) tells the orchestrator STT was skipped because the player streamed in fragments. When a candidate is found but the authenticated re-download fails (HTTP error, oversize, timeout), `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) fires. When `--allow-media-download` was not set and the path would otherwise have run, `MEDIA_DOWNLOAD_DECLINED` (error) fires with an actionable message naming the flag.
 
 Warning codes specific to browser media capture:
 
 - `CAPTURE_BROWSER_MEDIA_DOWNLOADED` (info) — media file downloaded successfully; STT will run against it.
 - `CAPTURE_BROWSER_MEDIA_NO_CANDIDATE` (info) — no single-file media URL was observed (chunked stream); STT will be skipped.
 - `CAPTURE_BROWSER_MEDIA_DOWNLOAD_FAILED` (warning) — authenticated re-download failed; STT will be skipped.
+- `MEDIA_DOWNLOAD_DECLINED` (error) — pipeline reached a local-download path but `--allow-media-download` is off. The message names the flag so an agent can decide whether to retry with the opt-in.
+
+### Strictly opt-in local downloads
+
+Every local-media-write path in the pipeline is now strictly opt-in (default off). This includes:
+
+- `yt-dlp DownloadMediaForProcessing` in two call sites of `AnalysisPipeline` (frame extraction fallback when ffmpeg can't process the direct URL; STT fallback when no audio source is reachable).
+- `FrameCaptureService.ResolveRemoteMediaAsync` (the spot-frames last-resort).
+- `ClipExtractionService.ExtractAsync` (clip extraction needs a download when no direct URL is reachable; no inline-media sidestep applies).
+- The browser STT collector `BrowserVideoCapture.TryDownloadBestCandidateAsync` (see above).
+
+Three-layer opt-in resolution (highest priority wins):
+
+1. **Per-run** `--allow-media-download` on `analyze`, `transcribe`, `frames`, `clip`, `queue enqueue`, `batch run`. Maps to `AnalyzeRequest.AllowMediaDownload` (`bool?`), `FrameCaptureRequest.AllowMediaDownload` (`bool`), `ClipExtractionRequest.AllowMediaDownload` (`bool`), batch manifest `allowMediaDownload`.
+2. **Per-machine** `capture.allowMediaDownload` config key (boolean, default `false`).
+3. Built-in default: `false`.
+
+When declined, the matching site emits `MEDIA_DOWNLOAD_DECLINED` (error) with the flag name in the message and returns null / empty / throws `ReplayException` (clip). This keeps the agent contract honest: bytes that aren't on the wire are bytes the agent doesn't have to apologise for.
+
+### Microsoft Medius / Build / Ignite — transcripts + frames without playback
+
+Sources whose JS player is Shaka-on-MSE (Microsoft Medius, anything embedded via
+`medius.studios.ms` / `medius.microsoft.com` / `medius*.event.microsoft.com`, including
+`build.microsoft.com/en-US/sessions/<CODE>?source=sessions`) never boot to a finite
+`video.duration` headlessly. The `MediusTranscriptInterceptor` profile (registered in
+`InlineCaptionInterceptorRegistry`) sidesteps the player entirely by reading the embed
+page's inline `captionsConfiguration` and `coreConfiguration` JS objects:
+
+- **Captions** — `captionsConfiguration.languageList[]` carries up to 36 SAS-signed
+  `Caption_<lang>.vtt` URLs. The interceptor downloads the preferred language(s) directly
+  via the Playwright context (no playback engagement required). Verified on KEY01 (the
+  2026 Microsoft Build keynote): full English transcript in seconds.
+- **Frames** — `coreConfiguration.manifests.main[].manifest` carries the HLS master
+  playlist URL. Exposed on `BrowserCaptureResult.InlineMediaUrl`; `FrameCaptureService`
+  (for `frames --at`) and `AnalysisPipeline` (for `analyze --frames N`, see below) hand
+  this URL straight to ffmpeg for seek-based extraction.
+
+Warning codes specific to Medius:
+
+- `CAPTURE_MEDIUS_TRANSCRIPT_DISCOVERED` (info) — caption manifest parsed; lists the
+  languages advertised.
+- `CAPTURE_MEDIUS_TRANSCRIPT_DOWNLOADED` (info) — one preferred-language VTT downloaded
+  and persisted under `captions/medius-NNNN-<lang>.vtt`.
+- `CAPTURE_MEDIUS_TRANSCRIPT_FAILED` (warning) — a discovered caption could not be
+  downloaded (HTTP error or empty body).
+
+#### `analyze --frames N` sidestep + `--prefer-inline-media`
+
+When the in-browser play+duration probe yields no frames AND an interceptor recovered an
+inline media URL, `AnalysisPipeline.CaptureFramesAndCaptionsWithBrowserAsync` transparently
+hands that URL to `ffmpeg.ExtractFramesAsync` with the request's frame strategy / scene
+safety cap. The fallback emits `CAPTURE_BROWSER_FALLBACK` (info) identifying the path
+(`duration-unresolved-fallback`). Transparent to callers — `analyze --frames N` against a
+Build session now produces frames instead of returning an empty array.
+
+For sources where you know the player won't boot, `--prefer-inline-media` skips the
+in-browser play+duration probe entirely. A `MetadataOnly` browser probe (~3-5s, vs ~25s
+for the duration timeout) navigates the page, lets interceptors observe responses, reads
+the inline URL, ffmpeg-seeks the requested frames, AND downloads the inline captions in
+the same pass. Falls through to the regular full-capture path when no inline URL is
+discovered. Maps to `AnalyzeRequest.PreferInlineMedia` (`bool`) and batch manifest
+`preferInlineMedia`.
+
+End-to-end on KEY01 with `--frames 3 --frame-strategy interval --prefer-inline-media`:
+~71 seconds, 3 real JPEGs (35:55, 01:11:50, 01:47:45), `transcript.md` 210 KB, English
+VTT 217 KB. No downloads. No flag-soup.
+
+For spot-frame capture without `analyze`, the `frames --at "00:02:00,00:22:30"` workflow
+runs the same metadata-only probe under the hood and is the fastest path for "go grab the
+slide at this transcript moment" agent workflows. ~18-20 s per spot frame (one HLS
+keyframe download per requested timestamp).
+
+#### Adding a new streaming-player profile
+
+Profiles implement `IInlineCaptionInterceptor` and are registered in
+`InlineCaptionInterceptorRegistry.CreateFor(request, warnings)`. Each profile exposes:
+
+- `Name` — stable identifier for logs/warnings (e.g. `"medius"`).
+- `HasDiscoveries` — true once anything relevant was observed in the page traffic.
+- `OnResponse(IResponse)` — Playwright event handler; must not throw.
+- `DownloadAsync(context, languagePreferences, ct)` — persist whatever was discovered
+  under `captions/` and return the captured records.
+- `DiscoveredMediaUrl` (default `null`) — when the profile can extract a playable URL
+  from the page, expose it here so `frames --at` and the analyze sidestep can use it.
+
+Adding a new platform (Bitmovin, Theo, JW, Brightcove, Kaltura, …) is a one-line entry
+in the registry; the rest of the system iterates uniformly across all three browser-capture
+exit paths.
+
+### Autoplay-policy override
+
+Chromium's default refuses to autoplay video with audio without a user gesture, which can
+wedge some MSE-based players (the `el.play()` Promise rejects silently and the page never
+boots). Override via the three-layer resolver:
+
+1. **Per-run** `--autoplay-policy <default | no-user-gesture-required>` on
+   `analyze`, `transcribe`, `queue enqueue`, `batch run`.
+2. **Per-host** map in `capture.browser.autoplayPolicyByHost`. Keys are hostnames; values
+   are policies. A leading `*.` is a wildcard suffix match
+   (e.g. `"*.event.microsoft.com": "no-user-gesture-required"`); bare hostnames match
+   exactly. Exact match beats wildcards; among wildcards, longest match wins.
+3. **Global** `capture.browser.autoplayPolicy` config key. Defaults to `"default"` — no
+   `--autoplay-policy` flag is passed to Chromium, so existing setups are unaffected.
+
+Values are strings (not booleans) so future Chromium policies (e.g.
+`user-gesture-required`, `document-user-activation-required`) extend without schema bumps.
+Unknown values silently collapse to `"default"` so a typo never wedges the launch.
 
 ### Diagnostic capture (`--capture-debug`)
 
@@ -991,6 +1100,53 @@ zakira-replay index query runs\example-run "secure tunnel performance" --backend
 ```
 
 ONNX embedding support expects a BERT/WordPiece-style `vocab.txt` plus an ONNX model with common text inputs such as `input_ids`, `attention_mask`, and optional `token_type_ids`. Zakira.Replay does not bundle a model.
+
+#### Cross-run / conference index
+
+`index build-conference <id> --runs <pattern>` aggregates `evidence.json` from N completed runs into a single searchable JSON index for an entire conference / event / topic sweep, at `<runs-root>/.indexes/<conferenceId>/index.json`. Each document carries its origin run's `RunId` and the original `SourceUrl` so query results attribute each hit to a specific session and carry a deep link.
+
+```bash
+# Pull every run under the default artifact root into a conference index.
+zakira-replay index build-conference build-2026 --runs "runs/*"
+
+# Or pick specific runs (paths or globs, comma- or semicolon-separated).
+zakira-replay index build-conference build-2026 --runs "runs/key01,runs/brk101,runs/brk205"
+
+# Query by conference id; ResolveQueryTarget figures out the path under .indexes/.
+zakira-replay index query build-2026 "Foundry hosted agents" --top 10 --output-format json
+```
+
+Each `SearchMatch` returned by a cross-run query carries:
+
+- `runId` — the originating run id (e.g. `"key01"`).
+- `sourceUrl` — the original session URL (`evidence.WebpageUrl ?? evidence.Source`).
+- `deepLink` — a time-anchored URL the user / agent can open directly (`?t=Ns` for
+  YouTube, `?nav=t=…` for SharePoint Stream, `#t=N` for everything else including Build /
+  Medius).
+- `timestamp`, `startSeconds`, `endSeconds` — the cue's position in the source.
+- `path` — the artifact (frame / OCR snippet) the hit came from, when applicable.
+
+Document frequency for TF-IDF is computed across the **merged corpus** (not per-run-then-merged), so per-session rare terms like a single product name rank above globally common words across the conference. Per-run ingest failures (missing `evidence.json`, unparseable JSON) are non-fatal — recorded in `SearchIndexConferenceBuildResult.Skipped[]` and reported on stdout.
+
+#### Conference workflow (recommended for agent-driven "book of a conference")
+
+```pwsh
+# 1) Enqueue each session — captions + frames via the inline-media sidestep, no downloads,
+#    4 in parallel. Per-host autoplay map (config) optional; not required because the
+#    --prefer-inline-media path doesn't engage the player.
+zakira-replay queue enqueue "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions" `
+    --queue-id build-2026 --capture-mode browser --frames 5 --frame-strategy interval `
+    --caption-languages en --prefer-inline-media
+# ...repeat per session...
+
+zakira-replay queue run --queue-id build-2026 --concurrency 4 --retries 2
+
+# 2) After all runs complete, build the cross-conference index.
+zakira-replay index build-conference build-2026 --runs "runs/*"
+
+# 3) The agent queries across the whole conference; every hit comes with a deep link.
+zakira-replay index query build-2026 "Maia 200 announcement" --top 10 --output-format json
+```
 
 Download a compatible local ONNX embedding model with either command:
 

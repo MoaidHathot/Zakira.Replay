@@ -103,12 +103,17 @@ public sealed class ReplayTools
         [Description("Per-run override of frames.sceneSafetyCap.")] int? sceneSafetyCap = null,
         [Description("Reuse a previous run with matching source and options.")] bool cache = false,
         [Description("Recompute even if the run id already has a completed manifest.")] bool force = false,
+        [Description("Comma-separated languages to also persist as transcript.<lang>.md alongside the primary transcript. Off by default.")] string? secondaryCaptionLanguages = null,
+        [Description("Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly (Microsoft Build/Medius).")] bool preferInlineMedia = false,
+        [Description("Chromium autoplay-policy override: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.")] string? autoplayPolicy = null,
+        [Description("Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: the run emits MEDIA_DOWNLOAD_DECLINED rather than silently consuming bandwidth.")] bool? allowMediaDownload = null,
         CancellationToken cancellationToken = default)
     {
         var request = BuildAnalyzeRequest(source, visionInstruction, ocrInstruction, noTranscript, frames, runId, audio, stt, ocr, vision,
             diarize, numSpeakers, diarizeThreshold, maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode,
             smartCrop, smartCropProfile, captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser,
-            captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force);
+            captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force,
+            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload);
         var job = jobManager.Create(request);
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -161,12 +166,17 @@ public sealed class ReplayTools
         [Description("Frames per minute for interval sampling.")] int? framesPerMinute = null,
         [Description("Per-run scene safety cap.")] int? sceneSafetyCap = null,
         [Description("Reuse cached run.")] bool cache = false,
-        [Description("Force recompute.")] bool force = false)
+        [Description("Force recompute.")] bool force = false,
+        [Description("Comma-separated languages to also persist as transcript.<lang>.md alongside the primary transcript. Off by default.")] string? secondaryCaptionLanguages = null,
+        [Description("Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly (Microsoft Build/Medius).")] bool preferInlineMedia = false,
+        [Description("Chromium autoplay-policy override: default | no-user-gesture-required.")] string? autoplayPolicy = null,
+        [Description("Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: emits MEDIA_DOWNLOAD_DECLINED.")] bool? allowMediaDownload = null)
     {
         var request = BuildAnalyzeRequest(source, visionInstruction, ocrInstruction, noTranscript, frames, runId, audio, stt, ocr, vision,
             diarize, numSpeakers, diarizeThreshold, maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode,
             smartCrop, smartCropProfile, captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser,
-            captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force);
+            captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force,
+            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload);
         var job = jobManager.Create(request);
         return Serialize(job.Snapshot(includeLogs: false));
     }
@@ -242,6 +252,10 @@ public sealed class ReplayTools
         [Description("cookies-from-browser spec.")] string? cookiesFromBrowser = null,
         [Description("Reuse cached run.")] bool cache = false,
         [Description("Force recompute.")] bool force = false,
+        [Description("Comma-separated languages to also persist as transcript.<lang>.md.")] string? secondaryCaptionLanguages = null,
+        [Description("Skip in-browser play+duration probe; ffmpeg-seek the inline HLS URL (Build/Medius fast path).")] bool preferInlineMedia = false,
+        [Description("Chromium autoplay-policy override: default | no-user-gesture-required.")] string? autoplayPolicy = null,
+        [Description("Opt in to downloading source video locally. Default off.")] bool? allowMediaDownload = null,
         CancellationToken cancellationToken = default)
     {
         var queue = new AnalysisQueue(pipelineFactory);
@@ -266,7 +280,11 @@ public sealed class ReplayTools
             CookiesFromBrowser: cookiesFromBrowser,
             OcrProvider: OcrProviderFactory.Normalize(ocrProvider),
             VisionProvider: VisionProviderFactory.Normalize(visionProvider),
-            UseDiarization: diarize);
+            UseDiarization: diarize,
+            SecondaryCaptionLanguages: ParseCaptionLanguages(secondaryCaptionLanguages),
+            PreferInlineMedia: preferInlineMedia,
+            AutoplayPolicy: autoplayPolicy,
+            AllowMediaDownload: allowMediaDownload);
         var result = await queue.EnqueueAsync(queueId, request, jobId, retries, cancellationToken).ConfigureAwait(false);
         return Serialize(new
         {
@@ -452,9 +470,9 @@ public sealed class ReplayTools
     }
 
     [McpServerTool(Name = "index.query")]
-    [Description("Queries a Zakira.Replay search index or run directory.")]
+    [Description("Queries a Zakira.Replay search index or run directory. Target accepts: a direct file path; a run directory (auto-resolves search/index.json or search/index.sqlite); or a conference id from a prior index.build-conference (resolves to <runs-root>/.indexes/<slug>/index.json).")]
     public async Task<string> IndexQueryAsync(
-        [Description("Run directory or search/index.json path.")] string target,
+        [Description("Run directory, search/index.json path, or conference id from index.build-conference.")] string target,
         [Description("Search query string.")] string query,
         [Description("Maximum matches.")] int top = 5,
         [Description("Search backend: auto (default), json, sqlite, sqlite-onnx.")] string? backend = null,
@@ -476,8 +494,87 @@ public sealed class ReplayTools
             EmbeddingDimensions: embeddingDimensions,
             OnnxModel: onnxModel,
             OnnxModelKind: onnxModelKind);
-        var result = await searchService.QueryAsync(target, query, top, options, cancellationToken).ConfigureAwait(false);
+        // Polymorphic target: file path, run dir, or conference slug under .indexes/.
+        var resolved = SearchIndexService.ResolveQueryTarget(target, ArtifactStore.GetDefaultRootDirectory()) ?? target;
+        var result = await searchService.QueryAsync(resolved, query, top, options, cancellationToken).ConfigureAwait(false);
         return Serialize(result);
+    }
+
+    [McpServerTool(Name = "index.build-conference")]
+    [Description("Aggregates evidence.json from multiple completed runs into one cross-run / conference search index at <runs-root>/.indexes/<conferenceId>/index.json. Per-document RunId + SourceUrl let query results attribute each hit to its originating session with a deep link.")]
+    public async Task<string> IndexBuildConferenceAsync(
+        [Description("Stable id for the conference index (e.g. 'build-2026'). Slugified on disk.")] string conferenceId,
+        [Description("Comma- or semicolon-separated list of run directory paths or globs. Use 'runs/*' to ingest every run under the default artifact root.")] string runs,
+        CancellationToken cancellationToken = default)
+    {
+        if (string.IsNullOrWhiteSpace(runs))
+        {
+            throw new ReplayException("'runs' is required: pass a comma-separated list of paths or globs (e.g. 'runs/*').");
+        }
+
+        var artifactRoot = ArtifactStore.GetDefaultRootDirectory();
+        var runDirectories = ExpandRunDirectories(runs, artifactRoot);
+        if (runDirectories.Count == 0)
+        {
+            return Serialize(new
+            {
+                conferenceId,
+                indexPath = (string?)null,
+                documentCount = 0,
+                includedRuns = Array.Empty<string>(),
+                skipped = Array.Empty<object>(),
+                error = $"No run directories matched 'runs: {runs}'."
+            });
+        }
+
+        var result = await searchService.BuildConferenceAsync(conferenceId, runDirectories, artifactRoot, cancellationToken).ConfigureAwait(false);
+        return Serialize(new
+        {
+            conferenceId = result.ConferenceId,
+            indexPath = result.IndexPath,
+            documentCount = result.DocumentCount,
+            includedRuns = result.IncludedRuns,
+            skipped = result.Skipped,
+            createdAt = result.CreatedAt
+        });
+    }
+
+    /// <summary>
+    /// Same glob/path expansion as CliApp.ExpandRunDirectories. Inlined here so the MCP tool
+    /// doesn't have to depend on the CLI module.
+    /// </summary>
+    private static IReadOnlyList<string> ExpandRunDirectories(string raw, string artifactRoot)
+    {
+        var parts = raw.Split([',', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var result = new List<string>();
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var part in parts)
+        {
+            foreach (var dir in ExpandOne(part, artifactRoot))
+            {
+                var full = Path.GetFullPath(dir);
+                if (seen.Add(full)) result.Add(full);
+            }
+        }
+        return result;
+    }
+
+    private static IEnumerable<string> ExpandOne(string spec, string artifactRoot)
+    {
+        if (spec.Contains('*') || spec.Contains('?'))
+        {
+            var root = Path.GetDirectoryName(spec);
+            var pattern = Path.GetFileName(spec);
+            if (string.IsNullOrEmpty(root)) root = artifactRoot;
+            if (!Directory.Exists(root)) yield break;
+            foreach (var dir in Directory.EnumerateDirectories(root!, pattern)) yield return dir;
+            yield break;
+        }
+
+        if (Directory.Exists(spec)) { yield return spec; yield break; }
+
+        var resolved = Path.Combine(artifactRoot, spec);
+        if (Directory.Exists(resolved)) yield return resolved;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -558,7 +655,8 @@ public sealed class ReplayTools
         int maxAiFrames, string? llmProvider, string? model, string? ocrProvider, string? visionProvider, string? localVisionMode,
         bool? smartCrop, string? smartCropProfile, string? captureMode, string? authProfile, string? frameStrategy, bool everyFrame,
         string? cookies, string? cookiesFromBrowser, string? captionLanguages, bool? slideGrouping, int? slideHashDistance,
-        int? framesPerMinute, int? sceneSafetyCap, bool cache, bool force)
+        int? framesPerMinute, int? sceneSafetyCap, bool cache, bool force,
+        string? secondaryCaptionLanguages, bool preferInlineMedia, string? autoplayPolicy, bool? allowMediaDownload)
     {
         return new AnalyzeRequest(
             Source: source,
@@ -593,7 +691,11 @@ public sealed class ReplayTools
             NumSpeakers: numSpeakers,
             DiarizationThreshold: diarizeThreshold is null ? null : (float)diarizeThreshold.Value,
             VisionProvider: VisionProviderFactory.Normalize(visionProvider),
-            LocalVisionMode: localVisionMode);
+            LocalVisionMode: localVisionMode,
+            SecondaryCaptionLanguages: ParseCaptionLanguages(secondaryCaptionLanguages),
+            PreferInlineMedia: preferInlineMedia,
+            AutoplayPolicy: autoplayPolicy,
+            AllowMediaDownload: allowMediaDownload);
     }
 
     private static IReadOnlyList<string>? ParseCaptionLanguages(string? raw)

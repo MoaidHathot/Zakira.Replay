@@ -245,6 +245,29 @@ public sealed class BrowserCaptureConfig
     public long DebugMaxBodyBytes { get; set; } = 1L * 1024 * 1024;
 
     /// <summary>
+    /// Global autoplay-policy default for the headless browser. One of the constants in
+    /// <see cref="AutoplayPolicies"/> (currently <c>"default"</c> or
+    /// <c>"no-user-gesture-required"</c>; the schema is extensible). When the value is
+    /// <c>"default"</c> (the default), Chromium's normal autoplay policy applies.
+    /// </summary>
+    /// <remarks>
+    /// Per-run <c>--autoplay-policy</c> and the per-host map below both override this. The
+    /// global default is the right knob to flip on machines that exclusively analyse MSE-heavy
+    /// sources (e.g. a dedicated conference-recording box).
+    /// </remarks>
+    public string AutoplayPolicy { get; set; } = AutoplayPolicies.Default;
+
+    /// <summary>
+    /// Per-host overrides for the autoplay policy. Keys are hostnames; values are
+    /// <see cref="AutoplayPolicies"/> constants. A leading <c>*.</c> marks a suffix-wildcard
+    /// match (so <c>"*.event.microsoft.com"</c> matches <c>mediusprod.event.microsoft.com</c>);
+    /// bare hostnames match exactly. Exact matches beat wildcards; among wildcards, the
+    /// longest matching suffix wins. Per-host entries override <see cref="AutoplayPolicy"/>
+    /// but are overridden by a per-run <c>--autoplay-policy</c> flag.
+    /// </summary>
+    public Dictionary<string, string>? AutoplayPolicyByHost { get; set; }
+
+    /// <summary>
     /// Resolves <see cref="EdgeUserDataDir"/> to an absolute filesystem path, expanding any
     /// environment-variable references (e.g. <c>%LOCALAPPDATA%</c>) against the current
     /// machine's environment. When the configured value is null or whitespace, returns the

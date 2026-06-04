@@ -178,7 +178,9 @@ public sealed class BatchRunner
             UseDiarization: item.UseDiarization ?? manifest.UseDiarization ?? false,
             NumSpeakers: item.NumSpeakers ?? manifest.NumSpeakers,
             DiarizationThreshold: ResolveDiarizationThreshold(item.DiarizationThreshold ?? manifest.DiarizationThreshold),
-            SecondaryCaptionLanguages: item.SecondaryCaptionLanguages ?? manifest.SecondaryCaptionLanguages);
+            SecondaryCaptionLanguages: item.SecondaryCaptionLanguages ?? manifest.SecondaryCaptionLanguages,
+            PreferInlineMedia: item.PreferInlineMedia ?? manifest.PreferInlineMedia ?? false,
+            AutoplayPolicy: item.AutoplayPolicy ?? manifest.AutoplayPolicy);
 
     // Mirror the CLI: a diarization threshold only takes effect when positive; otherwise leave it
     // unset so the pipeline applies its configured default. Narrow double -> float to match
@@ -224,6 +226,10 @@ public sealed class BatchManifest
     public List<string>? CaptionLanguages { get; set; }
 
     public List<string>? SecondaryCaptionLanguages { get; set; }
+
+    public bool? PreferInlineMedia { get; set; }
+
+    public string? AutoplayPolicy { get; set; }
 
     public bool? SlideGrouping { get; set; }
 
@@ -301,6 +307,10 @@ public sealed class BatchItem
     public List<string>? CaptionLanguages { get; set; }
 
     public List<string>? SecondaryCaptionLanguages { get; set; }
+
+    public bool? PreferInlineMedia { get; set; }
+
+    public string? AutoplayPolicy { get; set; }
 
     public bool? SlideGrouping { get; set; }
 

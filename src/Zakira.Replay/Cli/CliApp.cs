@@ -1409,6 +1409,8 @@ public static class CliApp
         var browserAuth = new Option<string?>("--browser-auth") { Description = "Alias for --cookies-from-browser." };
         var captionLanguages = new Option<string?>("--caption-languages") { Description = "Caption languages, comma-separated." };
         var secondaryTranscripts = new Option<string?>("--secondary-transcripts") { Description = "Comma-separated languages to also persist as transcript.<lang>.md (default: none)." };
+        var preferInlineMedia = new Option<bool>("--prefer-inline-media") { Description = "Skip in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly." };
+        var autoplayPolicy = new Option<string?>("--autoplay-policy") { Description = "Override Chromium autoplay policy for this run. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset." };
         var noSlideGrouping = new Option<bool>("--no-slide-grouping") { Description = "Disable slide grouping." };
         var slideHashDistance = new Option<int?>("--slide-hash-distance") { Description = "Slide hash Hamming distance." };
         var framesPerMinute = new Option<int?>("--frames-per-minute") { Description = "Frames per minute for interval sampling." };
@@ -1421,7 +1423,7 @@ public static class CliApp
             visionInstruction, ocrInstruction, stt, audio, ocr, vision, diarize, numSpeakers, diarizeThreshold,
             maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode, smartCrop, smartCropProfile,
             captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser, browserAuth,
-            captionLanguages, secondaryTranscripts, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
+            captionLanguages, secondaryTranscripts, preferInlineMedia, autoplayPolicy, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
         };
 
         Func<ParseResult, string, bool, int, string?, AnalyzeRequest> apply = (parseResult, source, includeTranscript, frameCount, runId) =>
@@ -1480,7 +1482,9 @@ public static class CliApp
                 DiarizationThreshold: diarizationThreshold,
                 VisionProvider: resolvedVisionProvider,
                 LocalVisionMode: parseResult.GetValue(localVisionMode),
-                SecondaryCaptionLanguages: secondaryLangs);
+                SecondaryCaptionLanguages: secondaryLangs,
+                PreferInlineMedia: parseResult.GetValue(preferInlineMedia),
+                AutoplayPolicy: parseResult.GetValue(autoplayPolicy));
         };
 
         return (options, apply);

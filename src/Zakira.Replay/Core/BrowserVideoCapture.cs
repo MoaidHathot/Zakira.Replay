@@ -39,7 +39,13 @@ public sealed record BrowserCaptureRequest(
     // Used by FrameCaptureService for ad-hoc spot frames against sources where the only thing
     // we need is the inline media URL the player config exposes (e.g. Medius / Build sessions
     // whose HLS m3u8 ships inline in the embed HTML). Cuts a ~25s probe to ~3-5s.
-    bool MetadataOnly = false);
+    bool MetadataOnly = false,
+    // Chromium autoplay-policy override for this capture, e.g. AutoplayPolicies.NoUserGestureRequired
+    // to bypass the autoplay-with-sound block that wedges MSE/Shaka players (Medius/Build,
+    // some Bitmovin/Theo deployments). When null, no flag is passed and Chromium's default
+    // applies. Resolved by AutoplayPolicies.Resolve at the pipeline boundary (CLI > host map
+    // > global config default) so this field only needs the final, already-normalised value.
+    string? AutoplayPolicy = null);
 
 public sealed record BrowserCaptureResult(
     IReadOnlyList<FrameArtifact> Frames,
@@ -125,7 +131,7 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 {
                     ExecutablePath = edge,
                     Headless = true,
-                    Args = ["--disable-gpu", $"--profile-directory={profileSubdir}"],
+                    Args = BuildChromiumArgs(request, $"--profile-directory={profileSubdir}"),
                     ViewportSize = new ViewportSize { Width = 1920, Height = 1080 }
                 };
                 if (request.Debug)
@@ -160,7 +166,7 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                 {
                     ExecutablePath = edge,
                     Headless = true,
-                    Args = ["--disable-gpu"]
+                    Args = BuildChromiumArgs(request)
                 }).ConfigureAwait(false);
 
                 var contextOptions = new BrowserNewContextOptions
@@ -313,7 +319,9 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             {
                 // Give late-arriving response bodies (the Medius embed iframe document is
                 // typically last) a beat to land in the interceptor before we unsubscribe.
-                await page.WaitForTimeoutAsync(500).ConfigureAwait(false);
+                // 3s is comfortable for Build's iframe-embed shape; empirical observations on
+                // KEY01 show the embed document arriving 1-2s after page Load.
+                await page.WaitForTimeoutAsync(3_000).ConfigureAwait(false);
                 if (captionCollector is not null) page.Response -= captionCollector.OnResponse;
                 if (mediaCollector is not null) page.Response -= mediaCollector.OnResponse;
                 if (streamInterceptor is not null) page.Response -= streamInterceptor.OnResponse;
@@ -324,11 +332,29 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
                     await debugRecorder.FlushAsync(cancellationToken).ConfigureAwait(false);
                 }
 
+                // Still download the inline captions every interceptor discovered, so callers
+                // using MetadataOnly for the fast-frames path also get the transcript. Cheap:
+                // each caption is one HTTP GET (~200KB for a typical Build session). Loop the
+                // registry and adopt the first non-empty result, mirroring the post-frame
+                // fallback in the full path.
+                IReadOnlyList<BrowserCapturedCaption> metadataCaptions = [];
+                foreach (var interceptor in inlineCaptionInterceptors)
+                {
+                    if (!interceptor.HasDiscoveries) continue;
+                    var harvested = await interceptor.DownloadAsync(
+                        context, request.CaptionLanguagePreferences ?? [], cancellationToken).ConfigureAwait(false);
+                    if (harvested.Count > 0)
+                    {
+                        metadataCaptions = harvested;
+                        break;
+                    }
+                }
+
                 return new BrowserCaptureResult(
                     Frames: [],
                     DurationSeconds: null,
                     Warnings: warnings,
-                    Captions: [],
+                    Captions: metadataCaptions,
                     DownloadedMediaPath: null,
                     SessionMetadata: sessionMetadata,
                     InlineMediaUrl: inlineCaptionInterceptors.Select(i => i.DiscoveredMediaUrl).FirstOrDefault(u => !string.IsNullOrWhiteSpace(u)));
@@ -604,6 +630,31 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             || u.Contains("/_layouts/15/wopi.ashx?ru=")
             || u.Contains("login.partner.microsoftonline.cn")
             || u.Contains("idsrv/account/login");
+    }
+
+    /// <summary>
+    /// Build the Chromium command-line argument array for a single capture. Always includes
+    /// <c>--disable-gpu</c> (software rendering path is the stable one for headless), plus
+    /// any per-request <see cref="BrowserCaptureRequest.AutoplayPolicy"/> override the
+    /// pipeline resolved from the CLI flag / host map / global config default.
+    /// </summary>
+    /// <param name="extras">Extra static args the caller wants appended verbatim (e.g.
+    /// <c>--profile-directory=Default</c> for the persistent-context launch).</param>
+    private static IEnumerable<string> BuildChromiumArgs(BrowserCaptureRequest request, params string[] extras)
+    {
+        var args = new List<string> { "--disable-gpu" };
+        args.AddRange(extras);
+
+        // When the resolved policy is "default", ToChromiumArg returns null and nothing is
+        // appended — so this path is a no-op for everyone except sources that explicitly
+        // need the override (Medius/Build via host map, or --autoplay-policy on the CLI).
+        var autoplayArg = AutoplayPolicies.ToChromiumArg(AutoplayPolicies.Normalize(request.AutoplayPolicy));
+        if (autoplayArg is not null)
+        {
+            args.Add(autoplayArg);
+        }
+
+        return args;
     }
 
     private static async Task PlayVideoAsync(IPage page, BrowserCaptureRequest request, List<ReplayWarning> warnings, IProgress<string>? progress)

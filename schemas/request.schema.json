@@ -103,6 +103,23 @@
       "description": "Sub-mode for the local vision provider. `heuristic` uses zero models. `clip` adds CLIP zero-shot classification for the `kind` field. `clip-blip` (default for the local provider) additionally runs BLIP image captioning to fill `freeText`. Ignored when `visionProvider` is `copilot`.",
       "type": ["string", "null"],
       "enum": ["heuristic", "clip", "clip-blip", null]
+    },
+    "secondaryCaptionLanguages": {
+      "description": "Languages (BCP-47 primary subtag, or 'auto') to also persist as transcript.<lang>.md alongside the primary. Off by default.",
+      "type": ["array", "null"],
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "preferInlineMedia": {
+      "description": "Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly. Defaults to false.",
+      "type": ["boolean", "null"]
+    },
+    "autoplayPolicy": {
+      "description": "Per-run override for the Chromium autoplay policy. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.",
+      "type": ["string", "null"]
+    },
+    "captureDebug": {
+      "description": "Diagnostic capture toggle (writes network.log, response bodies, texttracks state, HAR to runs/<id>/debug/). Per-run override for capture.browser.debug. Null = inherit config.",
+      "type": ["boolean", "null"]
     }
   }
 }

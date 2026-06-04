@@ -522,6 +522,164 @@ public sealed class BrowserVideoCaptureTests
         data.SaveTo(stream);
     }
 
+    [Fact]
+    public async Task AnalyzeAsyncFallsBackToInlineMediaUrlWhenDurationUnresolvedAndUrlDiscovered()
+    {
+        // Simulates the KEY01 / Medius case: the JS player never boots so DurationSeconds is
+        // null and the in-browser FrameProducer captured nothing, BUT the Medius interceptor
+        // recovered the HLS URL from the embed HTML and surfaced it as InlineMediaUrl. The
+        // pipeline must hand that URL to ffmpeg and produce frames.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+
+        var browser = new FakeBrowserCapture
+        {
+            DurationSeconds = null,
+            FrameProducer = _ => [],
+            InlineMediaUrl = "https://stream.event.microsoft.com/prodwe/x/master.m3u8"
+        };
+        var ffmpeg = new RecordingFfmpegClient { ProbedDuration = 7200 };
+        var ytDlp = new RecordingYtDlpClient { Info = new YtDlpInfo { Id = "key01", Language = "en" }, ResolvedMediaUrl = null };
+        var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg, _ => null, browser);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 5,
+            RunId: "sidestep-fallback",
+            CaptureMode: CaptureModes.Browser),
+            progress: null, CancellationToken.None);
+
+        // ffmpeg received the inline HLS URL (not yt-dlp's null, not a local download path).
+        Assert.Equal("https://stream.event.microsoft.com/prodwe/x/master.m3u8", ffmpeg.LastMediaSource);
+        // 5 frames produced via the sidestep — no empty-frames result.
+        Assert.Equal(5, result.Manifest.Frames.Count);
+        // Info breadcrumb explains the path taken.
+        Assert.Contains(result.Manifest.Warnings,
+            w => w.Code == ReplayWarningCodes.CaptureBrowserFallback && w.Message.Contains("duration-unresolved-fallback", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncPreferInlineMediaSkipsFullCaptureAndUsesSidestep()
+    {
+        // --prefer-inline-media bypasses the full browser capture; the MetadataOnly probe
+        // returns the inline URL, ffmpeg seeks from it. Cuts a ~25s probe to ~3-5s on
+        // sources where we know the player won't boot.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+
+        var browser = new FakeBrowserCapture
+        {
+            DurationSeconds = null,
+            FrameProducer = _ => [],
+            InlineMediaUrl = "https://stream.event.microsoft.com/prodwe/x/master.m3u8"
+        };
+        var ffmpeg = new RecordingFfmpegClient { ProbedDuration = 7200 };
+        var ytDlp = new RecordingYtDlpClient { ResolvedMediaUrl = null };
+        var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg, _ => null, browser);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 3,
+            RunId: "prefer-inline-media",
+            CaptureMode: CaptureModes.Browser,
+            PreferInlineMedia: true),
+            progress: null, CancellationToken.None);
+
+        Assert.NotNull(browser.LastRequest);
+        Assert.True(browser.LastRequest!.MetadataOnly,
+            "PreferInlineMedia must drive the browser via the MetadataOnly fast path, not the full capture.");
+        Assert.Equal(3, result.Manifest.Frames.Count);
+        Assert.Equal("https://stream.event.microsoft.com/prodwe/x/master.m3u8", ffmpeg.LastMediaSource);
+        Assert.Contains(result.Manifest.Warnings,
+            w => w.Code == ReplayWarningCodes.CaptureBrowserFallback && w.Message.Contains("prefer-inline-media", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncPreferInlineMediaFallsThroughToFullCaptureWhenNoInlineUrl()
+    {
+        // PreferInlineMedia is best-effort: when the probe yields no URL, we fall back to the
+        // regular browser-capture path so the request still has a chance to produce frames.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+
+        var browser = new FakeBrowserCapture
+        {
+            DurationSeconds = 60.0,
+            FrameProducer = run =>
+            {
+                var framePath = "frames/scene-0001.jpg";
+                WriteJpeg(run.GetPath(framePath));
+                return [new FrameArtifact("scene-0001", framePath, 7.5, "00:07")];
+            },
+            InlineMediaUrl = null,
+        };
+        var ffmpeg = new RecordingFfmpegClient();
+        var ytDlp = new RecordingYtDlpClient();
+        var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg, _ => null, browser);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://example.test/private-portal/video",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "prefer-inline-fallthrough",
+            CaptureMode: CaptureModes.Browser,
+            PreferInlineMedia: true),
+            progress: null, CancellationToken.None);
+
+        // We got the frame from the full-capture path (FrameProducer ran, not ffmpeg).
+        Assert.Single(result.Manifest.Frames);
+        Assert.Null(ffmpeg.LastMediaSource);
+        Assert.Contains(result.Manifest.Warnings,
+            w => w.Code == ReplayWarningCodes.CaptureBrowserFallback && w.Message.Contains("no inline media URL", StringComparison.Ordinal));
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncResolvesAutoplayPolicyFromHostMapAndThreadsItToBrowser()
+    {
+        // capture.browser.autoplayPolicyByHost says "build.microsoft.com" gets the no-gesture
+        // policy. CLI override is unset. The resolved policy must reach the browser request.
+        using var temp = new TestTempDirectory();
+        var configPath = temp.GetPath("Zakira.Replay.json");
+        await File.WriteAllTextAsync(configPath, """
+        {
+          "capture": {
+            "browser": {
+              "autoplayPolicyByHost": { "build.microsoft.com": "no-user-gesture-required" }
+            }
+          }
+        }
+        """, CancellationToken.None);
+
+        var previousEnv = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configPath);
+        try
+        {
+            var store = new ArtifactStore(temp.GetPath("runs"));
+            var browser = new FakeBrowserCapture { DurationSeconds = 60.0, FrameProducer = _ => [] };
+            var pipeline = new AnalysisPipeline(store, new RecordingYtDlpClient(), new RecordingFfmpegClient(), _ => null, browser);
+
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: false,
+                FrameCount: 1,
+                RunId: "autoplay-host-map",
+                CaptureMode: CaptureModes.Browser),
+                progress: null, CancellationToken.None);
+
+            Assert.Equal("no-user-gesture-required", browser.LastAutoplayPolicy);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousEnv);
+        }
+    }
+
     private sealed class FakeBrowserCapture : IBrowserVideoCaptureClient
     {
         public bool WasCalled { get; private set; }
@@ -534,12 +692,27 @@ public sealed class BrowserVideoCaptureTests
 
         public List<ReplayWarning> Warnings { get; } = [];
 
+        /// <summary>
+        /// Inline media URL the fake reports as if a registered interceptor had discovered it.
+        /// When set + <see cref="DurationSeconds"/> null + <see cref="FrameProducer"/> null/empty,
+        /// exercises the automatic sidestep fallback path in CaptureFramesAndCaptionsWithBrowserAsync.
+        /// </summary>
+        public string? InlineMediaUrl { get; init; }
+
+        /// <summary>Records the last request so tests can assert MetadataOnly was set.</summary>
+        public BrowserCaptureRequest? LastRequest { get; private set; }
+
+        /// <summary>Records the resolved AutoplayPolicy passed through to the launch path.</summary>
+        public string? LastAutoplayPolicy { get; private set; }
+
         public Task<BrowserCaptureResult> CaptureAsync(BrowserCaptureRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
         {
             WasCalled = true;
+            LastRequest = request;
+            LastAutoplayPolicy = request.AutoplayPolicy;
             var frames = FrameProducer?.Invoke(request.Run) ?? [];
             var captions = CaptionProducer?.Invoke(request.Run) ?? [];
-            return Task.FromResult(new BrowserCaptureResult(frames, DurationSeconds, Warnings, captions));
+            return Task.FromResult(new BrowserCaptureResult(frames, DurationSeconds, Warnings, captions, InlineMediaUrl: InlineMediaUrl));
         }
     }
 
@@ -583,10 +756,22 @@ public sealed class BrowserVideoCaptureTests
 
         public Func<VideoRun, IReadOnlyList<FrameArtifact>>? FrameProducer { get; init; }
 
+        /// <summary>Optional probed-duration value returned to the pipeline.</summary>
+        public double? ProbedDuration { get; init; }
+
+        /// <summary>Records the last mediaSource ExtractFramesAsync was called with.</summary>
+        public string? LastMediaSource { get; private set; }
+
         public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken)
         {
             ExtractFramesCalled = true;
-            var frames = FrameProducer?.Invoke(run) ?? [];
+            LastMediaSource = mediaSource;
+            // When no producer was wired up, synthesise `count` placeholder frames so tests that
+            // only care about the path-taken (e.g. sidestep wired correctly) get a non-empty result.
+            var frames = FrameProducer?.Invoke(run)
+                ?? Enumerable.Range(0, Math.Max(0, count))
+                    .Select(i => new FrameArtifact($"scene-{i + 1:0000}", $"frames/scene-{i + 1:0000}.jpg", i, Timestamp.Format(i)))
+                    .ToArray();
             return Task.FromResult(frames);
         }
 
@@ -612,7 +797,7 @@ public sealed class BrowserVideoCaptureTests
 
         public Task<double?> TryProbeDurationAsync(string mediaSource, CancellationToken cancellationToken)
         {
-            return Task.FromResult<double?>(null);
+            return Task.FromResult(ProbedDuration);
         }
 
         public Task<IReadOnlyList<SilenceWindow>> DetectSilenceAsync(string mediaSource, SilenceDetectionOptions options, CancellationToken cancellationToken)

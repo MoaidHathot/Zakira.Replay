@@ -106,7 +106,11 @@
         "numSpeakers": { "type": ["integer", "null"], "minimum": 1 },
         "diarizationThreshold": { "type": ["number", "null"], "exclusiveMinimum": 0 },
         "visionProvider": { "type": "string", "enum": ["copilot", "local"] },
-        "localVisionMode": { "type": ["string", "null"], "enum": ["heuristic", "clip", "clip-blip", null] }
+        "localVisionMode": { "type": ["string", "null"], "enum": ["heuristic", "clip", "clip-blip", null] },
+        "secondaryCaptionLanguages": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
+        "preferInlineMedia": { "type": ["boolean", "null"] },
+        "autoplayPolicy": { "type": ["string", "null"] },
+        "captureDebug": { "type": ["boolean", "null"] }
       }
     }
   }

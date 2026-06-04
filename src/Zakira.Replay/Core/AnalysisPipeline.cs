@@ -1368,6 +1368,60 @@ public sealed class AnalysisPipeline
                 Severity: ReplayWarningSeverities.Info));
         }
 
+        // Resolve the autoplay policy from the 3-layer chain (CLI / per-request override >
+        // per-host map in config > global default). Computed once here so the launch path is
+        // pure: BrowserVideoCapture just normalises whatever string we hand it.
+        var autoplayPolicy = AutoplayPolicies.Resolve(
+            cliOverride: request.AutoplayPolicy,
+            byHost: config.Capture.Browser.AutoplayPolicyByHost,
+            globalDefault: config.Capture.Browser.AutoplayPolicy,
+            sourceUrl: request.Source);
+
+        // PreferInlineMedia short-circuit: skip the in-browser play+duration probe entirely,
+        // resolve the inline media URL via a metadata-only probe, then drive ffmpeg directly.
+        // The fast path for sources whose JS player can't boot headlessly (Medius/Build).
+        // When no inline URL is discovered, falls through to the normal capture below.
+        if (request.PreferInlineMedia)
+        {
+            progress?.Report("Resolving inline media URL via metadata-only browser probe...");
+            var probeRequest = new BrowserCaptureRequest(
+                Url: request.Source,
+                Run: run,
+                FrameCount: 0,
+                PlayButtonSelector: config.Capture.Browser.PlayButtonSelector,
+                VideoElementSelector: string.IsNullOrWhiteSpace(config.Capture.Browser.VideoElementSelector) ? "video" : config.Capture.Browser.VideoElementSelector,
+                SeekWaitSeconds: config.Capture.Browser.SeekWaitSeconds,
+                DurationProbeTimeoutSeconds: config.Capture.Browser.DurationProbeTimeoutSeconds,
+                JpegQuality: config.Capture.Browser.JpegQuality,
+                CaptureCaptions: true,
+                MaxCaptionBytes: config.Capture.Browser.MaxCaptionBytes,
+                AuthStorageStatePath: authStoragePath,
+                EdgeUserDataDir: edgeUserDataDir,
+                EdgeProfileDirectory: edgeProfileDirectory,
+                Debug: request.CaptureDebug ?? config.Capture.Browser.Debug,
+                DebugMaxBodyBytes: config.Capture.Browser.DebugMaxBodyBytes,
+                CaptionLanguagePreferences: ResolveSubtitleLanguages(request.CaptionLanguages, info),
+                MetadataOnly: true,
+                AutoplayPolicy: autoplayPolicy);
+
+            var probeResult = await browserCaptureClient.CaptureAsync(probeRequest, progress, cancellationToken).ConfigureAwait(false);
+            foreach (var w in probeResult.Warnings) warnings.Add(w);
+
+            if (!string.IsNullOrWhiteSpace(probeResult.InlineMediaUrl))
+            {
+                var sidestepFrames = await ExtractFramesViaInlineMediaAsync(
+                    probeResult.InlineMediaUrl!, request, run, frameCount, info, warnings, progress, source: "prefer-inline-media", cancellationToken).ConfigureAwait(false);
+                return (sidestepFrames, probeResult.Captions, audioPath: null, probeResult.SessionMetadata);
+            }
+
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptureBrowserFallback,
+                "--prefer-inline-media was requested but no inline media URL was discovered; falling back to full browser capture.",
+                Source: "playwright",
+                Severity: ReplayWarningSeverities.Info));
+            // Fall through to the regular capture below.
+        }
+
         var browserCaptureRequest = new BrowserCaptureRequest(
             Url: request.Source,
             Run: run,
@@ -1398,7 +1452,8 @@ public sealed class AnalysisPipeline
             // Resolved subtitle-language preference order, forwarded so platform-specific
             // interceptors (e.g. Medius) that advertise many languages download only the
             // relevant one(s) rather than every track.
-            CaptionLanguagePreferences: ResolveSubtitleLanguages(request.CaptionLanguages, info));
+            CaptionLanguagePreferences: ResolveSubtitleLanguages(request.CaptionLanguages, info),
+            AutoplayPolicy: autoplayPolicy);
 
         var result = await browserCaptureClient.CaptureAsync(browserCaptureRequest, progress, cancellationToken).ConfigureAwait(false);
         foreach (var warning in result.Warnings)
@@ -1433,7 +1488,72 @@ public sealed class AnalysisPipeline
             }
         }
 
-        return (result.Frames, result.Captions, audioPath, result.SessionMetadata);
+        // Automatic sidestep fallback: the player never engaged (no frames + no resolved
+        // duration) BUT an interceptor recovered the inline media URL during navigation. Hand
+        // that URL to ffmpeg for strategy-aware extraction so analyze --frames N still
+        // produces frames for Medius/Build instead of returning an empty array.
+        var finalFrames = result.Frames;
+        if (finalFrames.Count == 0
+            && result.DurationSeconds is null
+            && !string.IsNullOrWhiteSpace(result.InlineMediaUrl))
+        {
+            finalFrames = await ExtractFramesViaInlineMediaAsync(
+                result.InlineMediaUrl!, request, run, frameCount, info, warnings, progress, source: "duration-unresolved-fallback", cancellationToken).ConfigureAwait(false);
+        }
+
+        return (finalFrames, result.Captions, audioPath, result.SessionMetadata);
+    }
+
+    /// <summary>
+    /// ffmpeg-based frame extraction over an inline-discovered HLS/DASH/MP4 URL. Used by the
+    /// <c>--prefer-inline-media</c> primary path AND the duration-unresolved automatic
+    /// fallback. Probes the URL for duration so strategy-aware extraction (interval, scene)
+    /// has a value to target, then hands off to the same <see cref="IFfmpegClient.ExtractFramesAsync"/>
+    /// the yt-dlp path uses — so the frames look identical regardless of how we got there.
+    /// </summary>
+    private async Task<IReadOnlyList<FrameArtifact>> ExtractFramesViaInlineMediaAsync(
+        string mediaUrl,
+        AnalyzeRequest request,
+        VideoRun run,
+        int frameCount,
+        YtDlpInfo info,
+        List<ReplayWarning> warnings,
+        IProgress<string>? progress,
+        string source,
+        CancellationToken cancellationToken)
+    {
+        progress?.Report($"Probing inline media URL for ffmpeg seek-based capture ({source})...");
+        try
+        {
+            var duration = await ffmpeg.TryProbeDurationAsync(mediaUrl, cancellationToken).ConfigureAwait(false);
+            if (duration is double d && info.DurationSeconds is null)
+            {
+                info.DurationSeconds = d;
+            }
+
+            var sceneCap = ResolveSceneSafetyCap(request);
+            var effectiveCount = frameCount > 0 ? frameCount : 7;
+            progress?.Report($"Extracting {effectiveCount} frame(s) via ffmpeg from inline media URL...");
+            var extracted = await ffmpeg.ExtractFramesAsync(
+                mediaUrl, run, effectiveCount, info.DurationSeconds, request.FrameStrategy, sceneCap, cancellationToken).ConfigureAwait(false);
+
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.CaptureBrowserFallback,
+                $"Captured {extracted.Count} frame(s) via ffmpeg seek-based extraction against the inline media URL ({source}).",
+                Source: "ffmpeg",
+                Severity: ReplayWarningSeverities.Info));
+
+            return extracted;
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.FramesDownloadFailed,
+                $"Inline-media frame extraction failed: {ex.Message}",
+                Source: "ffmpeg",
+                Severity: ReplayWarningSeverities.Warning));
+            return [];
+        }
     }
 
     private static string? ResolveAuthProfilePath(AnalyzeRequest request, ReplayConfig config, List<ReplayWarning> warnings)
@@ -2108,7 +2228,15 @@ public sealed record AnalyzeRequest(
     string VisionProvider = VisionProviders.Copilot,
     string? LocalVisionMode = null,
     bool? CaptureDebug = null,
-    IReadOnlyList<string>? SecondaryCaptionLanguages = null);
+    IReadOnlyList<string>? SecondaryCaptionLanguages = null,
+    // Skip the in-browser play+duration probe entirely; resolve the source's inline media URL
+    // (e.g. Medius coreConfiguration HLS manifest) and hand it straight to ffmpeg. The fast
+    // path for sources whose JS player won't boot headlessly. When the source exposes no
+    // inline URL, falls through to the regular browser capture.
+    bool PreferInlineMedia = false,
+    // Per-run override for the Chromium autoplay policy. See AutoplayPolicies for valid
+    // values; null = inherit from the host map / global config default.
+    string? AutoplayPolicy = null);
 
 public static class FrameSelectionStrategies
 {

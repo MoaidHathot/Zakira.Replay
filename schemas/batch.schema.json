@@ -31,6 +31,14 @@
       "type": ["array", "null"],
       "items": { "type": "string", "minLength": 1 }
     },
+    "preferInlineMedia": {
+      "description": "Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly.",
+      "type": ["boolean", "null"]
+    },
+    "autoplayPolicy": {
+      "description": "Chromium autoplay policy override for this batch. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.",
+      "type": ["string", "null"]
+    },
     "slideGrouping": { "type": ["boolean", "null"] },
     "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
     "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
@@ -78,6 +86,14 @@
             "description": "Languages (BCP-47 primary subtag, or 'auto') to also persist as transcript.<lang>.md alongside the primary. Off by default.",
             "type": ["array", "null"],
             "items": { "type": "string", "minLength": 1 }
+          },
+          "preferInlineMedia": {
+            "description": "Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly.",
+            "type": ["boolean", "null"]
+          },
+          "autoplayPolicy": {
+            "description": "Chromium autoplay policy override for this item. Values: default | no-user-gesture-required.",
+            "type": ["string", "null"]
           },
           "slideGrouping": { "type": ["boolean", "null"] },
           "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },

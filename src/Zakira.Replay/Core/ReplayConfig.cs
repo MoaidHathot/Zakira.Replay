@@ -147,6 +147,22 @@ public sealed class CaptureConfig
     /// </summary>
     public string Mode { get; set; } = CaptureModes.YtDlp;
 
+    /// <summary>
+    /// Master switch for downloading the source media to local disk as a fallback when no
+    /// direct media URL can be resolved. <b>Default false</b>: the pipeline emits
+    /// <see cref="ReplayWarningCodes.MediaDownloadDeclined"/> and returns empty
+    /// frames/audio rather than silently consuming bandwidth + disk. Set to true (or pass
+    /// <c>--allow-media-download</c> per-run) to opt in to the yt-dlp / browser STT-collector
+    /// download paths.
+    /// </summary>
+    /// <remarks>
+    /// Precedence: per-run <c>--allow-media-download</c> &gt; this global default. The flag
+    /// only enables; it never forces a download — direct-URL paths and the inline-media
+    /// sidestep (Medius/Build HLS) still run first and win when available, so flipping this
+    /// on does not change behaviour for sources that already work without downloads.
+    /// </remarks>
+    public bool AllowMediaDownload { get; set; }
+
     public BrowserCaptureConfig Browser { get; set; } = new();
 }
 

@@ -37,9 +37,19 @@ public sealed class ClipExtractionService
             mediaSource = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
             {
+                // Clip extraction inherently needs to re-encode a byte range — no inline
+                // sidestep helps here, so a download is the only path. Gate it on the
+                // request's opt-in (or the global config default); when declined, fail with
+                // a clear actionable error instead of silently pulling a multi-GB video.
+                var allowMediaDownload = request.AllowMediaDownload || new ConfigStore().Load().Capture.AllowMediaDownload;
+                if (!allowMediaDownload)
+                {
+                    throw new ReplayException(
+                        "Clip extraction needs to download the source media locally because no direct URL was reachable, but --allow-media-download is not set (and capture.allowMediaDownload is false in config). Pass --allow-media-download to opt in.");
+                }
                 warnings.Add(new ReplayWarning(
                     ReplayWarningCodes.ClipMediaUrlUnresolved,
-                    "Could not resolve a direct media URL; downloading media locally for clipping.",
+                    "Could not resolve a direct media URL; downloading media locally for clipping (--allow-media-download was set).",
                     Source: "yt-dlp",
                     Severity: ReplayWarningSeverities.Info));
                 mediaSource = await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
@@ -66,7 +76,12 @@ public sealed record ClipExtractionRequest(
     string? RunId = null,
     string? OutputName = null,
     string? CookiesPath = null,
-    string? CookiesFromBrowser = null);
+    string? CookiesFromBrowser = null,
+    // Opt-in to downloading the source video locally when no direct URL is reachable.
+    // Clip extraction has no inline-media sidestep (it must re-encode a byte range), so a
+    // download is the only path when this is true. Default false: extraction throws a
+    // clear ReplayException so the caller can prompt the user.
+    bool AllowMediaDownload = false);
 
 public sealed record ClipManifest(
     string SchemaVersion,

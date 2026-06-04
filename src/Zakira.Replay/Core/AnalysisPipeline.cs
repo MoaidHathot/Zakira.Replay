@@ -108,6 +108,11 @@ public sealed class AnalysisPipeline
 
         var mediaSource = isLocalFile ? localPath : (string?)null;
         string? downloadedMediaSource = null;
+        // Resolve the media-download opt-in once: per-request flag wins, then global config
+        // default. Default false. Gates every yt-dlp.DownloadMediaForProcessingAsync call in
+        // this method so a misconfigured / out-of-cassette source never silently pulls GB of
+        // bytes when the agent only asked for frames or transcripts.
+        var allowMediaDownload = request.AllowMediaDownload ?? new ConfigStore().Load().Capture.AllowMediaDownload;
         async Task<string?> GetDownloadedMediaSourceAsync()
         {
             if (isLocalFile)
@@ -120,7 +125,17 @@ public sealed class AnalysisPipeline
                 return downloadedMediaSource;
             }
 
-            progress?.Report("Downloading media locally with yt-dlp for ffmpeg fallback...");
+            if (!allowMediaDownload)
+            {
+                warnings.Add(new ReplayWarning(
+                    ReplayWarningCodes.MediaDownloadDeclined,
+                    "Analyze would have downloaded the source media to local disk for ffmpeg processing, but --allow-media-download is not set (and capture.allowMediaDownload is false in config). Pass --allow-media-download to opt in, or use --capture-mode browser --prefer-inline-media for Medius/Build sources.",
+                    Source: "yt-dlp",
+                    Severity: ReplayWarningSeverities.Error));
+                return null;
+            }
+
+            progress?.Report("Downloading media locally with yt-dlp for ffmpeg fallback (--allow-media-download was set)...");
             downloadedMediaSource = await ytDlp.DownloadMediaForProcessingAsync(request, run, cancellationToken).ConfigureAwait(false);
             return downloadedMediaSource;
         }
@@ -1377,6 +1392,11 @@ public sealed class AnalysisPipeline
             globalDefault: config.Capture.Browser.AutoplayPolicy,
             sourceUrl: request.Source);
 
+        // Same opt-in resolution as AnalyzeAsync top: per-request flag > global config > false.
+        // Gates the browser STT media-collector below; without this the auto-mode browser
+        // capture would still kick off a download whenever --stt was requested.
+        var allowMediaDownload = request.AllowMediaDownload ?? config.Capture.AllowMediaDownload;
+
         // PreferInlineMedia short-circuit: skip the in-browser play+duration probe entirely,
         // resolve the inline media URL via a metadata-only probe, then drive ffmpeg directly.
         // The fast path for sources whose JS player can't boot headlessly (Medius/Build).
@@ -1437,9 +1457,12 @@ public sealed class AnalysisPipeline
             EdgeUserDataDir: edgeUserDataDir,
             EdgeProfileDirectory: edgeProfileDirectory,
             // Only enable media-URL collection when STT is requested AND there's no other audio
-            // source available. Avoids wasting bandwidth on routine browser-capture-without-STT
-            // runs.
-            CaptureMediaForStt: needsAudioForStt,
+            // source available AND the caller has opted in to local downloads. Even with --stt,
+            // we never silently grab GB off the network — the user must add --allow-media-download
+            // when there's no alternative audio source. The CaptureMediaForStt path downloads
+            // the recorded candidate as the LAST step; gating it here keeps the contract:
+            // "no local downloads without consent".
+            CaptureMediaForStt: needsAudioForStt && allowMediaDownload,
             // 4 GB safety cap; SharePoint Stream meeting recordings of typical length stay well
             // below this. Anything larger is almost certainly an HLS playlist mis-classified as
             // a media file.
@@ -2236,7 +2259,12 @@ public sealed record AnalyzeRequest(
     bool PreferInlineMedia = false,
     // Per-run override for the Chromium autoplay policy. See AutoplayPolicies for valid
     // values; null = inherit from the host map / global config default.
-    string? AutoplayPolicy = null);
+    string? AutoplayPolicy = null,
+    // Opt-in for downloading the source media to local disk when no direct URL is reachable.
+    // Default false: the pipeline emits MEDIA_DOWNLOAD_DECLINED and returns empty frames /
+    // audio rather than silently pulling gigabytes off the network. Resolved at the pipeline
+    // boundary as cli ?? config.Capture.AllowMediaDownload ?? false.
+    bool? AllowMediaDownload = null);
 
 public static class FrameSelectionStrategies
 {

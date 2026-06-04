@@ -422,7 +422,8 @@ public sealed class EdgeProfileCaptureTests
             Assert.False(browser.LastRequest!.CaptureMediaForStt,
                 "CaptureMediaForStt must be false when --stt is not requested");
 
-            // With --stt and no audio source: media collection must be on.
+            // With --stt + no audio + AllowMediaDownload=true: media collection is on.
+            // (Without AllowMediaDownload it stays off — see the explicit gate test below.)
             await pipeline.AnalyzeAsync(new AnalyzeRequest(
                 Source: "https://example.test/private",
                 VisionInstruction: string.Empty,
@@ -430,11 +431,25 @@ public sealed class EdgeProfileCaptureTests
                 UseSpeechToText: true,
                 FrameCount: 1,
                 RunId: "media-collect-on",
-                CaptureMode: CaptureModes.Browser), progress: null, CancellationToken.None);
+                CaptureMode: CaptureModes.Browser,
+                AllowMediaDownload: true), progress: null, CancellationToken.None);
             Assert.True(browser.LastRequest!.CaptureMediaForStt,
-                "CaptureMediaForStt must be true when --stt is requested and no audio yet");
+                "CaptureMediaForStt must be true when --stt is requested + no audio yet + media download is allowed");
             Assert.True(browser.LastRequest!.MaxMediaBytes > 0,
                 "MaxMediaBytes safety cap must be > 0 when media collection is enabled");
+
+            // With --stt but WITHOUT AllowMediaDownload: media collection must stay off so
+            // the run never silently pulls bytes the caller didn't consent to.
+            await pipeline.AnalyzeAsync(new AnalyzeRequest(
+                Source: "https://example.test/private",
+                VisionInstruction: string.Empty,
+                IncludeTranscript: true,
+                UseSpeechToText: true,
+                FrameCount: 1,
+                RunId: "media-collect-stt-no-consent",
+                CaptureMode: CaptureModes.Browser), progress: null, CancellationToken.None);
+            Assert.False(browser.LastRequest!.CaptureMediaForStt,
+                "CaptureMediaForStt must remain false when AllowMediaDownload is not set, even with --stt");
         }
         finally
         {

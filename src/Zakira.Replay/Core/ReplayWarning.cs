@@ -43,6 +43,15 @@ public static class ReplayWarningCodes
 
     public const string FramesDownloadFailed = "FRAMES_DOWNLOAD_FAILED";
 
+    /// <summary>
+    /// The pipeline reached a point where it would have downloaded the source media to disk
+    /// (yt-dlp <c>DownloadMediaForProcessing</c> or the browser STT media-collector
+    /// <c>TryDownloadBestCandidate</c>) but <c>AllowMediaDownload</c> was not set on the
+    /// request. The path that asked is named in the message so an agent can decide whether to
+    /// retry with <c>--allow-media-download</c>.
+    /// </summary>
+    public const string MediaDownloadDeclined = "MEDIA_DOWNLOAD_DECLINED";
+
     public const string FramesSceneCapReached = "FRAMES_SCENE_CAP_REACHED";
 
     public const string FramesLikelyUndersampled = "FRAMES_LIKELY_UNDERSAMPLED";

@@ -76,13 +76,58 @@ public sealed class AnalysisPipelineTests
             VisionInstruction: "Test remote fallback",
             IncludeTranscript: false,
             FrameCount: 1,
-            RunId: "remote-fallback"), progress: null, CancellationToken.None);
+            RunId: "remote-fallback",
+            // Exercise the (now opt-in) local-download fallback: when ffmpeg fails against
+            // the direct URL the pipeline downloads + retries against the local copy. Without
+            // this flag the download is declined (covered by AnalyzeAsyncDeclines*).
+            AllowMediaDownload: true), progress: null, CancellationToken.None);
 
         Assert.False(result.Reused);
         Assert.Equal(1, ytDlp.DownloadMediaCallCount);
         Assert.Equal(new[] { ytDlp.BestMediaUrl, downloadedMedia }, ffmpeg.FrameSources);
         Assert.Single(result.Manifest.Frames);
         Assert.Contains(result.Manifest.Warnings, warning => warning.Code == ReplayWarningCodes.FramesRemoteFallback);
+    }
+
+    [Fact]
+    public async Task AnalyzeAsyncDeclinesLocalDownloadWhenAllowMediaDownloadNotSet()
+    {
+        // Companion to ..._FallsBackToDownloadedMediaWhenRemoteFrameExtractionFails: without
+        // AllowMediaDownload, the local-download tail of the chain must not run, the warning
+        // must name the flag, and ffmpeg never sees the downloaded path.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var downloadedMedia = temp.GetPath("downloaded.mp4");
+        await File.WriteAllTextAsync(downloadedMedia, "fallback media", CancellationToken.None);
+        var ytDlp = new FakeYtDlpClient
+        {
+            Info = new YtDlpInfo
+            {
+                Id = "remote",
+                Title = "Remote Video",
+                WebpageUrl = "https://example.test/video",
+                DurationSeconds = 9
+            },
+            BestMediaUrl = "https://cdn.example.test/direct.mp4",
+            DownloadedMediaPath = downloadedMedia
+        };
+        var ffmpeg = new FakeFfmpegClient { FailingFrameSource = ytDlp.BestMediaUrl };
+        var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg);
+
+        var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
+            Source: "https://example.test/video",
+            VisionInstruction: string.Empty,
+            IncludeTranscript: false,
+            FrameCount: 1,
+            RunId: "decline-download"
+            /* AllowMediaDownload omitted → null → defaults to false */),
+            progress: null, CancellationToken.None);
+
+        Assert.Equal(0, ytDlp.DownloadMediaCallCount);
+        Assert.DoesNotContain(downloadedMedia, ffmpeg.FrameSources);
+        Assert.Contains(result.Manifest.Warnings,
+            w => w.Code == ReplayWarningCodes.MediaDownloadDeclined
+                 && w.Message.Contains("--allow-media-download", StringComparison.Ordinal));
     }
 
     [Fact]

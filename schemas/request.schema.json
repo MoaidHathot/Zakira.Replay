@@ -117,6 +117,10 @@
       "description": "Per-run override for the Chromium autoplay policy. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.",
       "type": ["string", "null"]
     },
+    "allowMediaDownload": {
+      "description": "Opt in to downloading the source media to local disk when no direct URL or inline-media URL is reachable. Default null = inherit capture.allowMediaDownload from config (which defaults to false). Set true to allow yt-dlp DownloadMediaForProcessing and the browser STT media-collector. False to explicitly deny even when config allows.",
+      "type": ["boolean", "null"]
+    },
     "captureDebug": {
       "description": "Diagnostic capture toggle (writes network.log, response bodies, texttracks state, HAR to runs/<id>/debug/). Per-run override for capture.browser.debug. Null = inherit config.",
       "type": ["boolean", "null"]

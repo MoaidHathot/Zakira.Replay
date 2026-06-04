@@ -259,10 +259,11 @@ public static class CliApp
         var runId = new Option<string?>("--run-id") { Description = "Optional run id." };
         var cookies = new Option<string?>("--cookies") { Description = "Path to a Netscape cookies file for yt-dlp." };
         var browserAuth = new Option<string?>("--browser-auth") { Description = "Browser/profile spec for yt-dlp --cookies-from-browser." };
+        var framesAllowDownload = new Option<bool>("--allow-media-download") { Description = "Opt in to downloading the source video locally when neither yt-dlp nor the browser inline-media probe can resolve a direct URL. Default off." };
 
         var command = new Command("frames", "Ad-hoc frame capture. Pass --at OR --from/--to (mutually exclusive).")
         {
-            source, at, from, to, count, strategy, maxEdge, quality, phash, sceneCap, runId, cookies, browserAuth
+            source, at, from, to, count, strategy, maxEdge, quality, phash, sceneCap, runId, cookies, browserAuth, framesAllowDownload
         };
         command.SetAction(async (parseResult, cancellationToken) =>
         {
@@ -315,7 +316,10 @@ public static class CliApp
                 ComputePerceptualHash: parseResult.GetValue(phash),
                 SceneSafetyCap: parseResult.GetValue(sceneCap),
                 CookiesPath: parseResult.GetValue(cookies),
-                CookiesFromBrowser: parseResult.GetValue(browserAuth));
+                CookiesFromBrowser: parseResult.GetValue(browserAuth),
+                // Flag-OR-config: passing --allow-media-download opts in for this run; config
+                // capture.allowMediaDownload=true opts in globally. Default off either way.
+                AllowMediaDownload: parseResult.GetValue(framesAllowDownload) || new ConfigStore().Load().Capture.AllowMediaDownload);
 
             var service = CreateFrameCaptureService();
             var progress = new Progress<string>(stdout.WriteLine);
@@ -367,10 +371,11 @@ public static class CliApp
         var outputName = new Option<string?>("--output-name") { Description = "Optional output file name." };
         var cookies = new Option<string?>("--cookies") { Description = "Cookies file path." };
         var browserAuth = new Option<string?>("--browser-auth") { Description = "cookies-from-browser spec." };
+        var clipAllowDownload = new Option<bool>("--allow-media-download") { Description = "Opt in to downloading the source video locally. Clip extraction always needs a download when no direct URL is reachable (no inline-media sidestep applies); without this flag the command fails with an actionable error." };
 
         var command = new Command("clip", "Extracts a timestamped clip from a video source.")
         {
-            source, start, end, runId, outputName, cookies, browserAuth
+            source, start, end, runId, outputName, cookies, browserAuth, clipAllowDownload
         };
         command.SetAction(async (parseResult, cancellationToken) =>
         {
@@ -383,7 +388,8 @@ public static class CliApp
                 RunId: parseResult.GetValue(runId),
                 OutputName: parseResult.GetValue(outputName),
                 CookiesPath: parseResult.GetValue(cookies),
-                CookiesFromBrowser: parseResult.GetValue(browserAuth)), progress, cancellationToken).ConfigureAwait(false);
+                CookiesFromBrowser: parseResult.GetValue(browserAuth),
+                AllowMediaDownload: parseResult.GetValue(clipAllowDownload) || new ConfigStore().Load().Capture.AllowMediaDownload), progress, cancellationToken).ConfigureAwait(false);
 
             stdout.WriteLine();
             stdout.WriteLine($"Completed clip: {result.Run.Id}");
@@ -1411,6 +1417,7 @@ public static class CliApp
         var secondaryTranscripts = new Option<string?>("--secondary-transcripts") { Description = "Comma-separated languages to also persist as transcript.<lang>.md (default: none)." };
         var preferInlineMedia = new Option<bool>("--prefer-inline-media") { Description = "Skip in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly." };
         var autoplayPolicy = new Option<string?>("--autoplay-policy") { Description = "Override Chromium autoplay policy for this run. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset." };
+        var allowMediaDownload = new Option<bool>("--allow-media-download") { Description = "Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: the run fails with MEDIA_DOWNLOAD_DECLINED rather than silently consuming bandwidth + disk." };
         var noSlideGrouping = new Option<bool>("--no-slide-grouping") { Description = "Disable slide grouping." };
         var slideHashDistance = new Option<int?>("--slide-hash-distance") { Description = "Slide hash Hamming distance." };
         var framesPerMinute = new Option<int?>("--frames-per-minute") { Description = "Frames per minute for interval sampling." };
@@ -1423,7 +1430,7 @@ public static class CliApp
             visionInstruction, ocrInstruction, stt, audio, ocr, vision, diarize, numSpeakers, diarizeThreshold,
             maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode, smartCrop, smartCropProfile,
             captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser, browserAuth,
-            captionLanguages, secondaryTranscripts, preferInlineMedia, autoplayPolicy, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
+            captionLanguages, secondaryTranscripts, preferInlineMedia, autoplayPolicy, allowMediaDownload, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
         };
 
         Func<ParseResult, string, bool, int, string?, AnalyzeRequest> apply = (parseResult, source, includeTranscript, frameCount, runId) =>
@@ -1484,7 +1491,10 @@ public static class CliApp
                 LocalVisionMode: parseResult.GetValue(localVisionMode),
                 SecondaryCaptionLanguages: secondaryLangs,
                 PreferInlineMedia: parseResult.GetValue(preferInlineMedia),
-                AutoplayPolicy: parseResult.GetValue(autoplayPolicy));
+                AutoplayPolicy: parseResult.GetValue(autoplayPolicy),
+                // Flag present → true (opt in); flag absent → null so the pipeline can
+                // fall back to capture.allowMediaDownload from config (defaults to false).
+                AllowMediaDownload: parseResult.GetValue(allowMediaDownload) ? true : (bool?)null);
         };
 
         return (options, apply);

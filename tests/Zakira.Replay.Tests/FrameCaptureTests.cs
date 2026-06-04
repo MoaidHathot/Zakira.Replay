@@ -267,12 +267,43 @@ public sealed class FrameCaptureTests
         var request = new FrameCaptureRequest(
             Source: "https://example.com/video",
             Timestamps: [TimeSpan.FromSeconds(1)],
-            RunId: "remote-download");
+            RunId: "remote-download",
+            // Opt in so we exercise the download path that used to run silently. The
+            // off-by-default behaviour is covered separately.
+            AllowMediaDownload: true);
 
         var result = await service.CaptureAsync(request, progress: null, CancellationToken.None);
 
         Assert.Contains(result.Manifest.Warnings, w => w.Code == ReplayWarningCodes.FrameCaptureMediaUrlUnresolved && w.Severity == ReplayWarningSeverities.Info);
         Assert.Equal(downloadedPath, ffmpeg.LastMediaSource);
+    }
+
+    [Fact]
+    public async Task RemoteSourceDeclinesDownloadWhenAllowMediaDownloadNotSet()
+    {
+        // The off-by-default contract: when yt-dlp can't resolve, browser probe finds nothing,
+        // and AllowMediaDownload is false, the service emits MEDIA_DOWNLOAD_DECLINED and
+        // ffmpeg is never invoked. Bytes that aren't on the wire are bytes the agent doesn't
+        // have to apologise for.
+        using var temp = new TestTempDirectory();
+        var store = new ArtifactStore(temp.GetPath("runs"));
+        var downloadedPath = temp.GetPath("downloaded.mp4");
+        await File.WriteAllTextAsync(downloadedPath, "not real video", CancellationToken.None);
+        var ytDlp = new FakeYtDlpClient { DownloadedMediaPath = downloadedPath };
+        var ffmpeg = new RecordingFfmpegClient { ProbedDuration = 5.0 };
+        var service = new FrameCaptureService(store, ytDlp, ffmpeg);
+
+        var result = await service.CaptureAsync(new FrameCaptureRequest(
+            Source: "https://example.com/video",
+            Timestamps: [TimeSpan.FromSeconds(1)],
+            RunId: "decline-download"), progress: null, CancellationToken.None);
+
+        Assert.Contains(result.Manifest.Warnings,
+            w => w.Code == ReplayWarningCodes.MediaDownloadDeclined
+                 && w.Severity == ReplayWarningSeverities.Error
+                 && w.Message.Contains("--allow-media-download", StringComparison.Ordinal));
+        Assert.Null(ffmpeg.LastMediaSource);
+        Assert.Empty(result.Manifest.Frames);
     }
 
     [Theory]
@@ -382,7 +413,11 @@ public sealed class FrameCaptureTests
         var result = await service.CaptureAsync(new FrameCaptureRequest(
             Source: "https://somewhere.test/private-thing",
             Timestamps: [TimeSpan.FromSeconds(5)],
-            RunId: "browser-probe-noop"), progress: null, CancellationToken.None);
+            RunId: "browser-probe-noop",
+            // Opt-in to the local-download tail of the resolve chain so this test still
+            // exercises it. The off-by-default behaviour is covered by
+            // RemoteSourceDeclinesDownloadWhenAllowMediaDownloadNotSet.
+            AllowMediaDownload: true), progress: null, CancellationToken.None);
 
         Assert.Equal("media/downloaded.mp4", ffmpeg.LastMediaSource);
         // The info warning explains the fallback to local download.

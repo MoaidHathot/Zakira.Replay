@@ -236,9 +236,22 @@ public sealed class FrameCaptureService : IFrameCaptureService
             return browserUrl;
         }
 
+        // Local-download fallback. Opt-in only: defaults to off because pulling a multi-GB
+        // video for a few spot frames is rarely what the caller wanted. When declined, surface
+        // an actionable warning naming the flag and bail — never silently consume bandwidth.
+        if (!request.AllowMediaDownload)
+        {
+            warnings.Add(new ReplayWarning(
+                ReplayWarningCodes.MediaDownloadDeclined,
+                "Frame capture would have downloaded the source media to local disk as a last resort, but --allow-media-download is not set (and capture.allowMediaDownload is false in config). Pass --allow-media-download to opt in, or use a source yt-dlp can resolve directly / one our inline-media interceptors recognise.",
+                Source: "frame-capture",
+                Severity: ReplayWarningSeverities.Error));
+            return null;
+        }
+
         warnings.Add(new ReplayWarning(
             ReplayWarningCodes.FrameCaptureMediaUrlUnresolved,
-            "Could not resolve a direct media URL; downloading media locally for frame capture.",
+            "Could not resolve a direct media URL; downloading media locally for frame capture (--allow-media-download was set).",
             Source: "yt-dlp",
             Severity: ReplayWarningSeverities.Info));
         return await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
@@ -488,7 +501,11 @@ public sealed record FrameCaptureRequest(
     bool ComputePerceptualHash = false,
     int? SceneSafetyCap = null,
     string? CookiesPath = null,
-    string? CookiesFromBrowser = null);
+    string? CookiesFromBrowser = null,
+    // Opt-in for downloading the source media to local disk when no direct URL and no inline
+    // media URL can be resolved. Default false: the service emits MEDIA_DOWNLOAD_DECLINED
+    // and returns no frames rather than silently downloading.
+    bool AllowMediaDownload = false);
 
 /// <summary>
 /// Minimal manifest written to <c>runs/&lt;run-id&gt;/frame-capture.json</c> documenting an

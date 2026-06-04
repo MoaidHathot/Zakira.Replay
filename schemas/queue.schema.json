@@ -110,6 +110,7 @@
         "secondaryCaptionLanguages": { "type": ["array", "null"], "items": { "type": "string", "minLength": 1 } },
         "preferInlineMedia": { "type": ["boolean", "null"] },
         "autoplayPolicy": { "type": ["string", "null"] },
+        "allowMediaDownload": { "type": ["boolean", "null"] },
         "captureDebug": { "type": ["boolean", "null"] }
       }
     }

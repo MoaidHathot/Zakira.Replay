@@ -39,6 +39,10 @@
       "description": "Chromium autoplay policy override for this batch. Values: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.",
       "type": ["string", "null"]
     },
+    "allowMediaDownload": {
+      "description": "Opt in to downloading source media to local disk for this batch when no direct URL is reachable. Off by default — runs fail with MEDIA_DOWNLOAD_DECLINED rather than silently consuming bandwidth.",
+      "type": ["boolean", "null"]
+    },
     "slideGrouping": { "type": ["boolean", "null"] },
     "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },
     "framesPerMinute": { "type": ["integer", "null"], "minimum": 0 },
@@ -94,6 +98,10 @@
           "autoplayPolicy": {
             "description": "Chromium autoplay policy override for this item. Values: default | no-user-gesture-required.",
             "type": ["string", "null"]
+          },
+          "allowMediaDownload": {
+            "description": "Opt in to downloading source media to local disk for this item.",
+            "type": ["boolean", "null"]
           },
           "slideGrouping": { "type": ["boolean", "null"] },
           "slideHashDistance": { "type": ["integer", "null"], "minimum": 0, "maximum": 64 },

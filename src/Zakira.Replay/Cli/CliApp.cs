@@ -324,8 +324,8 @@ public static class CliApp
             var service = CreateFrameCaptureService();
             // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
             var progress = IsJson(parseResult, outputFormat)
-                ? new Progress<string>(stderr.WriteLine)
-                : new Progress<string>(stdout.WriteLine);
+                ? new SynchronousProgress<string>(stderr.WriteLine)
+                : new SynchronousProgress<string>(stdout.WriteLine);
             var result = await service.CaptureAsync(captureRequest, progress, cancellationToken).ConfigureAwait(false);
 
             if (IsJson(parseResult, outputFormat))
@@ -386,8 +386,8 @@ public static class CliApp
             var isJson = IsJson(parseResult, outputFormat);
             // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
             var progress = isJson
-                ? new Progress<string>(stderr.WriteLine)
-                : new Progress<string>(stdout.WriteLine);
+                ? new SynchronousProgress<string>(stderr.WriteLine)
+                : new SynchronousProgress<string>(stdout.WriteLine);
             var result = await service.ExtractAsync(new ClipExtractionRequest(
                 Source: parseResult.GetValue(source)!,
                 Start: Timestamp.ParseRequired(parseResult.GetValue(start)!, "start"),
@@ -473,8 +473,8 @@ public static class CliApp
             var isJson = IsJson(parseResult, outputFormat);
             // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
             var progress = isJson
-                ? new Progress<string>(_ => { }) // batch progress is a stream of free-form text; suppress in JSON mode rather than mix with stderr/log channels
-                : new Progress<string>(stdout.WriteLine);
+                ? new SynchronousProgress<string>(_ => { }) // batch progress is a stream of free-form text; suppress in JSON mode rather than mix with stderr/log channels
+                : new SynchronousProgress<string>(stdout.WriteLine);
             var result = await runner.RunAsync(
                 parseResult.GetValue(manifest)!.FullName,
                 progress,
@@ -992,8 +992,8 @@ public static class CliApp
             var isJson = IsJson(parseResult, outputFormat);
             // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
             var progress = isJson
-                ? new Progress<string>(stderr.WriteLine)
-                : new Progress<string>(stdout.WriteLine);
+                ? new SynchronousProgress<string>(stderr.WriteLine)
+                : new SynchronousProgress<string>(stdout.WriteLine);
             var result = await queue.RunAsync(
                 parseResult.GetValue(queueId),
                 new AnalysisQueueRunOptions(
@@ -1117,7 +1117,7 @@ public static class CliApp
             var installer = new PortableDependencyInstaller(config);
             var resolvedTargets = parseResult.GetValue(targets);
             var list = resolvedTargets is null || resolvedTargets.Length == 0 ? new[] { "media" } : resolvedTargets;
-            var progress = new Progress<string>(stdout.WriteLine);
+            var progress = new SynchronousProgress<string>(stdout.WriteLine);
             var result = await installer.InstallAsync(
                 list,
                 parseResult.GetValue(force),
@@ -1647,8 +1647,8 @@ public static class CliApp
         // JSON envelope. In text mode, progress continues to flow to stdout the way it did
         // before so existing scripts that grep stdout still see the same breadcrumbs.
         var progress = isJson
-            ? new Progress<string>(stderr.WriteLine)
-            : new Progress<string>(stdout.WriteLine);
+            ? new SynchronousProgress<string>(stderr.WriteLine)
+            : new SynchronousProgress<string>(stdout.WriteLine);
         AnalyzeResult result;
         try
         {
@@ -1779,5 +1779,36 @@ public static class CliApp
             // Best-effort: env-var or default still applies.
         }
         return ArtifactStore.ResolveRootDirectory(config);
+    }
+
+    /// <summary>
+    /// Inline-invoking <see cref="IProgress{T}"/> implementation used by every CLI command
+    /// surface in place of <see cref="Progress{T}"/>. The framework's
+    /// <see cref="Progress{T}"/> captures the ambient <see cref="SynchronizationContext"/>
+    /// at construction and posts each <c>Report</c> callback through it — useful for UI
+    /// thread marshalling, but a footgun in a CLI / server process where the captured
+    /// context is null and callbacks therefore land on the thread pool. That posts a race
+    /// against the call site's stream: a callback fires after <c>AnalyzeAsync</c> has
+    /// returned and after the caller has disposed the <see cref="TextWriter"/> it handed
+    /// us, producing <see cref="ObjectDisposedException"/> on a background thread which
+    /// crashes the host (xUnit test host on CI; would surface as an unhandled exception in
+    /// production too if anyone passed a disposable writer to <see cref="RunAsync"/>).
+    /// This implementation invokes the handler synchronously on the thread that called
+    /// <see cref="Report"/>, which in our pipeline is the awaiting thread, so callbacks
+    /// always complete before <c>AnalyzeAsync</c> returns. <c>Console.Out</c>/
+    /// <c>Console.Error</c> are never disposed in production so the prior Progress-based
+    /// code was correct there; the bug only surfaced once tests injected a
+    /// <see cref="StringWriter"/>.
+    /// </summary>
+    private sealed class SynchronousProgress<T> : IProgress<T>
+    {
+        private readonly Action<T> handler;
+
+        public SynchronousProgress(Action<T> handler)
+        {
+            this.handler = handler;
+        }
+
+        public void Report(T value) => handler(value);
     }
 }

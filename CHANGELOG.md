@@ -7,7 +7,33 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
-## [Unreleased] — `analyze` / `transcribe` / `clip` / `batch run` / `queue enqueue` / `queue run` honour `--output-format json`
+## [0.13.1] — Synchronous progress callbacks in `CliApp` (fixes in-process API race)
+
+Patch release for a latent race in the public `Zakira.Replay.Cli.CliApp.RunAsync(args,
+stdout, stderr, ct)` in-process surface. No change for shell users running
+`zakira-replay <…>`.
+
+### Fixed
+
+- **`Progress<T>` post-dispose race on every long-running pipeline command.** Each CLI
+  command wrapped the pipeline's progress callback in `System.Progress<string>`, which
+  captures the ambient `SynchronizationContext` at construction and posts every `Report`
+  callback through it. In a CLI / server / test process where the captured context is
+  null, callbacks land on the thread pool. A late progress event could fire after
+  `AnalyzeAsync` had returned and after the caller had disposed the `TextWriter` it
+  handed in, producing `ObjectDisposedException` on a background thread. Production
+  shell users were unaffected (`Console.Out` / `Console.Error` are never disposed), but
+  any in-process consumer of `CliApp.RunAsync` — including the test suite — could crash
+  the host. Surfaced as a test-host abort on macOS CI for 0.13.0.
+
+  Fix: new internal `SynchronousProgress<T> : IProgress<T>` in `Zakira.Replay.Cli.CliApp`
+  invokes the handler inline on the calling thread. The pipeline reports from the
+  awaiting thread, so callbacks now always complete before `AnalyzeAsync` returns — no
+  race, no late writes to disposed streams. Every `new Progress<string>(…)` call site in
+  `CliApp.cs` (analyze, transcribe, frames, clip, batch run, queue run, deps install)
+  swapped over. Behaviour is observationally identical for shell users.
+
+## [0.13.0] — `analyze` / `transcribe` / `clip` / `batch run` / `queue enqueue` / `queue run` honour `--output-format json`
 
 Fixes the long-standing bug where the recursive global `--output-format json|ndjson` flag
 (documented as accepted on every subcommand) was silently dropped by every long-running

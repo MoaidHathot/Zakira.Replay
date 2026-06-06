@@ -32,11 +32,16 @@ The happy path. yt-dlp resolves YouTube URLs directly to a media URL ffmpeg can 
 
 ### Single video — CLI
 
-Default (works for public videos):
+Default (works for public videos; uses the 0.14 defaults — `auto` capture mode picks yt-dlp for YouTube, `--frames 15 --frame-strategy interval`):
 
 ```pwsh
-zakira-replay analyze "https://www.youtube.com/watch?v=dQw4w9WgXcQ" `
-  --frames 7 --frame-strategy scene
+dnx Zakira.Replay analyze "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
+```
+
+Slide-heavy talks (one frame per scene cut works well on YouTube; safe here because yt-dlp gives a direct media URL, not HLS):
+
+```pwsh
+dnx Zakira.Replay analyze "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --frame-strategy scene
 ```
 
 Transcript-only:
@@ -98,5 +103,5 @@ None — YouTube uses only the standard pipeline warning codes:
 ## Gotchas
 
 - **`?t=Ns` is preserved on output deep links.** If you pass a URL like `https://youtu.be/<id>?t=120s`, the deep links in `chapters/chapters.json` and `search/index.json` will have **their own** computed `t=` values appended, replacing the input's. The `DeepLink.For` builder deduplicates so you don't end up with two `t=` parameters.
-- **The skill default `--frame-strategy scene` is the right choice for most YouTube content** (talks, demos, tutorials). For long-form livestream archives or podcasts with a static talking head, switch to `--frame-strategy interval --frames-per-minute 1`.
+- **`--frame-strategy scene` is safe on YouTube** (yt-dlp resolves a direct progressive media URL so ffmpeg only decodes the frames it needs). On HLS-only sources like Microsoft Build, scene mode pulls the entire stream — that's why the post-0.14 default is `interval`. For long-form livestream archives or podcasts with a static talking head, switch to `--frame-strategy interval --frames-per-minute 1`.
 - **No browser capture needed.** `--capture-mode browser` works but is slower and unnecessary; only reach for it when yt-dlp returns nothing (private content + the dedicated Edge profile is already initialised).

@@ -67,12 +67,32 @@ public static class CliApp
             Recursive = true
         };
 
+        var verbose = new Option<bool>("--verbose", "-v")
+        {
+            Description = "Show all in-flight progress messages and info-severity warnings. Default mode suppresses both and only surfaces the final summary plus warning/error severities; quiet mode suppresses everything except errors.",
+            Recursive = true
+        };
+
+        var quiet = new Option<bool>("--quiet", "-q")
+        {
+            Description = "Suppress all in-flight progress and all non-error output. Only error-severity warnings are emitted. Mutually exclusive with --verbose.",
+            Recursive = true
+        };
+
+        // Expose the option references to the verbosity helpers so any sub-command's
+        // SetAction can resolve verbosity via ParseResult without re-plumbing the references
+        // through every BuildXxxCommand signature. Set once per process at root construction.
+        CliVerbosityHelpers.VerboseOption = verbose;
+        CliVerbosityHelpers.QuietOption = quiet;
+
         var root = new RootCommand("Zakira.Replay — turns video sources into agent-consumable evidence.")
         {
             outputFormat,
             logFile,
             logLevel,
             correlationId,
+            verbose,
+            quiet,
 
             BuildVersionCommand(stdout),
             BuildInfoCommand(stdout, outputFormat),
@@ -192,7 +212,7 @@ public static class CliApp
         preset.AcceptOnlyFromAmong("meeting", "lecture", "demo", "interview", "raw");
 
         var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
-        var frames = new Option<int>("--frames") { Description = "Number of representative frames to extract.", DefaultValueFactory = _ => 500 };
+        var frames = new Option<int>("--frames") { Description = "Number of representative frames to extract. Default 15 (was 500 in 0.13.2 and earlier; lower default keeps cold runs fast and bandwidth-light).", DefaultValueFactory = _ => 15 };
         var runId = new Option<string?>("--run-id") { Description = "Optional run id for the artifact folder." };
 
         var command = new Command("analyze", "Runs the full Zakira.Replay analysis pipeline against a video source.")
@@ -211,7 +231,7 @@ public static class CliApp
         {
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, true, parseResult.GetValue(frames), parseResult.GetValue(runId));
             request = ApplyPreset(request, parseResult.GetValue(preset));
-            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
+            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken).ConfigureAwait(false);
         });
         return command;
     }
@@ -235,7 +255,7 @@ public static class CliApp
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, true, 0, parseResult.GetValue(runId));
-            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
+            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken).ConfigureAwait(false);
         });
         return command;
     }
@@ -298,9 +318,9 @@ public static class CliApp
             {
                 // No --at, no --from/--to: treat as the analyze frames-only path for back-compat.
                 var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
-                var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, false, parseResult.GetValue(count) ?? 500, parseResult.GetValue(runId));
+                var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, false, parseResult.GetValue(count) ?? 15, parseResult.GetValue(runId));
                 _ = analyzeOptions; // not added to command; default values are used
-                return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
+                return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken).ConfigureAwait(false);
             }
 
             var captureRequest = new FrameCaptureRequest(
@@ -322,10 +342,14 @@ public static class CliApp
                 AllowMediaDownload: parseResult.GetValue(framesAllowDownload) || new ConfigStore().Load().Capture.AllowMediaDownload);
 
             var service = CreateFrameCaptureService();
-            // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
-            var progress = IsJson(parseResult, outputFormat)
+            var isJsonFrames = IsJson(parseResult, outputFormat);
+            // Default + Quiet: suppress in-flight progress (the final summary is the meaningful
+            // output). Verbose: stream like before. JSON mode: send progress to stderr so stdout
+            // stays a single parseable envelope.
+            var streamFrames = !isJsonFrames && CliVerbosityHelpers.ShouldStreamProgress(CliVerbosityHelpers.Resolve(parseResult));
+            var progress = isJsonFrames
                 ? new SynchronousProgress<string>(stderr.WriteLine)
-                : new SynchronousProgress<string>(stdout.WriteLine);
+                : (streamFrames ? new SynchronousProgress<string>(stdout.WriteLine) : new SynchronousProgress<string>(_ => { }));
             var result = await service.CaptureAsync(captureRequest, progress, cancellationToken).ConfigureAwait(false);
 
             if (IsJson(parseResult, outputFormat))
@@ -350,14 +374,19 @@ public static class CliApp
                 return 0;
             }
 
-            stdout.WriteLine();
-            stdout.WriteLine($"Captured {result.Manifest.Frames.Count} frame(s) into {result.Run.Directory}.");
-            foreach (var frame in result.Manifest.Frames)
+            var framesVerbosity = CliVerbosityHelpers.Resolve(parseResult);
+            if (CliVerbosityHelpers.ShouldRenderSummary(framesVerbosity))
             {
-                stdout.WriteLine($"  {frame.TimestampLabel}  {result.Run.GetPath(frame.Path)}");
+                stdout.WriteLine();
+                stdout.WriteLine($"Captured {result.Manifest.Frames.Count} frame(s) into {result.Run.Directory}.");
+                foreach (var frame in result.Manifest.Frames)
+                {
+                    stdout.WriteLine($"  {frame.TimestampLabel}  {result.Run.GetPath(frame.Path)}");
+                }
             }
             foreach (var warning in result.Manifest.Warnings)
             {
+                if (!CliVerbosityHelpers.ShouldRender(framesVerbosity, warning.Severity)) continue;
                 stdout.WriteLine($"[{warning.Severity}] {warning.Code}: {warning.Message}");
             }
             return 0;
@@ -384,10 +413,11 @@ public static class CliApp
         {
             var service = CreateClipService();
             var isJson = IsJson(parseResult, outputFormat);
-            // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
+            // Default + Quiet: suppress in-flight progress; Verbose: stream. JSON: route to stderr.
+            var streamClip = !isJson && CliVerbosityHelpers.ShouldStreamProgress(CliVerbosityHelpers.Resolve(parseResult));
             var progress = isJson
                 ? new SynchronousProgress<string>(stderr.WriteLine)
-                : new SynchronousProgress<string>(stdout.WriteLine);
+                : (streamClip ? new SynchronousProgress<string>(stdout.WriteLine) : new SynchronousProgress<string>(_ => { }));
             var result = await service.ExtractAsync(new ClipExtractionRequest(
                 Source: parseResult.GetValue(source)!,
                 Start: Timestamp.ParseRequired(parseResult.GetValue(start)!, "start"),
@@ -471,10 +501,13 @@ public static class CliApp
         {
             var runner = new BatchRunner(CreatePipeline);
             var isJson = IsJson(parseResult, outputFormat);
-            // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
+            // Default + Quiet: suppress per-item progress; Verbose: stream. JSON: suppress
+            // (batch progress is free-form text; mixing it with the JSON envelope or log
+            // channel is worse than just dropping it).
+            var streamBatch = !isJson && CliVerbosityHelpers.ShouldStreamProgress(CliVerbosityHelpers.Resolve(parseResult));
             var progress = isJson
-                ? new SynchronousProgress<string>(_ => { }) // batch progress is a stream of free-form text; suppress in JSON mode rather than mix with stderr/log channels
-                : new SynchronousProgress<string>(stdout.WriteLine);
+                ? new SynchronousProgress<string>(_ => { })
+                : (streamBatch ? new SynchronousProgress<string>(stdout.WriteLine) : new SynchronousProgress<string>(_ => { }));
             var result = await runner.RunAsync(
                 parseResult.GetValue(manifest)!.FullName,
                 progress,
@@ -937,7 +970,7 @@ public static class CliApp
         var jobId = new Option<string?>("--job-id") { Description = "Optional stable job id." };
         var retries = new Option<int>("--retries") { Description = "Retry count.", DefaultValueFactory = _ => 0 };
         var noTranscript = new Option<bool>("--no-transcript") { Description = "Skip transcript extraction." };
-        var frames = new Option<int>("--frames") { Description = "Frame count.", DefaultValueFactory = _ => 500 };
+        var frames = new Option<int>("--frames") { Description = "Frame count. Default 15.", DefaultValueFactory = _ => 15 };
         var runId = new Option<string?>("--run-id") { Description = "Optional run id." };
 
         enqueue.Arguments.Add(source);
@@ -990,10 +1023,11 @@ public static class CliApp
         {
             var queue = new AnalysisQueue(CreatePipeline);
             var isJson = IsJson(parseResult, outputFormat);
-            // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
+            // Default + Quiet: suppress per-job progress; Verbose: stream. JSON: route to stderr.
+            var streamQueue = !isJson && CliVerbosityHelpers.ShouldStreamProgress(CliVerbosityHelpers.Resolve(parseResult));
             var progress = isJson
                 ? new SynchronousProgress<string>(stderr.WriteLine)
-                : new SynchronousProgress<string>(stdout.WriteLine);
+                : (streamQueue ? new SynchronousProgress<string>(stdout.WriteLine) : new SynchronousProgress<string>(_ => { }));
             var result = await queue.RunAsync(
                 parseResult.GetValue(queueId),
                 new AnalysisQueueRunOptions(
@@ -1519,7 +1553,7 @@ public static class CliApp
             var resolvedVisionProvider = VisionProviderFactory.Normalize(parseResult.GetValue(visionProvider) ?? VisionProviderFactory.GetConfiguredProvider(config));
             var resolvedFrameStrategy = parseResult.GetValue(everyFrame)
                 ? FrameSelectionStrategies.EveryFrame
-                : (parseResult.GetValue(frameStrategy) ?? FrameSelectionStrategies.Scene);
+                : (parseResult.GetValue(frameStrategy) ?? FrameSelectionStrategies.Interval);
             var resolvedCookiesFromBrowser = parseResult.GetValue(browserAuth) ?? parseResult.GetValue(cookiesFromBrowser);
             var captionLangs = ParseCaptionLanguages(parseResult.GetValue(captionLanguages));
             var secondaryLangs = ParseCaptionLanguages(parseResult.GetValue(secondaryTranscripts));
@@ -1642,13 +1676,36 @@ public static class CliApp
 
     private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, TextWriter stderr, bool isJson, CancellationToken cancellationToken)
     {
+        // Back-compat overload (in-process callers + tests that predate verbosity); resolves
+        // to the Default verbosity which matches the post-0.14 "quiet but informative" baseline.
+        return await RunPipelineAsync(request, stdout, stderr, isJson, verbosity: CliVerbosity.Default, cancellationToken).ConfigureAwait(false);
+    }
+
+    private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, TextWriter stderr, bool isJson, CliVerbosity verbosity, CancellationToken cancellationToken)
+    {
         var pipeline = CreatePipeline();
-        // In JSON mode, progress lines go to stderr so stdout can stay a single parseable
-        // JSON envelope. In text mode, progress continues to flow to stdout the way it did
-        // before so existing scripts that grep stdout still see the same breadcrumbs.
-        var progress = isJson
-            ? new SynchronousProgress<string>(stderr.WriteLine)
-            : new SynchronousProgress<string>(stdout.WriteLine);
+
+        // Progress sink routing:
+        //   JSON mode  → always stream to stderr (unless Quiet) so stdout stays a single parseable
+        //               envelope. Orchestrators expect breadcrumbs on stderr regardless of -v / -q.
+        //   Text mode  → stream only in Verbose; Default/Quiet swallow the stream so the user
+        //               sees just the compact start/done summary (or nothing in Quiet).
+        var streamProgress = verbosity != CliVerbosity.Quiet && (isJson || verbosity == CliVerbosity.Verbose);
+        var progressTarget = isJson ? stderr : stdout;
+        var progress = streamProgress
+            ? new SynchronousProgress<string>(progressTarget.WriteLine)
+            : new SynchronousProgress<string>(_ => { });
+
+        // Compact start line in Default mode so a long-running run doesn't look hung. JSON and
+        // Verbose modes get their own surface (JSON envelope / streamed progress); Quiet stays
+        // silent.
+        var renderSummary = !isJson && CliVerbosityHelpers.ShouldRenderSummary(verbosity);
+        if (renderSummary && verbosity == CliVerbosity.Default)
+        {
+            stdout.WriteLine($"Analyzing {TruncateForDisplay(request.Source, 80)}...");
+        }
+
+        var stopwatch = System.Diagnostics.Stopwatch.StartNew();
         AnalyzeResult result;
         try
         {
@@ -1673,6 +1730,7 @@ public static class CliApp
             stderr.WriteLine($"Error: {ex.Message}");
             return 1;
         }
+        stopwatch.Stop();
 
         if (isJson)
         {
@@ -1685,20 +1743,78 @@ public static class CliApp
             return 0;
         }
 
-        stdout.WriteLine();
-        stdout.WriteLine(result.Reused ? $"Reused run: {result.Run.Id}" : $"Completed run: {result.Run.Id}");
-        stdout.WriteLine($"Artifacts: {result.Run.Directory}");
-        stdout.WriteLine($"Manifest: {result.Run.GetPath("manifest.json")}");
-        if (result.Manifest.Warnings.Count > 0)
+        if (renderSummary)
         {
             stdout.WriteLine();
-            stdout.WriteLine("Warnings:");
-            foreach (var warning in result.Manifest.Warnings)
-            {
-                stdout.WriteLine($"- [{warning.Severity}] {warning.Code}: {warning.Message}");
-            }
+            stdout.WriteLine(BuildPipelineSummaryLine(result, stopwatch.Elapsed));
+            stdout.WriteLine($"  Artifacts: {result.Run.Directory}");
+            stdout.WriteLine($"  Manifest:  {result.Run.GetPath("manifest.json")}");
         }
+
+        RenderWarnings(stdout, result.Manifest.Warnings, verbosity);
         return 0;
+    }
+
+    /// <summary>
+    /// One-line summary printed after a successful analyze/transcribe/frames run. Format:
+    /// <c>Done in 54s. brk230-1ccc2f93 — 15 frames, transcript: en-US (90 KB).</c> Designed
+    /// to be the only line a Default-mode user sees so it carries every signal that's both
+    /// universally useful and cheap to compute from the result alone.
+    /// </summary>
+    internal static string BuildPipelineSummaryLine(AnalyzeResult result, TimeSpan elapsed)
+    {
+        var verb = result.Reused ? "Reused" : "Done";
+        var pieces = new List<string>();
+        var frameCount = result.Manifest.Frames.Count;
+        if (frameCount > 0)
+        {
+            pieces.Add($"{frameCount} frame{(frameCount == 1 ? "" : "s")}");
+        }
+        if (!string.IsNullOrWhiteSpace(result.Manifest.TranscriptPath))
+        {
+            pieces.Add($"transcript: {result.Manifest.TranscriptPath}");
+        }
+        if (!string.IsNullOrWhiteSpace(result.Manifest.AudioPath))
+        {
+            pieces.Add($"audio: {result.Manifest.AudioPath}");
+        }
+
+        var tail = pieces.Count == 0 ? string.Empty : " \u2014 " + string.Join(", ", pieces);
+        return $"{verb} in {FormatElapsed(elapsed)}. {result.Run.Id}{tail}";
+    }
+
+    private static string FormatElapsed(TimeSpan elapsed)
+    {
+        if (elapsed.TotalSeconds < 1) return $"{elapsed.TotalMilliseconds:F0}ms";
+        if (elapsed.TotalSeconds < 60) return $"{elapsed.TotalSeconds:F1}s";
+        if (elapsed.TotalMinutes < 60) return $"{(int)elapsed.TotalMinutes}m{elapsed.Seconds:D2}s";
+        return $"{(int)elapsed.TotalHours}h{elapsed.Minutes:D2}m";
+    }
+
+    private static string TruncateForDisplay(string value, int max)
+    {
+        if (string.IsNullOrEmpty(value) || value.Length <= max) return value;
+        return value[..(max - 1)] + "\u2026";
+    }
+
+    /// <summary>
+    /// Renders warnings to <paramref name="stdout"/> filtered by <paramref name="verbosity"/>:
+    /// Verbose shows everything (matches pre-0.14 behaviour); Default suppresses
+    /// <c>info</c> severities; Quiet suppresses everything except <c>error</c>. The block is
+    /// omitted entirely if no warning passes the filter so the success path stays clean.
+    /// </summary>
+    internal static void RenderWarnings(TextWriter stdout, IReadOnlyList<ReplayWarning> warnings, CliVerbosity verbosity)
+    {
+        if (warnings.Count == 0) return;
+        var visible = warnings.Where(w => CliVerbosityHelpers.ShouldRender(verbosity, w.Severity)).ToList();
+        if (visible.Count == 0) return;
+
+        stdout.WriteLine();
+        stdout.WriteLine("Warnings:");
+        foreach (var warning in visible)
+        {
+            stdout.WriteLine($"- [{warning.Severity}] {warning.Code}: {warning.Message}");
+        }
     }
 
     /// <summary>

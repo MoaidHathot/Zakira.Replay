@@ -143,9 +143,12 @@ public sealed class CaptureConfig
     /// screenshot the &lt;video&gt; element at the chosen timestamps — works for sites yt-dlp can't
     /// reach (custom enterprise portals, Medius/Teams recordings, sites that need a fully-rendered
     /// page to expose the video). <c>auto</c> tries yt-dlp first and falls back to <c>browser</c>
-    /// on failure, emitting <c>CAPTURE_BROWSER_FALLBACK</c>.
+    /// on failure, emitting <c>CAPTURE_BROWSER_FALLBACK</c>. <b>Default <c>auto</c></b> so a bare
+    /// <c>analyze &lt;url&gt;</c> Just Works across yt-dlp-friendly sources (YouTube) and
+    /// browser-only sources (Microsoft Build / Medius, SharePoint Stream, custom portals) without
+    /// the user having to know which is which up front.
     /// </summary>
-    public string Mode { get; set; } = CaptureModes.YtDlp;
+    public string Mode { get; set; } = CaptureModes.Auto;
 
     /// <summary>
     /// Master switch for downloading the source media to local disk as a fallback when no
@@ -869,7 +872,7 @@ public sealed class ConfigStore
             },
             Capture = new CaptureConfig
             {
-                Mode = CaptureModes.YtDlp,
+                Mode = CaptureModes.Auto,
                 Browser = new BrowserCaptureConfig
                 {
                     VideoElementSelector = "video",

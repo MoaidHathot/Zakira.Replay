@@ -1105,11 +1105,16 @@ public sealed class PlaywrightVideoCaptureClient : IBrowserVideoCaptureClient
             await page.WaitForTimeoutAsync(1_000).ConfigureAwait(false);
         }
 
+        // Info, not error: the Shaka MSE / custom-player probe failing is expected for hosts
+        // whose JS player doesn't boot headlessly (Microsoft Build / Medius / mediastream).
+        // The pipeline's automatic sidestep + inline-media fallback covers these cases. Only
+        // if BOTH paths fail to produce frames will the higher-level FRAMES_NO_MEDIA error
+        // surface as a real failure; this single signal is purely diagnostic.
         warnings.Add(new ReplayWarning(
             ReplayWarningCodes.CaptureDurationUnresolved,
             $"video.duration did not become a finite number within {request.DurationProbeTimeoutSeconds:F1}s. The video may not have started playing or the page does not expose a media element matching '{request.VideoElementSelector}'.",
             Source: "playwright",
-            Severity: ReplayWarningSeverities.Error));
+            Severity: ReplayWarningSeverities.Info));
         return null;
     }
 

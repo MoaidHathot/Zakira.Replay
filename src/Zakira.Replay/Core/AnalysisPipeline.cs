@@ -146,10 +146,15 @@ public sealed class AnalysisPipeline
             mediaSource = await ytDlp.GetBestMediaUrlAsync(request, cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
             {
+                // Info, not warning: yt-dlp not finding a direct URL is the EXPECTED outcome for
+                // browser-only sources (Medius, Build, SharePoint Stream, custom portals); the
+                // browser-capture branch downstream handles them. Only if THAT also fails will
+                // FRAMES_NO_MEDIA / MEDIA_DOWNLOAD_DECLINED surface as an actionable error.
                 warnings.Add(new ReplayWarning(
                     ReplayWarningCodes.MediaUrlUnresolved,
                     "Could not resolve a direct media URL for ffmpeg processing.",
-                    Source: "yt-dlp"));
+                    Source: "yt-dlp",
+                    Severity: ReplayWarningSeverities.Info));
             }
         }
         else if (isLocalFile)
@@ -1293,6 +1298,15 @@ public sealed class AnalysisPipeline
     {
         var config = new ConfigStore().Load();
         var raw = CaptureModes.Normalize(request.CaptureMode ?? config.Capture.Mode);
+
+        // Host-aware shortcut: in auto mode, known browser-only hosts (Medius wrappers, Build,
+        // mediastream) always fail yt-dlp. Skip the ~10 s probe and route straight to browser
+        // so a bare `analyze <url>` doesn't pay a fixed-cost penalty per Medius/Build run.
+        if (raw == CaptureModes.Auto && KnownHosts.IsBrowserOnly(request.Source))
+        {
+            return CaptureModes.Browser;
+        }
+
         if (CaptureModes.IsKnown(raw))
         {
             return raw;
@@ -1401,7 +1415,10 @@ public sealed class AnalysisPipeline
         // resolve the inline media URL via a metadata-only probe, then drive ffmpeg directly.
         // The fast path for sources whose JS player can't boot headlessly (Medius/Build).
         // When no inline URL is discovered, falls through to the normal capture below.
-        if (request.PreferInlineMedia)
+        // Auto-enabled for known Medius-family hosts so a bare `analyze <url>` against
+        // Build/Medius doesn't emit the CAPTURE_DURATION_UNRESOLVED noise + sidestep dance.
+        var preferInlineMedia = request.PreferInlineMedia || KnownHosts.ShouldPreferInlineMedia(request.Source);
+        if (preferInlineMedia)
         {
             progress?.Report("Resolving inline media URL via metadata-only browser probe...");
             var probeRequest = new BrowserCaptureRequest(
@@ -2232,7 +2249,7 @@ public sealed record AnalyzeRequest(
     string LlmProvider = LlmProviders.GitHubCopilot,
     bool Force = false,
     bool UseCache = false,
-    string FrameStrategy = FrameSelectionStrategies.Scene,
+    string FrameStrategy = FrameSelectionStrategies.Interval,
     string? CookiesPath = null,
     string? CookiesFromBrowser = null,
     IReadOnlyList<string>? CaptionLanguages = null,

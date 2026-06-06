@@ -244,10 +244,10 @@ public sealed class CliJsonOutputTests
     }
 
     /// <summary>
-    /// Default text output is unchanged for back-compat. Verified by running the same
-    /// invocation without <c>--output-format json</c> and asserting the legacy
-    /// "Completed run: …" / "Artifacts: …" / "Manifest: …" lines are still present on
-    /// stdout.
+    /// Default text output still surfaces the run id, artifact directory, and manifest path
+    /// for orchestrators that grep stdout. 0.14 replaced the verbose "Completed run: …" line
+    /// with a compact "Done in &lt;elapsed&gt;. &lt;id&gt; …" header, but the run id and the
+    /// "Artifacts:" / "Manifest:" labels remain so existing scripts keep working.
     /// </summary>
     [Fact]
     public async Task AnalyzeWithoutOutputFormatStillEmitsLegacyTextLines()
@@ -268,7 +268,11 @@ public sealed class CliJsonOutputTests
 
         Assert.Equal(0, exitCode);
         var stdoutText = stdout.ToString();
-        Assert.Contains($"Completed run: {runIdValue}", stdoutText, StringComparison.Ordinal);
+        // 0.14 changed the summary format: "Completed run: <id>" was replaced with the
+        // compact "Done in <elapsed>. <id> [— pieces]" line. The run id, "Artifacts:", and
+        // "Manifest:" labels are still present so scripts that grep these strings keep working.
+        Assert.Contains("Done in", stdoutText, StringComparison.Ordinal);
+        Assert.Contains(runIdValue, stdoutText, StringComparison.Ordinal);
         Assert.Contains("Artifacts:", stdoutText, StringComparison.Ordinal);
         Assert.Contains("Manifest:", stdoutText, StringComparison.Ordinal);
     }

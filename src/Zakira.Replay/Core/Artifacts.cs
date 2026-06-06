@@ -72,19 +72,36 @@ public sealed class ArtifactStore
     }
 
     /// <summary>
-    /// Builds a deterministic run identifier from the source URL or local path. The result is a
-    /// slug of the source plus a short SHA-256 suffix so two sources that happen to slugify the
-    /// same (e.g. case-only differences in URL paths) still land in distinct run directories
-    /// while same-source reruns reuse the same folder for caching.
+    /// Builds a deterministic run identifier from the source URL or local path. The result is
+    /// a short, recognisable slug plus a 4-byte SHA-256 suffix so two sources that share a
+    /// session code (or slugify the same) still land in distinct directories while same-source
+    /// reruns reuse the same folder for caching. Slug choice:
+    /// <list type="bullet">
+    ///   <item>known source patterns (Microsoft Build sessions, Medius embeds, YouTube watch
+    ///     URLs) yield a compact session-code slug via <see cref="KnownHosts.TryExtractSessionCode"/>
+    ///     (e.g. <c>brk230-1ccc2f93</c>);</item>
+    ///   <item>everything else falls back to a trimmed slug of the source string, capped at
+    ///     <see cref="MaxFallbackSlugLength"/> chars so even long URLs produce a reasonable
+    ///     directory name.</item>
+    /// </list>
     /// </summary>
     public static string CreateDeterministicRunId(string source)
     {
         var trimmed = source?.Trim() ?? string.Empty;
-        var slug = Slug.Create(trimmed, 60);
         var hashBytes = SHA256.HashData(Encoding.UTF8.GetBytes(trimmed));
         var hashHex = Convert.ToHexString(hashBytes, 0, 4).ToLowerInvariant();
+
+        var sessionCode = KnownHosts.TryExtractSessionCode(trimmed);
+        if (!string.IsNullOrEmpty(sessionCode))
+        {
+            return $"{sessionCode}-{hashHex}";
+        }
+
+        var slug = Slug.Create(trimmed, MaxFallbackSlugLength);
         return slug.Length == 0 ? hashHex : $"{slug}-{hashHex}";
     }
+
+    private const int MaxFallbackSlugLength = 40;
 
     public bool TryGetExistingRun(string requestedRunId, out VideoRun run)
     {

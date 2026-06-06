@@ -86,7 +86,7 @@ When the source is a URL (not a local file), open `skills/zakira-replay/sources/
 
 ## Recommended Analysis Commands
 
-General evidence extraction (relies on the new defaults: `--frame-strategy scene`, `--ocr-provider local`, `--max-ai-frames 50`, `--scene-safety-cap 5000`, deterministic run-id):
+General evidence extraction (relies on the new defaults: `--frame-strategy interval`, `--frames 15`, `--capture-mode auto`, `--ocr-provider local`, `--max-ai-frames 50`, `--scene-safety-cap 5000`, deterministic run-id):
 
 ```powershell
 zakira-replay analyze "<url-or-file>" --ocr --vision --cache
@@ -166,16 +166,16 @@ In JSON mode, the `analyze` / `transcribe` / `frames` (legacy mode) commands emi
 
 ## Option Selection
 
-Defaults that ship out-of-the-box: `--frame-strategy scene` (no `--frames` cap, bounded by `frames.sceneSafetyCap=5000`), `--ocr-provider local` (offline RapidOCR; first OCR run auto-downloads ~30 MB models from ModelScope unless `ocr.local.autoDownload=false`), `--max-ai-frames 50` (per-slide OCR/vision cap), `--frames 500` (only used when `--frame-strategy interval`), `frames.perMinute=12` (duration-aware floor for interval strategy). The auto-generated run-id is deterministic per source URL: `<slug>-<sha8>` so re-running the same source reuses the same run folder and `--cache` short-circuits cleanly.
+Defaults that ship out-of-the-box (post-0.14 "Just Works" baseline): `--capture-mode auto` (tries yt-dlp first, falls back to browser; known browser-only hosts — Microsoft Build / Medius / mediastream — skip the yt-dlp probe entirely), `--frame-strategy interval` with `--frames 15`, `--ocr-provider local` (offline RapidOCR; first OCR run auto-downloads ~30 MB models from ModelScope unless `ocr.local.autoDownload=false`), `--max-ai-frames 50` (per-slide OCR/vision cap), `frames.perMinute=12` (duration-aware floor for interval strategy), prefer-inline-media auto-enabled for known Medius/Build hosts. The auto-generated run-id is deterministic per source URL: `<session-slug>-<sha8>` for known sources (e.g. `brk230-1ccc2f93`) or `<source-slug>-<sha8>` otherwise, so re-running the same source reuses the same run folder and `--cache` short-circuits cleanly. Verbosity defaults to "concise" — final summary + `warning`/`error` only; pass `--verbose`/`-v` for full progress + `info` warnings, `--quiet`/`-q` for errors only.
 
 Use these defaults unless the user says otherwise:
 
 - `--preset <name>`: opinionated defaults bundles for the most common scenarios. `meeting` enables `--ocr --vision --diarize --stt --audio`. `lecture` enables `--ocr --vision --audio`. `demo` enables `--ocr --vision --frame-strategy scene`. `interview` enables `--diarize --audio --stt --frames 0`. `raw` (or omitting `--preset`) leaves every flag at its individual default. Explicit flags always win, so `--preset meeting --frame-strategy interval` keeps the meeting bundle and overrides the frame strategy.
 - `--cache`: include by default for LLM-backed work; use `--force` only when intentionally recomputing.
-- `--frames 500` is the new general-analysis default for the `interval` strategy. Override down for cheap exploration (`--frames 30`) or up for very dense sampling (`--frames 5000` paired with `--frame-strategy interval`). When `--frame-strategy scene` is in effect (the default), `--frames` is ignored.
+- `--frames 15` is the new general-analysis default. Override down for cheap exploration (`--frames 5`) or up for dense sampling (`--frames 500` paired with `--frame-strategy interval`). When `--frame-strategy scene` is used, `--frames` becomes the cap, not the target.
 - `--frames 0 --frame-strategy interval`: transcript-only (no frames extracted).
-- `--frame-strategy scene` (default): presentations, demos, UI walkthroughs, slide videos, conference talks, anything with discrete visual changes. Returns one frame per detected scene change, slide-grouping deduplicates. Total frame count scales with content, capped at `frames.sceneSafetyCap` (default 5000).
-- `--frame-strategy interval`: dense uniform sampling, useful when you need a predictable count or when scene-detection produces too few frames (rare with the new default cap).
+- `--frame-strategy interval` (default): predictable N-frame sampling, bandwidth-light. Best for general analysis, slide-heavy talks at coarse granularity, and anything where you want a stable frame count regardless of content.
+- `--frame-strategy scene`: presentations, demos, UI walkthroughs, anything with discrete visual changes where you want one frame per scene cut. **Avoid on long HLS sources** (Microsoft Build keynotes, Medius wrappers) — ffmpeg has to decode every frame, so the full stream is pulled (~6–8 GB on a 3-hour keynote).
 - `--frame-strategy every-frame`: only when the user explicitly needs capped frame-by-frame inspection.
 - `--ocr`: enable when slides, code, dashboards, diagrams, documents, or burned-in captions may be visible.
 - `--ocr-provider <name>`: choose the OCR backend. `local` (default) runs RapidOCR (PP-OCRv5) entirely on-device via ONNX — no LLM, no network at run-time after the one-time model download. Defaults to the **latin** language pack; switch packs for non-Latin scripts via `zakira-replay deps install ocr --language <pack>` + `zakira-replay config set ocr.local.languagePack <pack>` (or `ZAKIRA_REPLAY_OCR_LANGUAGE_PACK`). Supported packs: `latin`, `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`. `copilot` routes the image through the configured LLM (GitHub Copilot, OpenAI, Azure OpenAI, or Ollama) using vision-capable chat models — prefer this for complex layouts, mixed scripts, or when `tables[]` reconstruction matters (the local provider leaves `tables[]` empty in this release). The first local-OCR run auto-downloads ~30 MB of models (set `ocr.local.autoDownload=false` to disable; pre-install with `zakira-replay deps install ocr [--language <pack>]`).
@@ -443,10 +443,9 @@ A batch manifest accepts every shared analyze option as a top-level default and 
 For an agent building a "book of a conference" workflow (e.g. all Microsoft Build sessions), the recommended pattern is queue-based:
 
 ```powershell
-# 1) Enqueue every session — captions + frames via the inline-media sidestep, no downloads.
+# 1) Enqueue every session — host-aware defaults handle browser/inline-media/captions/strategy.
 zakira-replay queue enqueue "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions" `
-    --queue-id build-2026 --capture-mode browser --frames 5 --frame-strategy interval `
-    --caption-languages en --prefer-inline-media
+    --queue-id build-2026
 # ...repeat per session...
 
 # 2) Drain in parallel.

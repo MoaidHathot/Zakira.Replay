@@ -188,20 +188,22 @@ Every command above honours `--output-format json` (`ndjson` is currently treate
 
 ## Defaults
 
-Out of the box, `zakira-replay analyze <url>` produces:
+Out of the box, `zakira-replay analyze <url>` (or `dnx Zakira.Replay analyze <url>`) produces:
 
 | Knob | Default | Override |
 |---|---|---|
-| Frame strategy | **`scene`** (ffmpeg scene-change boundaries) | `--frame-strategy interval\|every-frame` |
-| Frame count (interval/every-frame only) | **`500`** | `--frames <n>` |
+| Frame strategy | **`interval`** (predictable, bandwidth-friendly; was `scene` through 0.13) | `--frame-strategy scene\|every-frame` |
+| Frame count | **`15`** (was `500` through 0.13; lower default keeps cold runs fast) | `--frames <n>` |
 | Frames per minute (interval-strategy floor) | **`12`** (`frames.perMinute` config) | `--frames-per-minute <n>`; pass `0` to disable scaling |
 | Scene safety cap | **`5000`** scene frames | `--scene-safety-cap <n>` or `frames.sceneSafetyCap` config |
 | Max AI frames (OCR/vision per slide cap) | **`50`** | `--max-ai-frames <n>` |
 | OCR provider | **`local`** (RapidOCR via ONNX, no LLM, no network) | `--ocr-provider copilot` to route through an LLM |
 | OCR model auto-download | **on** (`ocr.local.autoDownload=true`) — first OCR run silently fetches ~30 MB of PP-OCRv5 latin models from ModelScope | `zakira-replay config set ocr.local.autoDownload false`, or pre-install with `deps install ocr` |
-| Run ID (when `--run-id` omitted) | **deterministic**: `<source-slug>-<sha8>` (e.g. `https-www-youtube-com-watch-v-abc-a3f9c2e1`). Same source URL always lands in the same run folder, so `--cache` reuse works without an explicit run-id | `--run-id <name>` to pin |
+| Run ID (when `--run-id` omitted) | **deterministic**: `<session-slug>-<sha8>` for known sources (Microsoft Build, Medius, YouTube — e.g. `brk230-1ccc2f93`), otherwise `<source-slug>-<sha8>` (capped at 40 chars). Same source URL always lands in the same run folder, so `--cache` reuse works without an explicit run-id | `--run-id <name>` to pin |
 | Smart-crop | off | `--smart-crop` |
-| Capture mode | `ytdlp` (yt-dlp + ffmpeg) | `--capture-mode browser\|auto` |
+| Capture mode | **`auto`** (yt-dlp first, falls back to browser on metadata failure; known browser-only hosts — Microsoft Build / Medius / mediastream — skip yt-dlp entirely) | `--capture-mode ytdlp\|browser` to force |
+| Inline-media short-circuit | **auto-on** for known Medius/Build hosts (skips the Shaka MSE duration probe, ffmpeg-seeks the inline HLS URL directly) | `--prefer-inline-media` to opt in on other browser-captured hosts |
+| Verbosity | **default** (compact start/done summary; suppresses `info`-severity warnings; surfaces `warning` + `error`) | `--verbose`/`-v` for the full progress stream + every warning; `--quiet`/`-q` for errors-only |
 
 The cache key (`runs/.cache/<sha256>.json`) is computed from the full request shape — `OcrProvider`, `SmartCrop`, `SmartCropProfile`, `CaptureMode`, and `AuthProfile` are part of it, so flipping any of these correctly invalidates prior cached runs.
 
@@ -1179,7 +1181,7 @@ If `--run-id` is provided and a completed `manifest.json` already exists, Zakira
 
 If `--cache` is provided without `--run-id`, Zakira.Replay computes a deterministic cache key from the source and analysis options and reuses a matching prior run. Cache entries are stored under `runs/.cache/`.
 
-Frame extraction defaults to **`scene`** sampling: ffmpeg returns frames at scene-change boundaries (filter `select=gt(scene,0.35)`), bounded by `frames.sceneSafetyCap` (default 5000). Slide grouping deduplicates near-identical scenes. Use `--frame-strategy interval` to sample N evenly-spaced frames (`--frames`, default 500, optionally scaled by `--frames-per-minute`, default `frames.perMinute=12` from config). Use `--frame-strategy every-frame` or `--every-frame` for capped sequential frame extraction, where `--frames`/`--count` is the safety cap.
+Frame extraction defaults to **`interval`** sampling: ffmpeg returns N evenly-spaced frames (`--frames`, default 15, optionally scaled by `--frames-per-minute`, default `frames.perMinute=12` from config). Use `--frame-strategy scene` for scene-change-boundary sampling (filter `select=gt(scene,0.35)`), bounded by `frames.sceneSafetyCap` (default 5000) — better for slide-heavy content but pulls the entire stream when the source is HLS. Use `--frame-strategy every-frame` or `--every-frame` for capped sequential frame extraction, where `--frames`/`--count` is the safety cap.
 
 Clip extraction writes timestamped clips under `clips/`:
 
@@ -1234,12 +1236,10 @@ Document frequency for TF-IDF is computed across the **merged corpus** (not per-
 #### Conference workflow (recommended for agent-driven "book of a conference")
 
 ```pwsh
-# 1) Enqueue each session — captions + frames via the inline-media sidestep, no downloads,
-#    4 in parallel. Per-host autoplay map (config) optional; not required because the
-#    --prefer-inline-media path doesn't engage the player.
+# 1) Enqueue each session — host-aware defaults (auto capture → browser, inline-media
+#    sidestep, captions auto) handle everything. 4 jobs in parallel below.
 zakira-replay queue enqueue "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions" `
-    --queue-id build-2026 --capture-mode browser --frames 5 --frame-strategy interval `
-    --caption-languages en --prefer-inline-media
+    --queue-id build-2026
 # ...repeat per session...
 
 zakira-replay queue run --queue-id build-2026 --concurrency 4 --retries 2

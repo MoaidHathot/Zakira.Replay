@@ -525,10 +525,13 @@ public sealed class BrowserVideoCaptureTests
     [Fact]
     public async Task AnalyzeAsyncFallsBackToInlineMediaUrlWhenDurationUnresolvedAndUrlDiscovered()
     {
-        // Simulates the KEY01 / Medius case: the JS player never boots so DurationSeconds is
-        // null and the in-browser FrameProducer captured nothing, BUT the Medius interceptor
-        // recovered the HLS URL from the embed HTML and surfaced it as InlineMediaUrl. The
-        // pipeline must hand that URL to ffmpeg and produce frames.
+        // Generic JS-rendered source (not in KnownHosts so prefer-inline-media is NOT
+        // auto-enabled): the JS player never boots so DurationSeconds is null and the
+        // in-browser FrameProducer captured nothing, BUT the interceptor recovered the HLS
+        // URL from the embed HTML and surfaced it as InlineMediaUrl. The pipeline must hand
+        // that URL to ffmpeg and produce frames via the duration-unresolved-fallback path.
+        // (Known Medius / Build hosts take the dedicated prefer-inline-media path instead;
+        // that's covered by AnalyzeAsyncPreferInlineMediaSkipsFullCaptureAndUsesSidestep.)
         using var temp = new TestTempDirectory();
         var store = new ArtifactStore(temp.GetPath("runs"));
 
@@ -536,14 +539,14 @@ public sealed class BrowserVideoCaptureTests
         {
             DurationSeconds = null,
             FrameProducer = _ => [],
-            InlineMediaUrl = "https://stream.event.microsoft.com/prodwe/x/master.m3u8"
+            InlineMediaUrl = "https://stream.example.com/x/master.m3u8"
         };
         var ffmpeg = new RecordingFfmpegClient { ProbedDuration = 7200 };
         var ytDlp = new RecordingYtDlpClient { Info = new YtDlpInfo { Id = "key01", Language = "en" }, ResolvedMediaUrl = null };
         var pipeline = new AnalysisPipeline(store, ytDlp, ffmpeg, _ => null, browser);
 
         var result = await pipeline.AnalyzeAsync(new AnalyzeRequest(
-            Source: "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
+            Source: "https://example.com/sessions/KEY01",
             VisionInstruction: string.Empty,
             IncludeTranscript: false,
             FrameCount: 5,
@@ -552,7 +555,7 @@ public sealed class BrowserVideoCaptureTests
             progress: null, CancellationToken.None);
 
         // ffmpeg received the inline HLS URL (not yt-dlp's null, not a local download path).
-        Assert.Equal("https://stream.event.microsoft.com/prodwe/x/master.m3u8", ffmpeg.LastMediaSource);
+        Assert.Equal("https://stream.example.com/x/master.m3u8", ffmpeg.LastMediaSource);
         // 5 frames produced via the sidestep — no empty-frames result.
         Assert.Equal(5, result.Manifest.Frames.Count);
         // Info breadcrumb explains the path taken.

@@ -49,7 +49,7 @@ zakira-replay transcribe "https://medius.studios.ms/Embed/video-nc/<id>" `
 
 ```json
 {
-  "tool": "analyze.start",
+  "tool": "analyze-start",
   "arguments": {
     "source": "https://medius.studios.ms/Embed/video-nc/<id>",
     "captureMode": "browser",

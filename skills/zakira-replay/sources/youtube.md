@@ -68,7 +68,7 @@ zakira-replay frames "https://youtu.be/<id>" --at "00:01:23,00:04:56"
 
 ```json
 {
-  "tool": "analyze.start",
+  "tool": "analyze-start",
   "arguments": {
     "source": "https://www.youtube.com/watch?v=dQw4w9WgXcQ",
     "frames": 7,

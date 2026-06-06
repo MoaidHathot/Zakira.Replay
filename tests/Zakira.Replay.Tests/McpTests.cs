@@ -12,7 +12,7 @@ using Zakira.Replay.Mcp;
 namespace Zakira.Replay.Tests;
 
 /// <summary>
-/// Exercises the 0.9.0 MCP surface (verb.noun tool names + replay:// resources) via the
+/// Exercises the MCP surface (verb-noun tool names + replay:// resources) via the
 /// official ModelContextProtocol SDK's in-memory pipe transport. The hand-rolled JSON-RPC
 /// server from 0.8.x has been retired; these tests therefore probe the contract through
 /// a real <see cref="McpClient"/> instead of the deleted internal API.
@@ -20,7 +20,7 @@ namespace Zakira.Replay.Tests;
 public sealed class McpTests
 {
     [Fact]
-    public async Task ToolsListIncludesVerbDotNounAnalysisTools()
+    public async Task ToolsListIncludesVerbNounAnalysisTools()
     {
         await using var harness = await McpTestHarness.CreateAsync();
 
@@ -28,18 +28,18 @@ public sealed class McpTests
         var names = tools.Select(tool => tool.Name).ToArray();
 
         Assert.Contains("analyze", names);
-        Assert.Contains("analyze.start", names);
-        Assert.Contains("analyze.status", names);
-        Assert.Contains("analyze.result", names);
-        Assert.Contains("analyze.cancel", names);
-        Assert.Contains("queue.enqueue", names);
-        Assert.Contains("queue.run", names);
-        Assert.Contains("queue.status", names);
+        Assert.Contains("analyze-start", names);
+        Assert.Contains("analyze-status", names);
+        Assert.Contains("analyze-result", names);
+        Assert.Contains("analyze-cancel", names);
+        Assert.Contains("queue-enqueue", names);
+        Assert.Contains("queue-run", names);
+        Assert.Contains("queue-status", names);
         Assert.Contains("frames", names);
         Assert.Contains("clip", names);
-        Assert.Contains("index.build", names);
-        Assert.Contains("index.query", names);
-        Assert.Contains("chapters.build", names);
+        Assert.Contains("index-build", names);
+        Assert.Contains("index-query", names);
+        Assert.Contains("chapters-build", names);
         Assert.Contains("align", names);
         Assert.Contains("discover", names);
         Assert.Contains("doctor", names);
@@ -72,7 +72,7 @@ public sealed class McpTests
         await using var harness = await McpTestHarness.CreateAsync();
 
         var tools = await harness.Client.ListToolsAsync();
-        var analyze = tools.Single(tool => tool.Name == "analyze.start");
+        var analyze = tools.Single(tool => tool.Name == "analyze-start");
 
         var json = JsonSerializer.Serialize(analyze.JsonSchema);
         var schema = JsonDocument.Parse(json).RootElement;
@@ -105,7 +105,7 @@ public sealed class McpTests
         var runDirectory = await CreateSearchRunAsync(temp);
         await using var harness = await McpTestHarness.CreateAsync();
 
-        var payload = await harness.CallAndParseAsync("index.build", new Dictionary<string, object?>
+        var payload = await harness.CallAndParseAsync("index-build", new Dictionary<string, object?>
         {
             ["runDirectory"] = runDirectory,
             ["backend"] = "sqlite"
@@ -123,7 +123,7 @@ public sealed class McpTests
         var runDirectory = await CreateChapterRunAsync(temp);
         await using var harness = await McpTestHarness.CreateAsync();
 
-        var payload = await harness.CallAndParseAsync("chapters.build", new Dictionary<string, object?>
+        var payload = await harness.CallAndParseAsync("chapters-build", new Dictionary<string, object?>
         {
             ["runDirectory"] = runDirectory,
             ["minDuration"] = 20,
@@ -178,7 +178,7 @@ public sealed class McpTests
                 services.AddTransient(_ => AnalysisPipelineTests.CreatePipeline(store));
             });
 
-            await harness.CallToolAsync("queue.enqueue", new Dictionary<string, object?>
+            await harness.CallToolAsync("queue-enqueue", new Dictionary<string, object?>
             {
                 ["source"] = sourcePath,
                 ["queueId"] = "mcp-queue",
@@ -188,13 +188,13 @@ public sealed class McpTests
                 ["noTranscript"] = true
             });
 
-            var runPayload = await harness.CallAndParseAsync("queue.run", new Dictionary<string, object?>
+            var runPayload = await harness.CallAndParseAsync("queue-run", new Dictionary<string, object?>
             {
                 ["queueId"] = "mcp-queue",
                 ["concurrency"] = 1,
                 ["retries"] = 0
             });
-            var statusPayload = await harness.CallAndParseAsync("queue.status", new Dictionary<string, object?>
+            var statusPayload = await harness.CallAndParseAsync("queue-status", new Dictionary<string, object?>
             {
                 ["queueId"] = "mcp-queue"
             });
@@ -470,18 +470,18 @@ internal sealed class McpTestHarness : IAsyncDisposable
             ServerInfo = new Implementation { Name = "Zakira.Replay", Version = ReplayVersion.Current },
             ToolCollection = [
                 McpServerTool.Create((Delegate)replayTools.AnalyzeAsync, new() { Name = "analyze", Description = "Synchronous analysis (≤10 min)." }),
-                McpServerTool.Create((Delegate)replayTools.AnalyzeStart, new() { Name = "analyze.start" }),
-                McpServerTool.Create((Delegate)replayTools.AnalyzeStatus, new() { Name = "analyze.status" }),
-                McpServerTool.Create((Delegate)replayTools.AnalyzeResult, new() { Name = "analyze.result" }),
-                McpServerTool.Create((Delegate)replayTools.AnalyzeCancel, new() { Name = "analyze.cancel" }),
-                McpServerTool.Create((Delegate)replayTools.QueueEnqueueAsync, new() { Name = "queue.enqueue" }),
-                McpServerTool.Create((Delegate)replayTools.QueueRunAsync, new() { Name = "queue.run" }),
-                McpServerTool.Create((Delegate)replayTools.QueueStatusAsync, new() { Name = "queue.status" }),
+                McpServerTool.Create((Delegate)replayTools.AnalyzeStart, new() { Name = "analyze-start" }),
+                McpServerTool.Create((Delegate)replayTools.AnalyzeStatus, new() { Name = "analyze-status" }),
+                McpServerTool.Create((Delegate)replayTools.AnalyzeResult, new() { Name = "analyze-result" }),
+                McpServerTool.Create((Delegate)replayTools.AnalyzeCancel, new() { Name = "analyze-cancel" }),
+                McpServerTool.Create((Delegate)replayTools.QueueEnqueueAsync, new() { Name = "queue-enqueue" }),
+                McpServerTool.Create((Delegate)replayTools.QueueRunAsync, new() { Name = "queue-run" }),
+                McpServerTool.Create((Delegate)replayTools.QueueStatusAsync, new() { Name = "queue-status" }),
                 McpServerTool.Create((Delegate)replayTools.ClipAsync, new() { Name = "clip" }),
                 McpServerTool.Create((Delegate)replayTools.FramesAsync, new() { Name = "frames" }),
-                McpServerTool.Create((Delegate)replayTools.IndexBuildAsync, new() { Name = "index.build" }),
-                McpServerTool.Create((Delegate)replayTools.IndexQueryAsync, new() { Name = "index.query" }),
-                McpServerTool.Create((Delegate)replayTools.ChaptersBuildAsync, new() { Name = "chapters.build" }),
+                McpServerTool.Create((Delegate)replayTools.IndexBuildAsync, new() { Name = "index-build" }),
+                McpServerTool.Create((Delegate)replayTools.IndexQueryAsync, new() { Name = "index-query" }),
+                McpServerTool.Create((Delegate)replayTools.ChaptersBuildAsync, new() { Name = "chapters-build" }),
                 McpServerTool.Create((Delegate)replayTools.AlignAsync, new() { Name = "align" }),
                 McpServerTool.Create((Delegate)replayTools.DiscoverAsync, new() { Name = "discover" }),
                 McpServerTool.Create((Delegate)replayTools.Doctor, new() { Name = "doctor" })

@@ -70,7 +70,7 @@ zakira-replay clip "C:\demos\walkthrough.mp4" --start 01:20 --end 02:05 --output
 zakira-replay analyze "<url-or-file>" --ocr --vision --cache --output-format json
 ```
 
-…or start the MCP server and let any MCP-aware client (Claude Desktop, Cursor, VS Code Copilot, hosted agent platforms) call `analyze`, `analyze.start`, `frames`, `clip`, `index.build`, `chapters.build`, etc. as native tools:
+…or start the MCP server and let any MCP-aware client (Claude Desktop, Cursor, VS Code Copilot, hosted agent platforms) call `analyze`, `analyze-start`, `frames`, `clip`, `index-build`, `chapters-build`, etc. as native tools:
 
 ```bash
 zakira-replay mcp serve                              # stdio (default; for subprocess MCP clients)
@@ -101,7 +101,7 @@ Reusable agent skill packages ship inside the NuGet package and the repo:
 | Skill | Location | When to use |
 |---|---|---|
 | `zakira-replay-cli` | [`skills/zakira-replay-cli/SKILL.md`](skills/zakira-replay-cli/SKILL.md) | Agent can run shell commands. The full CLI workflow: which flags to set per source type, how to read the artifacts, how to branch on warning codes, how to cite timestamps. |
-| `zakira-replay-mcp` | [`skills/zakira-replay-mcp/SKILL.md`](skills/zakira-replay-mcp/SKILL.md) | Agent is connected to `zakira-replay mcp serve`. Same workflow, but via the MCP tool surface (`analyze`, `analyze.start`, `frames`, `clip`, `chapters.build`, `index.build`, …) and `replay://` resources. |
+| `zakira-replay-mcp` | [`skills/zakira-replay-mcp/SKILL.md`](skills/zakira-replay-mcp/SKILL.md) | Agent is connected to `zakira-replay mcp serve`. Same workflow, but via the MCP tool surface (`analyze`, `analyze-start`, `frames`, `clip`, `chapters-build`, `index-build`, …) and `replay://` resources. |
 | `zakira-replay` (router) | [`skills/zakira-replay/SKILL.md`](skills/zakira-replay/SKILL.md) | Compatibility router. Points the agent at the right focused skill above based on what surface it has access to. |
 | Per-source profiles | [`skills/zakira-replay/sources/*.md`](skills/zakira-replay/sources/) | Indexed by host (SharePoint Stream, Microsoft Build / Medius, YouTube, generic). The agent looks up the URL's host and reads only the matching profile, which names the recommended capture mode, flags, expected artifacts, and known warnings for that source. |
 
@@ -1271,19 +1271,19 @@ It writes `chapters/chapters.json` and `chapters/chapters.md`.
 
 ## MCP Jobs
 
-MCP exposes both a blocking compatibility tool and non-blocking job tools (all renamed to `verb.noun` in 0.9.0):
+MCP exposes both a blocking compatibility tool and non-blocking job tools (all `verb-noun` kebab-case to satisfy clients that enforce `^[a-zA-Z0-9_-]{1,128}$` on tool names):
 
 - `analyze`: starts analysis and waits for completion. Use only for short videos.
-- `analyze.start`: starts analysis in the background and returns a `jobId`.
-- `analyze.status`: returns status and recent logs.
-- `analyze.result`: returns the completed manifest and artifact directory.
-- `analyze.cancel`: cancels a running job.
+- `analyze-start`: starts analysis in the background and returns a `jobId`.
+- `analyze-status`: returns status and recent logs.
+- `analyze-result`: returns the completed manifest and artifact directory.
+- `analyze-cancel`: cancels a running job.
 - `clip` / `frames`: extracts a timestamped video clip / ad-hoc stills.
-- `index.build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`; pass `onnxModel`, `onnxModelKind`, `onnxModelPath`, and `onnxTokenizerPath` to control the embedding model for `sqlite-onnx`.
-- `index.query`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`. Mismatched embedding models raise `SEARCH_INDEX_EMBEDDING_MISMATCH`.
-- `chapters.build`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
+- `index-build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`; pass `onnxModel`, `onnxModelKind`, `onnxModelPath`, and `onnxTokenizerPath` to control the embedding model for `sqlite-onnx`.
+- `index-query`: queries a run directory or search index. Optional `backend` values are `auto`, `json`, `sqlite`, and `sqlite-onnx`. Mismatched embedding models raise `SEARCH_INDEX_EMBEDDING_MISMATCH`.
+- `chapters-build`: builds transcript-based chapters for a completed run and writes `chapters/chapters.json` plus `chapters/chapters.md`.
 - `align`: builds the cross-modal `evidence-aligned/by-chapter.json` and `by-slide.json` views.
-- `queue.enqueue` / `queue.run` / `queue.status`: persistent local queue for many videos.
+- `queue-enqueue` / `queue-run` / `queue-status`: persistent local queue for many videos.
 - `discover` / `doctor`: surface dependency status and probe a page for video URLs.
 
 Agents should prefer the job tools for long videos or LLM-backed OCR/vision work.

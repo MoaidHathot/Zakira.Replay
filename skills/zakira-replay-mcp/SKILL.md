@@ -37,26 +37,26 @@ When the `source` is a URL (not a local file), open `skills/zakira-replay/source
 
 Prefer these tools:
 
-- `analyze.start`: start non-blocking analysis and get a `jobId`.
-- `analyze.status`: poll logs and status.
-- `analyze.result`: fetch completed manifest and artifact directory.
-- `chapters.build`: build `chapters/chapters.json` and `chapters/chapters.md` for a completed run.
-- `index.build`: build JSON, SQLite, or SQLite+ONNX search over a completed run.
-- `index.build-conference`: aggregate `evidence.json` from multiple completed runs into one cross-run / conference index at `<runs-root>/.indexes/<conferenceId>/index.json`. Each document carries its origin `runId` and `sourceUrl` so query results stay attributable per session.
-- `index.query`: retrieve relevant evidence chunks. `target` is polymorphic — accepts a file path, a run directory, or a conference id from `index.build-conference`. Each `SearchMatch` carries `deepLink` (time-anchored URL the agent can hand to the user), plus `runId` and `sourceUrl`.
+- `analyze-start`: start non-blocking analysis and get a `jobId`.
+- `analyze-status`: poll logs and status.
+- `analyze-result`: fetch completed manifest and artifact directory.
+- `chapters-build`: build `chapters/chapters.json` and `chapters/chapters.md` for a completed run.
+- `index-build`: build JSON, SQLite, or SQLite+ONNX search over a completed run.
+- `index-build-conference`: aggregate `evidence.json` from multiple completed runs into one cross-run / conference index at `<runs-root>/.indexes/<conferenceId>/index.json`. Each document carries its origin `runId` and `sourceUrl` so query results stay attributable per session.
+- `index-query`: retrieve relevant evidence chunks. `target` is polymorphic — accepts a file path, a run directory, or a conference id from `index-build-conference`. Each `SearchMatch` carries `deepLink` (time-anchored URL the agent can hand to the user), plus `runId` and `sourceUrl`.
 - `clip`: create a timestamped clip when start/end are known.
 - `frames`: ad-hoc frame capture at specific timestamps or inside a time window, without paying for the full analyze pipeline (no slides/OCR/vision/alignment). Use after a full `analyze` run when an agent needs additional stills for a downstream artifact (e.g. illustrating a recipe step, attaching a thumbnail to a chapter, or grabbing a screenshot at a transcript moment). For Microsoft Build / Medius sources, the tool automatically runs a fast browser metadata probe to recover the inline HLS URL — `frames --at "00:22:30"` against a Build session works without explicit `--allow-media-download`.
 - `align`: build cross-modal alignment views (`by-chapter`, `by-slide`) over a completed run. Pure rearrangement; no model calls.
 - `doctor`: diagnose dependencies and provider setup.
-- `queue.enqueue`, `queue.run`, `queue.status`: persistent queue workflow for many videos.
+- `queue-enqueue`, `queue-run`, `queue-status`: persistent queue workflow for many videos.
 
-Use `analyze` only for short, low-risk jobs where blocking is acceptable. For long videos, visual analysis, OCR, or STT work, use `analyze.start`.
+Use `analyze` only for short, low-risk jobs where blocking is acceptable. For long videos, visual analysis, OCR, or STT work, use `analyze-start`.
 
 ## Job Workflow
 
-1. Call `analyze.start` with source and analysis options.
-2. Poll `analyze.status` every few seconds until status is `succeeded`, `failed`, or `cancelled`.
-3. If `succeeded`, call `analyze.result`.
+1. Call `analyze-start` with source and analysis options.
+2. Poll `analyze-status` every few seconds until status is `succeeded`, `failed`, or `cancelled`.
+3. If `succeeded`, call `analyze-result`.
 4. Extract `artifactDirectory` from the result.
 5. Read `manifest.json` first, then the evidence artifacts needed for the user's request.
 6. Build chapters/search only after analysis succeeds.
@@ -192,7 +192,7 @@ Provider notes:
 
 Diarization (`useDiarization: true`): runs local sherpa-onnx speaker diarization (pyannote-segmentation-3.0 + 3D-Speaker embedding) over the audio after STT, labelling each transcript segment with a `SPEAKER_NN` cluster. Requires a transcript (set `useSpeechToText: true` or rely on captions). Combine `numSpeakers: <n>` when the number of speakers is known; otherwise `diarizationThreshold: <0.0-1.0>` (default 0.5) controls the cluster cutoff. The pipeline rewrites `transcript.md` with `[SPEAKER_NN]` prefixes and re-populates `evidence.speakers[]` plus `evidence-aligned/by-{slide,chapter}.json` speaker rollups automatically — no extra calls required. Pre-install models with `zakira-replay deps install diarization`. Surface-specific warnings: `DIARIZATION_NO_AUDIO`, `DIARIZATION_NO_TRANSCRIPT`, `DIARIZATION_MODELS_MISSING`, `DIARIZATION_INIT_FAILED`, `DIARIZATION_FAILED`.
 
-Conference / Build / Medius arguments (`analyze`, `analyze.start`, `queue.enqueue`):
+Conference / Build / Medius arguments (`analyze`, `analyze-start`, `queue-enqueue`):
 
 - `preferInlineMedia: true` — skip the in-browser play+duration probe. The pipeline runs a fast `MetadataOnly` browser probe (~3-5s vs ~25s for a duration timeout), reads the inline media URL the registered interceptors discovered (e.g. `MediusTranscriptInterceptor` for `medius.studios.ms` / `medius.microsoft.com` / `medius*.event.microsoft.com` / `build.microsoft.com/sessions/<CODE>`), ffmpeg-seeks the requested frames, AND downloads the inline captions in the same pass. Fast path for sources whose JS player won't boot headlessly. Falls through to the regular full-capture path when no inline URL is discovered; emits `CAPTURE_BROWSER_FALLBACK` (info). **Automatic version** (no arg required, always on for browser mode): when the in-browser play+duration probe yields no frames AND an interceptor recovered an inline URL, the pipeline transparently hands that URL to ffmpeg. Closes the "0 frames captured" gap for Build sessions.
 - `secondaryCaptionLanguages: "fr,he"` — opt-in additional-language transcripts written alongside the primary `transcript.md`. Surfaced on `manifest.secondaryTranscripts` as `{ language, markdownPath, sourcePath }[]` so the agent can discover them deterministically. Missing languages emit info warnings and skip — never fail.
@@ -201,7 +201,7 @@ Conference / Build / Medius arguments (`analyze`, `analyze.start`, `queue.enqueu
 
 ## Artifact Reading Order
 
-After `analyze.result`, read artifacts from `artifactDirectory` in this order:
+After `analyze-result`, read artifacts from `artifactDirectory` in this order:
 
 1. `manifest.json`: confirms produced artifacts, structured warnings, frame list, and paths. Each `FrameArtifact` may carry optional `width`, `height`, `crop` (`{x, y, width, height, source}`), and `originalPath` when smart-crop fired — the `path` field then points to the cropped variant and the perceptual hash was computed on the crop, not the original. Two newer fields agents should read: `secondaryTranscripts[]` (`{ language, markdownPath, sourcePath }` for each language requested via `secondaryCaptionLanguages`) and `sessionMetadata` (deterministic page-derived facts: `title`, `description`, `sessionCode`, `track`, `level`, `publishedAt`, `speakers[]`, `products[]`, `tags[]`, `sourceUrl`, with per-strategy provenance under `sources[]`).
 2. `evidence.json`: structured transcript segments, frames, slides, OCR, vision, per-speaker registry (`speakers[]`), structured warnings.
@@ -235,9 +235,9 @@ Available templates:
 - `replay://runs/{id}/aligned/by-slide` — `evidence-aligned/by-slide.json` (cross-modal rollup by slide).
 - `replay://runs/{id}/frames/{frameId}/ocr` — per-frame OCR JSON.
 - `replay://runs/{id}/frames/{frameId}/vision` — per-frame structured vision JSON.
-- `replay://jobs/{jobId}/logs` — the live in-memory log buffer of an MCP analyze job; subscribe to follow progress without polling `analyze.status`.
+- `replay://jobs/{jobId}/logs` — the live in-memory log buffer of an MCP analyze job; subscribe to follow progress without polling `analyze-status`.
 
-When `analyze.result` returns an `artifactDirectory`, the `runId` is the last path segment — use it as `{id}` in the resource URIs above. Reading a resource that does not exist on disk returns an MCP error with the missing path in the message; treat it the same way as a missing artifact in the artifact-reading workflow.
+When `analyze-result` returns an `artifactDirectory`, the `runId` is the last path segment — use it as `{id}` in the resource URIs above. Reading a resource that does not exist on disk returns an MCP error with the missing path in the message; treat it the same way as a missing artifact in the artifact-reading workflow.
 
 ## Search Workflow
 
@@ -268,8 +268,8 @@ Backend choice:
 - `sqlite-onnx`: semantic search via local ONNX embedding model, best for natural-language retrieval.
 
 Search-embedding model choice (0.10.0+): three models ship in the known-model registry.
-Pass `onnxModel` to `index.build` / `index.query` to select one; the default is
-`bge-small-en-v1.5`. Each model auto-downloads on first `index.build` when
+Pass `onnxModel` to `index-build` / `index-query` to select one; the default is
+`bge-small-en-v1.5`. Each model auto-downloads on first `index-build` when
 `search.onnx.autoDownload=true`.
 
 | Model id | Language | Footprint | Notes |
@@ -291,11 +291,11 @@ For custom local models, set `onnxModelPath` + `onnxTokenizerPath` and pass
 
 **Important**: indexes built with one model cannot be queried with another. If `onnxModel`
 differs from what the index was built with, the tool returns
-`SEARCH_INDEX_EMBEDDING_MISMATCH` and the recommended fix is to call `index.build` again
+`SEARCH_INDEX_EMBEDDING_MISMATCH` and the recommended fix is to call `index-build` again
 with `force=true` (per-run rebuild) or pass `onnxModel: "<original-id>"` to pin the
 indexed model.
 
-The `index.build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
+The `index-build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
 `embeddingDimensions` so orchestrators can persist the index identity alongside the
 `indexPath`.
 
@@ -396,25 +396,25 @@ Frame-capture-specific warning codes (all under `frames[*].warnings`/`manifest.w
 - `FRAME_CAPTURE_SCENE_CAP_REACHED` - the safety cap was hit during scene detection.
 - `FRAME_CAPTURE_MEDIA_URL_UNRESOLVED` - yt-dlp could not resolve a direct media URL; fell back to downloading.
 
-Do not use `frames` as a substitute for `analyze`/`analyze.start` when you actually need transcript, slides, OCR, vision, chapters, or evidence alignment. It is purpose-built for spot frames.
+Do not use `frames` as a substitute for `analyze`/`analyze-start` when you actually need transcript, slides, OCR, vision, chapters, or evidence alignment. It is purpose-built for spot frames.
 
 ## Queue Workflow
 
 Use the MCP queue tools for many videos or resumable local processing:
 
-1. `queue.enqueue` with `source`, `queueId`, optional `jobId`, and analysis options.
-2. `queue.run` with `queueId`, `concurrency`, and `retries`.
-3. `queue.status` to report pending/running/succeeded/failed jobs.
+1. `queue-enqueue` with `source`, `queueId`, optional `jobId`, and analysis options.
+2. `queue-run` with `queueId`, `concurrency`, and `retries`.
+3. `queue-status` to report pending/running/succeeded/failed jobs.
 4. Read each completed run's artifact directory before synthesizing results.
 
 ## Topic Summary And Work Items Pattern
 
 For requests like "watch this and summarize topics and work items":
 
-1. Use `analyze.start` with `frames: 30`, `frameStrategy: "scene"`, `stt: true`, `ocr: true`, `vision: true`, `cache: true`, and `maxAiFrames: 30` unless the user requests cheaper settings.
+1. Use `analyze-start` with `frames: 30`, `frameStrategy: "scene"`, `stt: true`, `ocr: true`, `vision: true`, `cache: true`, and `maxAiFrames: 30` unless the user requests cheaper settings.
 2. Poll until success and get `artifactDirectory`.
-3. Call `chapters.build`.
-4. Call `index.build` with `backend: "sqlite-onnx"` when available; use `sqlite` or `json` if ONNX is unavailable.
+3. Call `chapters-build`.
+4. Call `index-build` with `backend: "sqlite-onnx"` when available; use `sqlite` or `json` if ONNX is unavailable.
 5. Query for `action item`, `next steps`, `todo`, `follow up`, `decision`, `owner`, `deadline`, and project terms.
 6. Read `chapters/chapters.md`, `evidence.json`, `transcript.md`, and `ocr/combined.md`.
 7. Synthesize the topic summary and work items yourself from these facts. Write or return the requested Markdown output. If writing a file, place it next to artifacts, usually `<artifactDirectory>/work-items.md`.
@@ -439,8 +439,8 @@ If a job fails:
 - For access failures, retry only with legitimate `cookies`, `cookiesFromBrowser`, or `browserAuth`. For sites yt-dlp cannot reach at all (custom enterprise portals, Medius/Teams playback URLs), retry with `captureMode: "browser"`.
 - For SSO-gated sources, the **recommended setup** is `zakira-replay auth init-edge-profile [--url <site>]` on the user's machine (CLI-side, interactive, one-time-per-machine). This writes DPAPI-encrypted cookies into Edge's native storage; persistent-context mode then auto-activates on every subsequent `captureMode: "browser"` (or `"auto"`) MCP call against that origin, **no `authProfile` argument required**. If the run emits `CAPTURE_BROWSER_AUTH_REQUIRED` (error) or `CAPTURE_BROWSER_AUTH_MFA_DETECTED` (error), the Edge profile is missing or its session expired \u2014 ask the user to re-run `auth init-edge-profile`. `CAPTURE_BROWSER_PROFILE_LOCKED` (error) means a running Edge window is using the same user-data-dir; close Edge and retry. `CAPTURE_BROWSER_PROFILE_NOT_INITIALIZED` (info) indicates the profile path is configured but empty \u2014 first-time setup is needed. The legacy `auth login <name>` + `authProfile` path also works; `AUTH_PROFILE_STALE` recommends refreshing it, but for Microsoft sources prefer migrating to `auth init-edge-profile`.
 - **SharePoint Stream / Microsoft Stream transcripts** are downloaded automatically (with full speaker attribution as `<v Speaker>` voice spans) when the dedicated Edge profile is initialised and `captureMode: "browser"` is used. Look for `CAPTURE_STREAM_TRANSCRIPT_DISCOVERED` and `CAPTURE_STREAM_TRANSCRIPT_DOWNLOADED` (both info) in the manifest. If the page exposes transcripts metadata but Zakira can't parse the body, `CAPTURE_STREAM_METADATA_PARSE_FAILED` (warning) records the URL; if the download succeeded but the format wasn't recognised, `CAPTURE_STREAM_TRANSCRIPT_PARSE_FAILED` (warning) keeps the raw body in `captions/` for manual inspection.
-- **Microsoft Medius / Build / Ignite transcripts + frames** — `medius.studios.ms`, `medius.microsoft.com`, `medius*.event.microsoft.com`, and `build.microsoft.com/.../sessions/<CODE>` URLs go through the `MediusTranscriptInterceptor`. The interceptor parses the embed page's inline `captionsConfiguration` (SAS-signed `Caption_<lang>.vtt`) and `coreConfiguration` (HLS master playlist) — neither needs the Shaka MSE player to boot, so transcripts arrive even when `CAPTURE_DURATION_UNRESOLVED` fires. Look for `CAPTURE_MEDIUS_TRANSCRIPT_DISCOVERED` (info; lists language count), `CAPTURE_MEDIUS_TRANSCRIPT_DOWNLOADED` (info; per-language VTT under `captions/medius-NNNN-<lang>.vtt`), `CAPTURE_MEDIUS_TRANSCRIPT_FAILED` (warning) per failed caption download. For frames against the same sources, use `preferInlineMedia: true` on `analyze.start`/`queue.enqueue` (or rely on the automatic sidestep when the duration probe times out) to ffmpeg-seek the inline HLS URL. The `frames` tool runs the same probe transparently for `frames --at` ad-hoc captures.
-- **`MEDIA_DOWNLOAD_DECLINED` (error)** — the pipeline reached a local-download path but `allowMediaDownload: true` was not set (and `capture.allowMediaDownload` is `false` in config). The message names the gate. An agent should decide whether to prompt the user before retrying with `allowMediaDownload: true`. Affected paths: yt-dlp ffmpeg-failure fallback (`analyze.start`/`analyze`), STT fallback when no caption / audio source is reachable, spot-frames last-resort (`frames`), clip extraction (`clip`).
+- **Microsoft Medius / Build / Ignite transcripts + frames** — `medius.studios.ms`, `medius.microsoft.com`, `medius*.event.microsoft.com`, and `build.microsoft.com/.../sessions/<CODE>` URLs go through the `MediusTranscriptInterceptor`. The interceptor parses the embed page's inline `captionsConfiguration` (SAS-signed `Caption_<lang>.vtt`) and `coreConfiguration` (HLS master playlist) — neither needs the Shaka MSE player to boot, so transcripts arrive even when `CAPTURE_DURATION_UNRESOLVED` fires. Look for `CAPTURE_MEDIUS_TRANSCRIPT_DISCOVERED` (info; lists language count), `CAPTURE_MEDIUS_TRANSCRIPT_DOWNLOADED` (info; per-language VTT under `captions/medius-NNNN-<lang>.vtt`), `CAPTURE_MEDIUS_TRANSCRIPT_FAILED` (warning) per failed caption download. For frames against the same sources, use `preferInlineMedia: true` on `analyze-start`/`queue-enqueue` (or rely on the automatic sidestep when the duration probe times out) to ffmpeg-seek the inline HLS URL. The `frames` tool runs the same probe transparently for `frames --at` ad-hoc captures.
+- **`MEDIA_DOWNLOAD_DECLINED` (error)** — the pipeline reached a local-download path but `allowMediaDownload: true` was not set (and `capture.allowMediaDownload` is `false` in config). The message names the gate. An agent should decide whether to prompt the user before retrying with `allowMediaDownload: true`. Affected paths: yt-dlp ffmpeg-failure fallback (`analyze-start`/`analyze`), STT fallback when no caption / audio source is reachable, spot-frames last-resort (`frames`), clip extraction (`clip`).
 - If transcript is missing, the pipeline tries (in order) yt-dlp captions / sidecar `.vtt`/`.srt` / STT (when `stt: true`) / browser-discovered captions (when `captureMode` was `"browser"` or `"auto"` and the page fetched a `.vtt`/`.srt`). When all four return nothing, you'll see `TRANSCRIPT_NOT_FOUND` (or `TRANSCRIPT_NOT_FOUND_NO_STT` if `stt` was not set). Suggest enabling `stt: true` if the audio is good, or `captureMode: "browser"` if the page-side player exposes captions yt-dlp doesn't see.
 - If visual evidence is insufficient, rerun with more `frames`, `frameStrategy: "scene"`, `ocr: true`, or `vision: true`.
 - If a previous MCP job was interrupted by server restart, create a new job with the same arguments and `cache: true`.

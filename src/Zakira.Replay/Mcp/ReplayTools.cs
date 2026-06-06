@@ -13,9 +13,10 @@ namespace Zakira.Replay.Mcp;
 /// All Zakira.Replay MCP tools live here as instance methods decorated with
 /// <see cref="McpServerToolAttribute"/>. The MCP SDK auto-generates each tool's input
 /// schema from the method signature, so we don't hand-maintain JSON schemas anymore.
-/// Tool names follow the <c>verb.noun</c> convention shipped in 0.9.0; the surface is a
-/// hard break from the 0.8 names (analyze_video → analyze, build_search_index → index.build,
-/// etc.).
+/// Tool names follow the <c>verb-noun</c> convention (kebab-case). The <c>.</c> separator
+/// is rejected by MCP clients that enforce <c>^[a-zA-Z0-9_-]{1,128}$</c> on tool names
+/// (e.g. GitHub Copilot), so compound names use <c>-</c>: <c>analyze-start</c>,
+/// <c>index-build</c>, <c>chapters-build</c>, etc.
 ///
 /// Parameters are intentionally enumerated inline on each method instead of bundled into
 /// parameter records. This keeps the SDK-generated input schema flat (top-level properties
@@ -67,7 +68,7 @@ public sealed class ReplayTools
     // ---------------------------------------------------------------------------------------
 
     [McpServerTool(Name = "analyze")]
-    [Description("Runs a synchronous video analysis and returns the final job snapshot. Best for short videos (≤10 min). For long videos prefer analyze.start + analyze.result so the connection isn't held open while the pipeline runs.")]
+    [Description("Runs a synchronous video analysis and returns the final job snapshot. Best for short videos (≤10 min). For long videos prefer analyze-start + analyze-result so the connection isn't held open while the pipeline runs.")]
     public async Task<string> AnalyzeAsync(
         [Description("Video URL or local media path.")] string source,
         [Description("Optional focus signal appended to the vision prompt.")] string? visionInstruction = null,
@@ -130,8 +131,8 @@ public sealed class ReplayTools
         return Serialize(job.Snapshot(includeLogs: true));
     }
 
-    [McpServerTool(Name = "analyze.start")]
-    [Description("Starts a background video analysis and returns a job id. Use analyze.status / analyze.result to poll progress, analyze.cancel to stop.")]
+    [McpServerTool(Name = "analyze-start")]
+    [Description("Starts a background video analysis and returns a job id. Use analyze-status / analyze-result to poll progress, analyze-cancel to stop.")]
     public string AnalyzeStart(
         [Description("Video URL or local media path.")] string source,
         [Description("Optional focus signal appended to the vision prompt.")] string? visionInstruction = null,
@@ -181,19 +182,19 @@ public sealed class ReplayTools
         return Serialize(job.Snapshot(includeLogs: false));
     }
 
-    [McpServerTool(Name = "analyze.status")]
+    [McpServerTool(Name = "analyze-status")]
     [Description("Returns analysis job status and the most recent log messages.")]
     public string AnalyzeStatus(
-        [Description("Job id returned by analyze.start.")] string jobId)
+        [Description("Job id returned by analyze-start.")] string jobId)
     {
         var job = jobManager.Get(jobId) ?? throw new McpException($"Unknown jobId: {jobId}");
         return Serialize(job.Snapshot(includeLogs: true));
     }
 
-    [McpServerTool(Name = "analyze.result")]
+    [McpServerTool(Name = "analyze-result")]
     [Description("Returns the final analysis job result with manifest summary; reports {status:'running'} when the job hasn't finished yet.")]
     public string AnalyzeResult(
-        [Description("Job id returned by analyze.start.")] string jobId)
+        [Description("Job id returned by analyze-start.")] string jobId)
     {
         var job = jobManager.Get(jobId) ?? throw new McpException($"Unknown jobId: {jobId}");
         var snapshot = job.Snapshot(includeLogs: true);
@@ -211,10 +212,10 @@ public sealed class ReplayTools
         return Serialize(snapshot);
     }
 
-    [McpServerTool(Name = "analyze.cancel")]
+    [McpServerTool(Name = "analyze-cancel")]
     [Description("Cancels a running analysis job. Returns {cancelled:false} if the id is unknown or the job already finished.")]
     public string AnalyzeCancel(
-        [Description("Job id returned by analyze.start.")] string jobId)
+        [Description("Job id returned by analyze-start.")] string jobId)
     {
         var cancelled = jobManager.Cancel(jobId);
         return Serialize(new { jobId, cancelled });
@@ -224,7 +225,7 @@ public sealed class ReplayTools
     //  Persistent queue
     // ---------------------------------------------------------------------------------------
 
-    [McpServerTool(Name = "queue.enqueue")]
+    [McpServerTool(Name = "queue-enqueue")]
     [Description("Adds an analysis request to a persistent local queue under runs/.queue/. The queue survives process restarts.")]
     public async Task<string> QueueEnqueueAsync(
         [Description("Video URL or local media path.")] string source,
@@ -295,7 +296,7 @@ public sealed class ReplayTools
         });
     }
 
-    [McpServerTool(Name = "queue.run")]
+    [McpServerTool(Name = "queue-run")]
     [Description("Runs pending analysis queue jobs with local concurrency and retry limits.")]
     public async Task<string> QueueRunAsync(
         [Description("Persistent queue id. Defaults to 'default'.")] string? queueId = null,
@@ -308,7 +309,7 @@ public sealed class ReplayTools
         return Serialize(result);
     }
 
-    [McpServerTool(Name = "queue.status")]
+    [McpServerTool(Name = "queue-status")]
     [Description("Returns persistent analysis queue state and job statuses.")]
     public async Task<string> QueueStatusAsync(
         [Description("Persistent queue id. Defaults to 'default'.")] string? queueId = null,
@@ -431,7 +432,7 @@ public sealed class ReplayTools
     //  Search index
     // ---------------------------------------------------------------------------------------
 
-    [McpServerTool(Name = "index.build")]
+    [McpServerTool(Name = "index-build")]
     [Description("Builds a local search index over a completed run's evidence.json.")]
     public async Task<string> IndexBuildAsync(
         [Description("Completed Zakira.Replay run directory containing evidence.json.")] string runDirectory,
@@ -469,10 +470,10 @@ public sealed class ReplayTools
         });
     }
 
-    [McpServerTool(Name = "index.query")]
-    [Description("Queries a Zakira.Replay search index or run directory. Target accepts: a direct file path; a run directory (auto-resolves search/index.json or search/index.sqlite); or a conference id from a prior index.build-conference (resolves to <runs-root>/.indexes/<slug>/index.json).")]
+    [McpServerTool(Name = "index-query")]
+    [Description("Queries a Zakira.Replay search index or run directory. Target accepts: a direct file path; a run directory (auto-resolves search/index.json or search/index.sqlite); or a conference id from a prior index-build-conference (resolves to <runs-root>/.indexes/<slug>/index.json).")]
     public async Task<string> IndexQueryAsync(
-        [Description("Run directory, search/index.json path, or conference id from index.build-conference.")] string target,
+        [Description("Run directory, search/index.json path, or conference id from index-build-conference.")] string target,
         [Description("Search query string.")] string query,
         [Description("Maximum matches.")] int top = 5,
         [Description("Search backend: auto (default), json, sqlite, sqlite-onnx.")] string? backend = null,
@@ -500,7 +501,7 @@ public sealed class ReplayTools
         return Serialize(result);
     }
 
-    [McpServerTool(Name = "index.build-conference")]
+    [McpServerTool(Name = "index-build-conference")]
     [Description("Aggregates evidence.json from multiple completed runs into one cross-run / conference search index at <runs-root>/.indexes/<conferenceId>/index.json. Per-document RunId + SourceUrl let query results attribute each hit to its originating session with a deep link.")]
     public async Task<string> IndexBuildConferenceAsync(
         [Description("Stable id for the conference index (e.g. 'build-2026'). Slugified on disk.")] string conferenceId,
@@ -581,7 +582,7 @@ public sealed class ReplayTools
     //  Chapters + alignment
     // ---------------------------------------------------------------------------------------
 
-    [McpServerTool(Name = "chapters.build")]
+    [McpServerTool(Name = "chapters-build")]
     [Description("Builds deterministic transcript-based chapters for a completed run.")]
     public async Task<string> ChaptersBuildAsync(
         [Description("Completed Zakira.Replay run directory containing transcript evidence.")] string runDirectory,

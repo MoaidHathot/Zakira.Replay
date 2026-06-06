@@ -54,7 +54,7 @@ zakira-replay frames "https://build.microsoft.com/en-US/sessions/KEY01?source=se
 
 ```json
 {
-  "tool": "analyze.start",
+  "tool": "analyze-start",
   "arguments": {
     "source": "https://build.microsoft.com/en-US/sessions/KEY01?source=sessions",
     "captureMode": "browser",

@@ -527,7 +527,7 @@ zakira-replay mcp serve --transport http --port 8765
 zakira-replay mcp serve --transport sse --port 8765
 ```
 
-The MCP surface mirrors the CLI groups (`analyze`, `analyze.start`, `queue.enqueue`, `index.build`, `chapters.build`, `align`, `frames`, `clip`, `discover`, `doctor`) and additionally exposes `replay://` resources (`replay://runs`, `replay://runs/{id}/{manifest|evidence|transcript|chapters|aligned/by-…|frames/{frameId}/{ocr|vision}}`, `replay://jobs/{jobId}/logs`). See the companion `zakira-replay-mcp` skill for the full agent contract.
+The MCP surface mirrors the CLI groups (`analyze`, `analyze-start`, `queue-enqueue`, `index-build`, `chapters-build`, `align`, `frames`, `clip`, `discover`, `doctor`) and additionally exposes `replay://` resources (`replay://runs`, `replay://runs/{id}/{manifest|evidence|transcript|chapters|aligned/by-…|frames/{frameId}/{ocr|vision}}`, `replay://jobs/{jobId}/logs`). See the companion `zakira-replay-mcp` skill for the full agent contract.
 
 For shell-completion scripts (Bash, Zsh, PowerShell, Fish):
 

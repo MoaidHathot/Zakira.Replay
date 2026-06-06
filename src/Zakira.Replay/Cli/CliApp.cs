@@ -1460,7 +1460,7 @@ public static class CliApp
     }
 
     // ---------------------------------------------------------------------------------------
-    //  Shared option builder for analyze / transcribe / queue.enqueue.
+    //  Shared option builder for analyze / transcribe / queue enqueue.
     // ---------------------------------------------------------------------------------------
 
     private static (IReadOnlyList<Option> Options, Func<ParseResult, string, bool, int, string?, AnalyzeRequest> Apply) BuildAnalyzeOptions()

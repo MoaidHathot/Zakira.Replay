@@ -139,9 +139,9 @@ once with the new model; the runtime detects the mismatch and refuses to mix vec
     historical path-only `--onnx-model`), and `--onnx-tokenizer-path <file>`.
   - `zakira-replay deps status` now reports the resolved search-embedding model and
     `ONNX tokenizer:` path alongside the legacy ONNX model path.
-- **MCP** `index.build` / `index.query` tools take new parameters: `onnxModel`,
+- **MCP** `index-build` / `index-query` tools take new parameters: `onnxModel`,
   `onnxModelKind`, `onnxModelPath`, `onnxTokenizerPath` (plus the legacy `onnxVocab`).
-  `index.build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
+  `index-build` tool result now includes `embeddingModel`, `embeddingModelKind`, and
   `embeddingDimensions` so MCP clients can persist the index identity.
 - **`SEARCH_INDEX_EMBEDDING_MISMATCH`** error code. Querying a `sqlite-onnx` index built
   with model A using a runtime configured for model B raises this typed exception (HTTP
@@ -229,23 +229,23 @@ the official `ModelContextProtocol` C# SDK (1.3.0) and `System.CommandLine` 3.0-
 Every existing agent and script that talks to Zakira.Replay needs to update to the new
 names.
 
-### Breaking — MCP tool renames (`verb.noun`)
+### Breaking — MCP tool renames (`verb-noun`)
 
-| 0.8.x tool name                  | 0.9.0 tool name      |
+| 0.8.x tool name                  | tool name            |
 | -------------------------------- | -------------------- |
 | `analyze_video`                  | `analyze`            |
-| `create_analysis_job`            | `analyze.start`      |
-| `get_job_status`                 | `analyze.status`     |
-| `get_job_result`                 | `analyze.result`     |
-| `cancel_job`                     | `analyze.cancel`     |
-| `enqueue_analysis_queue_job`     | `queue.enqueue`      |
-| `run_analysis_queue`             | `queue.run`          |
-| `get_analysis_queue_status`      | `queue.status`       |
+| `create_analysis_job`            | `analyze-start`      |
+| `get_job_status`                 | `analyze-status`     |
+| `get_job_result`                 | `analyze-result`     |
+| `cancel_job`                     | `analyze-cancel`     |
+| `enqueue_analysis_queue_job`     | `queue-enqueue`      |
+| `run_analysis_queue`             | `queue-run`          |
+| `get_analysis_queue_status`      | `queue-status`       |
 | `extract_clip`                   | `clip`               |
 | `extract_frames`                 | `frames`             |
-| `build_search_index`             | `index.build`        |
-| `query_search_index`             | `index.query`        |
-| `build_chapters`                 | `chapters.build`     |
+| `build_search_index`             | `index-build`        |
+| `query_search_index`             | `index-query`        |
+| `build_chapters`                 | `chapters-build`     |
 | `build_evidence_alignment`       | `align`              |
 | `discover_videos`                | `discover`           |
 | `doctor`                         | `doctor`             |

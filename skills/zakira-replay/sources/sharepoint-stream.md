@@ -69,7 +69,7 @@ zakira-replay analyze "https://contoso-my.sharepoint.com/.../stream.aspx?id=..."
 
 ```json
 {
-  "tool": "analyze.start",
+  "tool": "analyze-start",
   "arguments": {
     "source": "https://contoso-my.sharepoint.com/.../stream.aspx?id=...",
     "captureMode": "browser",

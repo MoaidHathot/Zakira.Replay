@@ -10,7 +10,7 @@ Summarize this video and include timestamps for the main claims: https://example
 
 Agent behavior:
 
-- Start `analyze.start` with `frames: 7`, `frameStrategy: "scene"`, and `cache: true`.
+- Start `analyze-start` with `frames: 7`, `frameStrategy: "scene"`, and `cache: true`.
 - Add `ocr: true` and `vision: true` if slides, UI, code, or diagrams matter.
 - Poll until succeeded.
 - Read `manifest.json`, `evidence.json`, and `transcript.md`.
@@ -36,8 +36,8 @@ Agent behavior:
 MCP search flow:
 
 ```json
-{"name":"index.build","arguments":{"runDirectory":"<artifact-directory>","backend":"sqlite-onnx"}}
-{"name":"index.query","arguments":{"target":"<artifact-directory>","query":"model evaluation","backend":"sqlite-onnx","top":5}}
+{"name":"index-build","arguments":{"runDirectory":"<artifact-directory>","backend":"sqlite-onnx"}}
+{"name":"index-query","arguments":{"target":"<artifact-directory>","query":"model evaluation","backend":"sqlite-onnx","top":5}}
 ```
 
 ## Analyze Visual Content
@@ -71,7 +71,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "https://example.com/conference-talk",
     "visionInstruction": "Extract slide text and code blocks.",
@@ -100,7 +100,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "C:\\meetings\\team-sync.mp4",
     "visionInstruction": "Extract the slide content.",
@@ -131,7 +131,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "https://corp.example.com/training/abc",
     "visionInstruction": "Extract slide content from this internal training video.",
@@ -165,7 +165,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "https://medius.studios.ms/Embed/video-12345",
     "visionInstruction": "Extract slide titles, bullets, code blocks, and demo content.",
@@ -199,7 +199,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "https://microsofteur-my.sharepoint.com/personal/.../stream.aspx?id=...",
     "visionInstruction": "Extract slide content and visual evidence from this Teams meeting.",
@@ -259,7 +259,7 @@ Create chapter markers for this video and include supporting evidence.
 Agent behavior:
 
 - Analyze the video with transcript extraction.
-- Call `chapters.build` with the completed run directory.
+- Call `chapters-build` with the completed run directory.
 - Read `chapters/chapters.json` and cite chapter evidence timestamps. Generate any per-chapter labels yourself; chapters carry pure time spans plus evidence references, no titles or prose summaries.
 
 ## When LLM-Backed OCR Hangs
@@ -283,7 +283,7 @@ Agent behavior:
 
 ```json
 {
-  "name": "analyze.start",
+  "name": "analyze-start",
   "arguments": {
     "source": "C:/corp/training/onboarding.mp4",
     "visionInstruction": "Extract slide content from this internal training video.",
@@ -319,7 +319,7 @@ https://example.com/recipe-video
 
 Agent behavior:
 
-- Step 1: full `analyze` (or `analyze.start`) with `frames: 0` to get the transcript and chapter material cheaply, then `chapters.build` so each step in the recipe has a timestamp.
+- Step 1: full `analyze` (or `analyze-start`) with `frames: 0` to get the transcript and chapter material cheaply, then `chapters-build` so each step in the recipe has a timestamp.
 - Step 2: read `transcript.md` + `chapters/chapters.json` and identify a meaningful timestamp for each step (e.g. "deglaze the pan" at 04:12, "add the cream" at 06:35).
 - Step 3: call `frames` with the chosen timestamps. The full pipeline does not need to re-run; this captures stills only.
 

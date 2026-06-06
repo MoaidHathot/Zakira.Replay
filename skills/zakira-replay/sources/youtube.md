@@ -17,7 +17,7 @@ zakiraReplayVersion: 0.10.1+
 
 # YouTube
 
-The happy path. yt-dlp resolves YouTube URLs directly to a media URL ffmpeg can seek into, so the default `--capture-mode ytdlp` works without any flags. Captions are auto-discovered from the watch page; the default `--caption-languages auto` unions the source's primary language with English and any manually-uploaded sidecars.
+The happy path. yt-dlp resolves YouTube URLs directly to a media URL ffmpeg can seek into. The default `--capture-mode auto` (0.14+) tries yt-dlp first and falls back to browser on failure; for YouTube that means yt-dlp wins immediately, so no flags are needed. Captions are auto-discovered from the watch page; the default `--caption-languages auto` unions the source's primary language with English and any manually-uploaded sidecars.
 
 ## What works
 
@@ -53,8 +53,8 @@ zakira-replay transcribe "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
 Age-gated / members-only:
 
 ```pwsh
-zakira-replay analyze "https://www.youtube.com/watch?v=<id>" `
-  --cookies-from-browser edge --frames 7
+dnx Zakira.Replay analyze "https://www.youtube.com/watch?v=<id>" `
+  --cookies-from-browser edge
 ```
 
 Auto-generated captions are excluded from `--caption-languages auto` by design (they're inferences, not facts). To opt in to a specific auto-translation:

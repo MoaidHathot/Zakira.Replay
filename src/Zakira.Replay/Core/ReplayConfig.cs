@@ -137,7 +137,7 @@ public sealed class AuthConfig
 public sealed class CaptureConfig
 {
     /// <summary>
-    /// Frame-capture mode. <c>ytdlp</c> (default) uses yt-dlp to resolve a direct stream URL and
+    /// Frame-capture mode. <c>ytdlp</c> uses yt-dlp to resolve a direct stream URL and
     /// ffmpeg to extract frames — works for ~1000 sites yt-dlp supports. <c>browser</c> drives a
     /// Playwright-controlled Chromium (Edge) instance to click play, seek via JavaScript, and
     /// screenshot the &lt;video&gt; element at the chosen timestamps — works for sites yt-dlp can't

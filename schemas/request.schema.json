@@ -72,7 +72,7 @@
       "type": ["string", "null"]
     },
     "captureMode": {
-      "description": "Frame-capture mode. 'ytdlp' (default) uses yt-dlp + ffmpeg; 'browser' drives Playwright; 'auto' tries yt-dlp first and falls back to browser on failure (emits CAPTURE_BROWSER_FALLBACK).",
+      "description": "Frame-capture mode. 'auto' (default in 0.14+) tries yt-dlp + ffmpeg first and falls back to browser on failure; known browser-only hosts (Microsoft Build / Medius / mediastream) skip yt-dlp entirely. 'ytdlp' forces yt-dlp + ffmpeg. 'browser' forces Playwright. Browser fallback emits CAPTURE_BROWSER_FALLBACK.",
       "type": ["string", "null"],
       "enum": ["auto", "ytdlp", "browser", null]
     },

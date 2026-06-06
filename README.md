@@ -404,7 +404,7 @@ Tunables:
 For long videos, `--frames 30` with the `interval` strategy means a frame every `duration/30` seconds — likely too sparse for a 40-minute video. Two ways to densify:
 
 - `--frames-per-minute <n>` (CLI), `framesPerMinute` (MCP/batch). Scales the count by duration; `--frames` becomes the floor: `effective = max(framesPerMinute * durationMinutes, --frames)`. Ignored for `scene` and `every-frame`.
-- `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 5000 is generous for typical talks and slide-heavy demos.
+- `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 5000 is generous for typical talks and slide-heavy demos. **Avoid `scene` strategy on long HLS sources** (Microsoft Build / Medius); ffmpeg has to decode every frame to detect cuts, pulling the entire stream.
 
 If a run looks undersampled (fewer than 1 frame per 5 minutes for the `interval` strategy without `--frames-per-minute` and with `frames.perMinute=0` in config), Zakira.Replay emits a `FRAMES_LIKELY_UNDERSAMPLED` warning naming the actual ratio. When the scene safety cap is reached, it emits `FRAMES_SCENE_CAP_REACHED`. Both are facts; orchestrators can branch on the codes.
 
@@ -435,7 +435,7 @@ zakira-replay config set ocr.provider local
 Or override per run:
 
 ```bash
-zakira-replay analyze "<url>" --frames 7 --frame-strategy scene --ocr --ocr-provider local --cache
+zakira-replay analyze "<url>" --ocr --ocr-provider local --cache
 ```
 
 Install the local models (~30 MB, four files: detection ONNX, classification ONNX, recognition ONNX, character dictionary):
@@ -461,7 +461,7 @@ Warning codes emitted by the local provider:
 Meeting-platform recordings (Teams, Zoom, WebEx, etc.) wrap slide content with UI chrome: a controls bar at the top, a participant gallery on the right, black letterbox bars, and a slide-navigation strip at the bottom. That chrome wastes 30-50% of every frame, dilutes the perceptual-hash signal used for slide grouping, and pollutes OCR output with meeting-app vocabulary. Enable smart-crop to strip it before downstream stages run:
 
 ```bash
-zakira-replay analyze "C:\meetings\team-sync.mp4" --frames 12 --frame-strategy scene --ocr --vision --smart-crop
+zakira-replay analyze "C:\meetings\team-sync.mp4" --ocr --vision --smart-crop
 ```
 
 Or set the default once:
@@ -498,16 +498,18 @@ Warning codes emitted by smart-crop:
 
 `--capture-mode` (or `capture.mode` in config) selects how frames are pulled out of the source:
 
-- `ytdlp` (default) — resolve a direct media URL with `yt-dlp` and extract frames with `ffmpeg`. Works for the ~1000 sites yt-dlp supports plus local media files; cheap, fast, no browser required.
-- `browser` — drive a Playwright-controlled Chromium pinned to the user's Edge install (`edge.path`) to navigate the page, click play, poll `video.duration`, seek with `video.currentTime`, and screenshot the `<video>` element at evenly-spaced timestamps. Use for sites yt-dlp can't reach: custom enterprise portals, Medius/Teams recordings, dynamic players whose URL only serves a fully-rendered SPA.
-- `auto` — try yt-dlp first; if it can't resolve a direct media URL, fall back to `browser` and emit a `CAPTURE_BROWSER_FALLBACK` info-level warning so orchestrators can audit which path was used.
+- `auto` (**default in 0.14+**) — try yt-dlp first; if it can't resolve a direct media URL, fall back to `browser` and emit a `CAPTURE_BROWSER_FALLBACK` info-level warning so orchestrators can audit which path was used. For known browser-only hosts (`medius.studios.ms`, `medius.microsoft.com`, `medius*.event.microsoft.com`, `build.microsoft.com`, `mediastream.microsoft.com`) the yt-dlp probe is skipped entirely and capture routes straight to browser + inline-media sidestep.
+- `ytdlp` — force yt-dlp + ffmpeg. Works for the ~1000 sites yt-dlp supports plus local media files; cheap, fast, no browser required. Use when you want to fail fast rather than fall back to browser.
+- `browser` — force a Playwright-controlled Chromium pinned to the user's Edge install (`edge.path`) to navigate the page, click play, poll `video.duration`, seek with `video.currentTime`, and screenshot the `<video>` element at evenly-spaced timestamps. Use for sites yt-dlp can't reach: custom enterprise portals, Medius/Teams recordings, dynamic players whose URL only serves a fully-rendered SPA.
 
 ```bash
-# Force browser capture for an authenticated SharePoint portal
-zakira-replay analyze "https://corp.sharepoint.com/sites/.../watch/abc" --capture-mode browser --frames 7 --ocr --vision
+# Force browser capture for an authenticated SharePoint portal (SharePoint isn't in
+# KnownHosts since auth setups vary too much; explicit --capture-mode browser required)
+zakira-replay analyze "https://corp.sharepoint.com/sites/.../watch/abc" --capture-mode browser --ocr --vision
 
-# Let Zakira.Replay decide; safe to use as a default
-zakira-replay analyze "https://example.com/some-video" --capture-mode auto --frames 7 --cache
+# Default auto mode handles most sources without flags (yt-dlp for YouTube etc.,
+# browser+inline-media for Microsoft Build / Medius / mediastream automatically)
+zakira-replay analyze "https://example.com/some-video" --cache
 ```
 
 Browser-mode tunables (config keys; CLI access is limited to `--capture-mode` for now):

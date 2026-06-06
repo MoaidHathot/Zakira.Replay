@@ -129,7 +129,7 @@ public sealed class AnalysisPipeline
             {
                 warnings.Add(new ReplayWarning(
                     ReplayWarningCodes.MediaDownloadDeclined,
-                    "Analyze would have downloaded the source media to local disk for ffmpeg processing, but --allow-media-download is not set (and capture.allowMediaDownload is false in config). Pass --allow-media-download to opt in, or use --capture-mode browser --prefer-inline-media for Medius/Build sources.",
+                    "Analyze would have downloaded the source media to local disk for ffmpeg processing, but --allow-media-download is not set (and capture.allowMediaDownload is false in config). Pass --allow-media-download to opt in. (Microsoft Build / Medius / mediastream sources don't need this in 0.14+: capture mode auto-routes them to browser + inline-media sidestep without downloading.)",
                     Source: "yt-dlp",
                     Severity: ReplayWarningSeverities.Error));
                 return null;

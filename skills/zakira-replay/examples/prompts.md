@@ -10,7 +10,7 @@ Summarize this video and include timestamps for the main claims: https://example
 
 Agent behavior:
 
-- Start `analyze-start` with `frames: 7`, `frameStrategy: "scene"`, and `cache: true`.
+- Call `analyze-start` with `cache: true`. The 0.14 defaults (`frames: 15`, `frameStrategy: "interval"`, `captureMode: "auto"`) cover most general use; override only when the question demands it.
 - Add `ocr: true` and `vision: true` if slides, UI, code, or diagrams matter.
 - Poll until succeeded.
 - Read `manifest.json`, `evidence.json`, and `transcript.md`.
@@ -50,7 +50,7 @@ Review the dashboard shown in this demo and list the visible metrics: https://ex
 
 Agent behavior:
 
-- Use `frames: 12`, `frameStrategy: "scene"`, `ocr: true`, `vision: true`, and `cache: true`.
+- Use `frames: 12`, `ocr: true`, `vision: true`, and `cache: true`. Add `frameStrategy: "scene"` if the source is a direct-URL stream (YouTube, local file) — **avoid `"scene"` on HLS sources like Microsoft Build / Medius** since scene-cut detection pulls the entire stream.
 - Inspect `ocr/combined.md`, `vision/combined.md`, and frame images.
 - Separate visible text from inferred meaning.
 
@@ -66,7 +66,7 @@ Agent behavior:
 
 - Use `ocrProvider: "local"` to run RapidOCR (PP-OCRv5 latin) entirely on-device via ONNX. No LLM, no network at run-time after the models are installed.
 - The user must run `zakira-replay deps install ocr` once before the first local-OCR run; without the models the run emits `OCR_LOCAL_MODELS_MISSING`.
-- Combine with `frameStrategy: "scene"` and `frames: 30` for slide-heavy content.
+- Bump `frames: 30` for slide-heavy content (default is 15). Add `frameStrategy: "scene"` only when the source isn't an HLS stream.
 - Tradeoff to mention: lower fidelity than a frontier vision model on complex layouts; no `tables[]` reconstruction.
 
 ```json
@@ -76,7 +76,6 @@ Agent behavior:
     "source": "https://example.com/conference-talk",
     "visionInstruction": "Extract slide text and code blocks.",
     "frames": 30,
-    "frameStrategy": "scene",
     "ocr": true,
     "ocrProvider": "local",
     "cache": true
@@ -160,8 +159,8 @@ Summarize this Ignite session: https://medius.studios.ms/Embed/video-12345
 
 Agent behavior:
 
-- The user must first sign in to Medius interactively via `zakira-replay auth login ignite-2026 --url https://medius.studios.ms/`.
-- Then pass `captureMode: "browser"` and `authProfile: "ignite-2026"`. Captions arrive automatically through the network interceptor; no need for any Medius-specific code path.
+- The user must first sign in to Medius interactively via `zakira-replay auth login ignite-2026 --url https://medius.studios.ms/` (or use the dedicated Edge profile via `auth init-edge-profile`).
+- Then pass `authProfile: "ignite-2026"`. In 0.14+ `captureMode` defaults to `auto` and Medius hosts auto-route to browser + inline-media sidestep, so neither `captureMode` nor `preferInlineMedia` is required. Captions arrive automatically through `MediusTranscriptInterceptor`.
 
 ```json
 {
@@ -170,8 +169,6 @@ Agent behavior:
     "source": "https://medius.studios.ms/Embed/video-12345",
     "visionInstruction": "Extract slide titles, bullets, code blocks, and demo content.",
     "frames": 30,
-    "frameStrategy": "scene",
-    "captureMode": "browser",
     "authProfile": "ignite-2026",
     "ocr": true,
     "vision": true,

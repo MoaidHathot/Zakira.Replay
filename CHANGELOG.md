@@ -7,6 +7,79 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [Unreleased] — `analyze` / `transcribe` / `clip` / `batch run` / `queue enqueue` / `queue run` honour `--output-format json`
+
+Fixes the long-standing bug where the recursive global `--output-format json|ndjson` flag
+(documented as accepted on every subcommand) was silently dropped by every long-running
+pipeline command. Pre-fix, `zakira-replay analyze … --output-format json` emitted the
+same multi-line plain-text summary as text mode (`Completed run: …`, `Artifacts: …`,
+`Manifest: …`), so an orchestrator doing `JSON.parse(stdout)` would fail and was forced
+to either screen-scrape the `Manifest:` line, switch to the MCP `analyze` tool, or call
+`CliApp.RunAsync` in-process. The non-`analyze` JSON-emitting commands (`info`,
+`doctor`, `frames`, `runs list|show`, `index query`, `queue status`) already honoured
+the flag; this brings the remaining commands into line with the same contract.
+
+### Added
+
+- **JSON envelope on stdout** for every long-running pipeline command:
+  - `analyze`, `transcribe`, and the legacy `frames` (no `--at`/`--from`/`--to`) path
+    emit `{runId, reused, artifactDirectory, manifestPath, evidencePath,
+    transcriptPath, audioPath, ocrPath, visionPath, frameCount, title, webpageUrl,
+    duration, source, warnings[]}`. Absent artifacts are emitted as `null` rather than
+    omitted so consumers have a stable property set to key off. All paths are
+    absolute. Built by the new `CliApp.BuildAnalyzeJsonEnvelope` helper for
+    testability.
+  - `clip` emits `{runId, artifactDirectory, clipPath, relativeClipPath, startSeconds,
+    endSeconds, durationSeconds, warnings[]}`.
+  - `batch run` emits `{batchId, batchDirectory, completedAt, succeeded, failed,
+    total, items[]}` (each item is `{source, succeeded, runId, artifactDirectory,
+    error}`).
+  - `queue enqueue` emits `{queueId, jobId, queueDirectory, job}` where `job` is the
+    persisted `AnalysisQueueJob` record.
+  - `queue run` emits the full `AnalysisQueueRunResult` (same shape as the persisted
+    `last-run-result.json`).
+- **Progress routing**: in JSON mode, the pipeline's `IProgress<string>` callbacks
+  (`Run directory: …`, `Looking for sidecar subtitles…`, `Extracting scene-cut frames
+  with ffmpeg…`, etc.) write to **stderr** rather than stdout so stdout stays a
+  single parseable envelope. In text mode the behaviour is unchanged — progress
+  continues to flow to stdout the way 0.10.x scripts expect.
+- **Tests**: new `Zakira.Replay.Tests.CliJsonOutputTests` (8 tests) covers the
+  envelope shape unit-test surface (`BuildAnalyzeJsonEnvelope` with all-paths-set
+  and all-paths-null fixtures), the end-to-end CLI contract for `analyze`,
+  `transcribe`, ndjson mode, the legacy text mode (regression guard for
+  back-compat), and the new JSON paths for `queue enqueue` and `queue run`. Tests
+  isolate `runs/` writes via a `ZAKIRA_REPLAY_RUNS_DIRECTORY` env-var scope so
+  they don't leak into the host machine's run history.
+
+### Changed
+
+- **`RunPipelineAsync` signature** (`Zakira.Replay.Cli.CliApp`, private helper)
+  now takes an explicit `TextWriter stderr` and `bool isJson` so the CLI command
+  surface can route progress and errors per the chosen output format. Error
+  handling (`MissingDependencyException`, `OperationCanceledException`,
+  `ReplayException`) now writes through the injected `stderr` writer rather than
+  `Console.Error` directly, making the behaviour testable and consistent with the
+  rest of the System.CommandLine plumbing. Production behaviour is unchanged
+  because `Program.cs` passes `Console.Error` in.
+- **`BuildAnalyzeCommand`, `BuildTranscribeCommand`, `BuildFramesCommand`,
+  `BuildClipCommand`, `BuildBatchCommand`, `BuildQueueCommand`** signatures updated
+  to thread the global `--output-format` option and `stderr` writer through to
+  the per-command action delegates.
+
+### Docs
+
+- README's "Commands" section now lists `[--output-format json|text]` on every
+  command that supports it (previously `analyze`, `transcribe`, `clip`,
+  `batch run`, `queue enqueue`, and `queue run` were missing the flag despite the
+  global recursive option documentation).
+- New README section "`--output-format json` envelopes" documents the per-command
+  envelope shape so orchestrators can rely on a stable contract.
+- `skills/zakira-replay-cli/SKILL.md` global-flags section now spells out that all
+  long-running pipeline commands honour the flag (was previously only listed for
+  the diagnostic / read-only commands) and adds a worked example for parsing the
+  analyze envelope in PowerShell. The "Read Command Output" section recommends
+  `--output-format json` as the preferred path for agent-driven invocations.
+
 ## [0.10.0] — Configurable search-embedding model (breaking for `sqlite-onnx` indexes)
 
 The `sqlite-onnx` search backend now drives off a registry of known search-embedding models

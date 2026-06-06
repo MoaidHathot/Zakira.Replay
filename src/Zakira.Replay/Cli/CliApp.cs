@@ -77,17 +77,17 @@ public static class CliApp
             BuildVersionCommand(stdout),
             BuildInfoCommand(stdout, outputFormat),
             BuildDoctorCommand(stdout, outputFormat),
-            BuildAnalyzeCommand(stdout),
-            BuildTranscribeCommand(stdout),
-            BuildFramesCommand(stdout, outputFormat),
-            BuildClipCommand(stdout),
+            BuildAnalyzeCommand(stdout, stderr, outputFormat),
+            BuildTranscribeCommand(stdout, stderr, outputFormat),
+            BuildFramesCommand(stdout, stderr, outputFormat),
+            BuildClipCommand(stdout, stderr, outputFormat),
             BuildDiscoverCommand(stdout),
-            BuildBatchCommand(stdout),
+            BuildBatchCommand(stdout, outputFormat),
             BuildRunsCommand(stdout, outputFormat),
             BuildChaptersCommand(stdout),
             BuildAlignCommand(stdout),
             BuildIndexCommand(stdout, outputFormat),
-            BuildQueueCommand(stdout, outputFormat),
+            BuildQueueCommand(stdout, stderr, outputFormat),
             BuildLlmCommand(stdout),
             BuildDepsCommand(stdout),
             BuildAuthCommand(stdout),
@@ -182,7 +182,7 @@ public static class CliApp
     //  Analysis: analyze, transcribe
     // ---------------------------------------------------------------------------------------
 
-    private static Command BuildAnalyzeCommand(TextWriter stdout)
+    private static Command BuildAnalyzeCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
         var source = new Argument<string>("source") { Description = "Video URL or local media path." };
         var preset = new Option<string?>("--preset")
@@ -211,12 +211,12 @@ public static class CliApp
         {
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, true, parseResult.GetValue(frames), parseResult.GetValue(runId));
             request = ApplyPreset(request, parseResult.GetValue(preset));
-            return await RunPipelineAsync(request, stdout, cancellationToken).ConfigureAwait(false);
+            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
         });
         return command;
     }
 
-    private static Command BuildTranscribeCommand(TextWriter stdout)
+    private static Command BuildTranscribeCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
         var source = new Argument<string>("source") { Description = "Video URL or local media path." };
         var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
@@ -235,7 +235,7 @@ public static class CliApp
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, true, 0, parseResult.GetValue(runId));
-            return await RunPipelineAsync(request, stdout, cancellationToken).ConfigureAwait(false);
+            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
         });
         return command;
     }
@@ -244,7 +244,7 @@ public static class CliApp
     //  Media: frames, clip, discover
     // ---------------------------------------------------------------------------------------
 
-    private static Command BuildFramesCommand(TextWriter stdout, Option<string> outputFormat)
+    private static Command BuildFramesCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
         var source = new Argument<string>("source") { Description = "Video URL or local media path." };
         var at = new Option<string?>("--at") { Description = "Comma-separated timestamps to capture." };
@@ -300,7 +300,7 @@ public static class CliApp
                 var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
                 var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, false, parseResult.GetValue(count) ?? 500, parseResult.GetValue(runId));
                 _ = analyzeOptions; // not added to command; default values are used
-                return await RunPipelineAsync(request, stdout, cancellationToken).ConfigureAwait(false);
+                return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), cancellationToken).ConfigureAwait(false);
             }
 
             var captureRequest = new FrameCaptureRequest(
@@ -322,7 +322,10 @@ public static class CliApp
                 AllowMediaDownload: parseResult.GetValue(framesAllowDownload) || new ConfigStore().Load().Capture.AllowMediaDownload);
 
             var service = CreateFrameCaptureService();
-            var progress = new Progress<string>(stdout.WriteLine);
+            // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
+            var progress = IsJson(parseResult, outputFormat)
+                ? new Progress<string>(stderr.WriteLine)
+                : new Progress<string>(stdout.WriteLine);
             var result = await service.CaptureAsync(captureRequest, progress, cancellationToken).ConfigureAwait(false);
 
             if (IsJson(parseResult, outputFormat))
@@ -362,7 +365,7 @@ public static class CliApp
         return command;
     }
 
-    private static Command BuildClipCommand(TextWriter stdout)
+    private static Command BuildClipCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
         var source = new Argument<string>("source") { Description = "Video URL or local media path." };
         var start = new Option<string>("--start") { Description = "Clip start timestamp.", Required = true };
@@ -380,7 +383,11 @@ public static class CliApp
         command.SetAction(async (parseResult, cancellationToken) =>
         {
             var service = CreateClipService();
-            var progress = new Progress<string>(stdout.WriteLine);
+            var isJson = IsJson(parseResult, outputFormat);
+            // In JSON mode, progress lines go to stderr so stdout can stay a single parseable JSON envelope.
+            var progress = isJson
+                ? new Progress<string>(stderr.WriteLine)
+                : new Progress<string>(stdout.WriteLine);
             var result = await service.ExtractAsync(new ClipExtractionRequest(
                 Source: parseResult.GetValue(source)!,
                 Start: Timestamp.ParseRequired(parseResult.GetValue(start)!, "start"),
@@ -390,6 +397,22 @@ public static class CliApp
                 CookiesPath: parseResult.GetValue(cookies),
                 CookiesFromBrowser: parseResult.GetValue(browserAuth),
                 AllowMediaDownload: parseResult.GetValue(clipAllowDownload) || new ConfigStore().Load().Capture.AllowMediaDownload), progress, cancellationToken).ConfigureAwait(false);
+
+            if (isJson)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    runId = result.Run.Id,
+                    artifactDirectory = result.Run.Directory,
+                    clipPath = result.Run.GetPath(result.Manifest.ClipPath),
+                    relativeClipPath = result.Manifest.ClipPath,
+                    startSeconds = result.Manifest.Start.TotalSeconds,
+                    endSeconds = result.Manifest.End.TotalSeconds,
+                    durationSeconds = (result.Manifest.End - result.Manifest.Start).TotalSeconds,
+                    warnings = result.Manifest.Warnings
+                }, CliJson.Options));
+                return 0;
+            }
 
             stdout.WriteLine();
             stdout.WriteLine($"Completed clip: {result.Run.Id}");
@@ -435,7 +458,7 @@ public static class CliApp
         return command;
     }
 
-    private static Command BuildBatchCommand(TextWriter stdout)
+    private static Command BuildBatchCommand(TextWriter stdout, Option<string> outputFormat)
     {
         var run = new Command("run", "Runs a JSON-defined batch of analyses.");
         var manifest = new Argument<FileInfo>("manifest") { Description = "Path to the batch manifest JSON file." };
@@ -447,18 +470,47 @@ public static class CliApp
         run.SetAction(async (parseResult, cancellationToken) =>
         {
             var runner = new BatchRunner(CreatePipeline);
-            var progress = new Progress<string>(stdout.WriteLine);
+            var isJson = IsJson(parseResult, outputFormat);
+            // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
+            var progress = isJson
+                ? new Progress<string>(_ => { }) // batch progress is a stream of free-form text; suppress in JSON mode rather than mix with stderr/log channels
+                : new Progress<string>(stdout.WriteLine);
             var result = await runner.RunAsync(
                 parseResult.GetValue(manifest)!.FullName,
                 progress,
                 cancellationToken,
                 parseResult.GetValue(concurrency)).ConfigureAwait(false);
+            var succeeded = result.Items.Count(item => item.Succeeded);
+            var failed = result.Items.Count(item => !item.Succeeded);
+
+            if (isJson)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    batchId = result.BatchId,
+                    batchDirectory = result.BatchDirectory,
+                    completedAt = result.CompletedAt,
+                    succeeded,
+                    failed,
+                    total = result.Items.Count,
+                    items = result.Items.Select(item => new
+                    {
+                        source = item.Source,
+                        succeeded = item.Succeeded,
+                        runId = item.RunId,
+                        artifactDirectory = item.ArtifactDirectory,
+                        error = item.Error
+                    })
+                }, CliJson.Options));
+                return failed > 0 ? 1 : 0;
+            }
+
             stdout.WriteLine();
             stdout.WriteLine($"Completed batch: {result.BatchId}");
             stdout.WriteLine($"Batch artifacts: {result.BatchDirectory}");
-            stdout.WriteLine($"Succeeded: {result.Items.Count(item => item.Succeeded)}");
-            stdout.WriteLine($"Failed: {result.Items.Count(item => !item.Succeeded)}");
-            return result.Items.Any(item => !item.Succeeded) ? 1 : 0;
+            stdout.WriteLine($"Succeeded: {succeeded}");
+            stdout.WriteLine($"Failed: {failed}");
+            return failed > 0 ? 1 : 0;
         });
 
         var command = new Command("batch", "Run a manifest-driven batch of analyses.") { run };
@@ -875,7 +927,7 @@ public static class CliApp
     //  queue: enqueue, run, status
     // ---------------------------------------------------------------------------------------
 
-    private static Command BuildQueueCommand(TextWriter stdout, Option<string> outputFormat)
+    private static Command BuildQueueCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
         var queueId = new Option<string?>("--queue-id") { Description = "Persistent queue id. Defaults to 'default'." };
 
@@ -909,6 +961,19 @@ public static class CliApp
                 parseResult.GetValue(jobId),
                 parseResult.GetValue(retries),
                 cancellationToken).ConfigureAwait(false);
+
+            if (IsJson(parseResult, outputFormat))
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new
+                {
+                    queueId = result.QueueId,
+                    jobId = result.JobId,
+                    queueDirectory = result.QueueDirectory,
+                    job = result.Job
+                }, CliJson.Options));
+                return 0;
+            }
+
             stdout.WriteLine($"Enqueued job: {result.JobId}");
             stdout.WriteLine($"Queue: {result.QueueId}");
             stdout.WriteLine($"Queue directory: {result.QueueDirectory}");
@@ -924,7 +989,11 @@ public static class CliApp
         run.SetAction(async (parseResult, cancellationToken) =>
         {
             var queue = new AnalysisQueue(CreatePipeline);
-            var progress = new Progress<string>(stdout.WriteLine);
+            var isJson = IsJson(parseResult, outputFormat);
+            // In JSON mode, progress lines go to stderr so stdout stays a single parseable JSON envelope.
+            var progress = isJson
+                ? new Progress<string>(stderr.WriteLine)
+                : new Progress<string>(stdout.WriteLine);
             var result = await queue.RunAsync(
                 parseResult.GetValue(queueId),
                 new AnalysisQueueRunOptions(
@@ -932,6 +1001,13 @@ public static class CliApp
                     Retries: parseResult.GetValue(runRetries)),
                 progress,
                 cancellationToken).ConfigureAwait(false);
+
+            if (isJson)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(result, CliJson.Options));
+                return result.Failed > 0 ? 1 : 0;
+            }
+
             stdout.WriteLine();
             stdout.WriteLine($"Completed queue run: {result.QueueId}");
             stdout.WriteLine($"Queue directory: {result.QueueDirectory}");
@@ -1564,10 +1640,15 @@ public static class CliApp
         return value is "json" or "ndjson";
     }
 
-    private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, CancellationToken cancellationToken)
+    private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, TextWriter stderr, bool isJson, CancellationToken cancellationToken)
     {
         var pipeline = CreatePipeline();
-        var progress = new Progress<string>(stdout.WriteLine);
+        // In JSON mode, progress lines go to stderr so stdout can stay a single parseable
+        // JSON envelope. In text mode, progress continues to flow to stdout the way it did
+        // before so existing scripts that grep stdout still see the same breadcrumbs.
+        var progress = isJson
+            ? new Progress<string>(stderr.WriteLine)
+            : new Progress<string>(stdout.WriteLine);
         AnalyzeResult result;
         try
         {
@@ -1579,18 +1660,29 @@ public static class CliApp
             // escapes to System.CommandLine's default handler, which prints a raw stack trace
             // ("Unhandled exception: ...") rather than the actionable message and exit code we
             // surface elsewhere (Program.cs only sees exceptions thrown OUTSIDE the command action).
-            Console.Error.WriteLine(ex.ToDisplayString());
+            stderr.WriteLine(ex.ToDisplayString());
             return 2;
         }
         catch (OperationCanceledException)
         {
-            Console.Error.WriteLine("Error: operation cancelled.");
+            stderr.WriteLine("Error: operation cancelled.");
             return 130;
         }
         catch (ReplayException ex)
         {
-            Console.Error.WriteLine($"Error: {ex.Message}");
+            stderr.WriteLine($"Error: {ex.Message}");
             return 1;
+        }
+
+        if (isJson)
+        {
+            // Single-line JSON envelope on stdout: everything an orchestrator needs to pick
+            // up the run without having to re-read manifest.json. Absolute paths are emitted
+            // for the artifacts that are present so callers can `File.Exists` / open them
+            // directly; relative paths are preserved on `manifestPaths` for use cases that
+            // archive the run directory and need portable paths.
+            stdout.WriteLine(JsonSerializer.Serialize(BuildAnalyzeJsonEnvelope(result), CliJson.Options));
+            return 0;
         }
 
         stdout.WriteLine();
@@ -1607,6 +1699,35 @@ public static class CliApp
             }
         }
         return 0;
+    }
+
+    /// <summary>
+    /// Builds the JSON envelope emitted by <c>analyze</c> / <c>transcribe</c> / the
+    /// <c>frames</c> back-compat path when <c>--output-format json|ndjson</c> is set.
+    /// Shape is documented in README.md ("analyze --output-format json"); keep this in sync
+    /// with that documentation. `null` fields are preserved (not omitted) so consumers can
+    /// rely on a stable property set.
+    /// </summary>
+    internal static object BuildAnalyzeJsonEnvelope(AnalyzeResult result)
+    {
+        return new
+        {
+            runId = result.Run.Id,
+            reused = result.Reused,
+            artifactDirectory = result.Run.Directory,
+            manifestPath = result.Run.GetPath("manifest.json"),
+            evidencePath = result.Manifest.EvidencePath is null ? null : result.Run.GetPath(result.Manifest.EvidencePath),
+            transcriptPath = result.Manifest.TranscriptPath is null ? null : result.Run.GetPath(result.Manifest.TranscriptPath),
+            audioPath = result.Manifest.AudioPath is null ? null : result.Run.GetPath(result.Manifest.AudioPath),
+            ocrPath = result.Manifest.OcrPath is null ? null : result.Run.GetPath(result.Manifest.OcrPath),
+            visionPath = result.Manifest.VisionPath is null ? null : result.Run.GetPath(result.Manifest.VisionPath),
+            frameCount = result.Manifest.Frames.Count,
+            title = result.Manifest.Title,
+            webpageUrl = result.Manifest.WebpageUrl,
+            duration = result.Manifest.Duration,
+            source = result.Manifest.Source,
+            warnings = result.Manifest.Warnings
+        };
     }
 
     private static AnalysisPipeline CreatePipeline()

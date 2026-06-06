@@ -99,10 +99,10 @@ For one-off ad-hoc operations without a full analyze run, see `zakira-replay fra
 zakira-replay doctor [--output-format json|text]
 zakira-replay info [--output-format json|text]
 zakira-replay version
-zakira-replay analyze <url-or-file> [--preset meeting|lecture|demo|interview|raw] [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force]
-zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force]
+zakira-replay analyze <url-or-file> [--preset meeting|lecture|demo|interview|raw] [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force] [--output-format json|text]
+zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force] [--output-format json|text]
 zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--output-format json|text]
-zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>]
+zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>] [--output-format json|text]
 zakira-replay runs list [--output-format json|text]
 zakira-replay runs show <run-id> [--output-format json|text]
 zakira-replay runs delete <run-id> --force
@@ -112,9 +112,9 @@ zakira-replay index query <run-directory-or-index> <query> [--top <n>] [--backen
 zakira-replay chapters build <run-directory> [--min-duration <seconds>] [--max-duration <seconds>]
 zakira-replay align build <run-directory>
 zakira-replay discover <url> [--browser] [--output <path>]
-zakira-replay batch run <manifest.json>
-zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>]
-zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>]
+zakira-replay batch run <manifest.json> [--output-format json|text]
+zakira-replay queue enqueue <url-or-file> [analysis options] [--queue-id <id>] [--job-id <id>] [--retries <n>] [--output-format json|text]
+zakira-replay queue run [--queue-id <id>] [--concurrency <n>] [--retries <n>] [--output-format json|text]
 zakira-replay queue status [--queue-id <id>] [--output-format json|text]
 zakira-replay llm chat "<prompt>" [--llm-provider <name>] [--model <id>] [--attach <path>]
 zakira-replay deps install [yt-dlp|ffmpeg|ffprobe|onnx|ocr|whisper-model|diarization|vision|media|all] [--whisper-model tiny|base|small|medium|large-v3|large-v3-turbo] [--language <pack>] [--mode heuristic|clip|clip-caption] [--model <search-embedding-id>] [--force]
@@ -131,6 +131,34 @@ zakira-replay completion {bash|zsh|pwsh|fish}
 ```
 
 Recursive global flags (accepted on every command above): `--output-format text|json|ndjson` (replaces the 0.8.x per-command `--json` flag), `--log-file <path>`, `--log-level info|debug|trace`, `--correlation-id <string>`.
+
+### `--output-format json` envelopes
+
+Every command above honours `--output-format json` (`ndjson` is currently treated identically — reserved for future per-event streaming). In JSON mode, stdout is **exactly one JSON object** per invocation, and human-readable progress lines (`Run directory: …`, `Looking for sidecar subtitles…`, etc.) are routed to **stderr** so stdout stays parseable. Errors continue to land on stderr; the exit code distinguishes success (0) from failure (≥1).
+
+`analyze`, `transcribe`, and the legacy `frames` (no `--at`/`--from`/`--to`) path emit:
+
+```jsonc
+{
+  "runId": "json-analyze-<id>",
+  "reused": false,                                         // true when --cache short-circuited
+  "artifactDirectory": "<runs-root>/runs/<run-id>",        // absolute
+  "manifestPath": "<runs-root>/runs/<run-id>/manifest.json",
+  "evidencePath": "<runs-root>/runs/<run-id>/evidence.json",   // null when transcript-only / not produced
+  "transcriptPath": "<runs-root>/runs/<run-id>/transcript.md", // null when --no-transcript / no captions
+  "audioPath":  "<runs-root>/runs/<run-id>/audio/audio.wav",   // null when --audio not set
+  "ocrPath":    "<runs-root>/runs/<run-id>/ocr/combined.md",   // null when --ocr not set
+  "visionPath": "<runs-root>/runs/<run-id>/vision/combined.md",// null when --vision not set
+  "frameCount": 7,
+  "title": "Example Title",                                // from yt-dlp / page metadata; null for local files
+  "webpageUrl": "https://example.test/video",              // null for local files
+  "duration": "00:01:30",                                  // null when probe failed
+  "source": "https://example.test/video",                  // verbatim input
+  "warnings": [{ "code": "OCR_PARSE_FALLBACK", "message": "…", "source": "ocr", "severity": "warning" }]
+}
+```
+
+`clip`, `batch run`, `queue enqueue`, and `queue run` emit their own envelopes with the same one-object-on-stdout contract — `clip` returns `{runId, artifactDirectory, clipPath, startSeconds, endSeconds, durationSeconds, warnings}`; `batch run` returns `{batchId, batchDirectory, completedAt, succeeded, failed, total, items[]}`; `queue enqueue` returns `{queueId, jobId, queueDirectory, job}`; `queue run` returns the full `AnalysisQueueRunResult` (`{queueId, queueDirectory, attempted, succeeded, failed, pending, jobs[], …}`, same shape as the persisted `last-run-result.json`). All paths are absolute.
 
 ## Defaults
 
@@ -554,6 +582,55 @@ Warning codes specific to Medius:
   and persisted under `captions/medius-NNNN-<lang>.vtt`.
 - `CAPTURE_MEDIUS_TRANSCRIPT_FAILED` (warning) — a discovered caption could not be
   downloaded (HTTP error or empty body).
+
+#### Microsoft Build "InstaVOD" via `mediastream.microsoft.com`
+
+A second, distinct player ships on `mediastream.microsoft.com` for Build sessions whose
+recording was post-produced through the Harmonic media pipeline (e.g. BRK247, BRK201). Its
+`onDemandUrl` looks like:
+
+```
+https://mediastream.microsoft.com/events/players/live/mvp/player.html?path=/events/<YEAR>/<EVENT>/<TENANT>/player/json/Config-<TENANT>-<CODE>IVOD.json
+```
+
+Unlike Medius, this wrapper page contains **no inline `captionsConfiguration`** — the
+captions live on an HLS subtitle track that's only discoverable by:
+
+1. Reading the `path=` query parameter and fetching the JSON config it points to.
+2. Resolving `coreConfig.cdns[origin][].hostName` + `coreConfig.manifests.main[].manifest`
+   into an HLS master playlist URL on `stream.event.microsoft.com`.
+3. Parsing the master playlist for the `#EXT-X-MEDIA:TYPE=SUBTITLES` track.
+4. Fetching the subtitle sub-playlist (typically 600–700 `Segment(N).vtt` files at 4 s each).
+5. Downloading every segment in parallel and **deduplicating the rolling captions** — each
+   segment shows the speaker's words being typed letter-by-letter (`ac` → `actu` → `actual`),
+   so a naive concatenation produces tens of thousands of meaningless partial cues.
+
+The `MediastreamTranscriptInterceptor` profile (registered alongside `MediusTranscriptInterceptor`)
+does all five steps and emits one merged, sentence-level `mediastream-NNNN-<lang>.vtt` under
+`captions/`. The dedupe takes EVERY visible line of each segment's final cue (typically 1-3
+lines: bottom is the currently-growing tail, lines above are recently-completed phrases still
+on-screen), runs a two-pass collapse:
+
+1. **Screen-residence dedupe** — a line that re-appears in two adjacent segments' line sets is
+   the same phrase staying on-screen as it scrolls up; emit it only on its first appearance.
+2. **Prefix-extension dedupe** — a phrase that "grew letter by letter" appears as a chain of
+   prefix-related entries (`but the context win` &rarr; `but the context window` &rarr;
+   `but the context window is what`); collapse each chain to its longest form with a
+   stretched <c>[start, end]</c> window.
+
+`DiscoveredMediaUrl` exposes the resolved HLS master URL, so the same `frames --at` and
+`analyze --frames N --prefer-inline-media` workflows that already work for Medius now work
+for these sessions too.
+
+Warning codes specific to mediastream:
+
+- `CAPTURE_MEDIASTREAM_TRANSCRIPT_DISCOVERED` (info) — config JSON resolved to an HLS
+  master URL; subtitle download about to start.
+- `CAPTURE_MEDIASTREAM_TRANSCRIPT_DOWNLOADED` (info) — merged VTT written; reports
+  segments-fetched / segments-listed, byte count, output path, elapsed seconds.
+- `CAPTURE_MEDIASTREAM_TRANSCRIPT_FAILED` (warning) — any step failed (config fetch,
+  master playlist had no subtitle entry, subtitle playlist empty, every segment fetch
+  failed, dedupe produced no cues). Player iframe + frame extraction still proceed.
 
 #### `analyze --frames N` sidestep + `--prefer-inline-media`
 

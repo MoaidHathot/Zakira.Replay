@@ -148,7 +148,7 @@ Always quote URLs in PowerShell, especially YouTube URLs containing `&`.
 
 Every command — including the subcommand groups (`runs`, `index`, `chapters`, `align`, `queue`, …) — accepts these recursive flags from the root command:
 
-- `--output-format text|json|ndjson`: switch the command's stdout format. `text` (default) is the human-readable one-line-per-thing format. `json` emits the same structured payload as the corresponding MCP tool. `ndjson` is reserved for future streaming results. Replaces every per-command `--json` flag from the 0.8.x surface.
+- `--output-format text|json|ndjson`: switch the command's stdout format. `text` (default) is the human-readable one-line-per-thing format. `json` emits the same structured payload as the corresponding MCP tool. `ndjson` is currently treated identically to `json` for one-shot commands; reserved for future per-event streaming results. Replaces every per-command `--json` flag from the 0.8.x surface. **All long-running pipeline commands honour this flag** (`analyze`, `transcribe`, `clip`, `batch run`, `queue enqueue`, `queue run`, plus the existing `info`, `doctor`, `frames`, `runs list|show`, `index query`, `queue status`); in JSON mode stdout is a single parseable envelope and progress lines route to stderr.
 - `--log-file <path>`: optional path to write structured log output to. Stderr still receives the human-readable progress lines.
 - `--log-level info|debug|trace`: minimum log level. `info` is the default.
 - `--correlation-id <string>`: propagated to evidence and logs so agent runs can be cross-referenced with an external workflow. Useful when the CLI is invoked from a larger orchestrator that already has a trace ID.
@@ -158,8 +158,11 @@ The 0.8.x per-command `--json` flag no longer exists; use `--output-format json`
 ```powershell
 zakira-replay doctor --output-format json
 zakira-replay info --output-format json
+zakira-replay analyze "<url-or-file>" --ocr --vision --cache --output-format json
 zakira-replay queue status --queue-id research --output-format json
 ```
+
+In JSON mode, the `analyze` / `transcribe` / `frames` (legacy mode) commands emit one envelope on stdout: `{runId, reused, artifactDirectory, manifestPath, evidencePath, transcriptPath, audioPath, ocrPath, visionPath, frameCount, title, webpageUrl, duration, source, warnings[]}`. Absolute paths everywhere; missing artifacts (e.g. `--no-transcript` skipped transcript) are emitted as `null` rather than omitted. Progress lines move to stderr so stdout can be piped straight into `jq` / `JSON.parse`. `clip`, `batch run`, `queue enqueue`, and `queue run` emit their own per-command envelopes with the same contract. See the README "`--output-format json` envelopes" section for the full property set.
 
 ## Option Selection
 
@@ -223,6 +226,13 @@ After `analyze`, capture:
 - Any `Warnings:` lines (formatted as `[severity] CODE: message`)
 
 If the command reports `Reused run`, inspect existing artifacts before deciding whether `--force` is needed.
+
+For agent-driven invocations, prefer `--output-format json` and parse the single envelope on stdout — every path is absolute, and the `reused`, `frameCount`, `evidencePath`, `transcriptPath`, `audioPath`, `ocrPath`, `visionPath`, and `warnings[]` fields let you decide what to read next without scraping the human-readable progress text. Progress lines route to stderr in JSON mode so stdout stays parseable:
+
+```powershell
+$env = zakira-replay analyze "<url-or-file>" --ocr --vision --cache --output-format json | ConvertFrom-Json
+# $env.manifestPath, $env.evidencePath, $env.transcriptPath, $env.warnings, …
+```
 
 ## Artifact Reading Order
 

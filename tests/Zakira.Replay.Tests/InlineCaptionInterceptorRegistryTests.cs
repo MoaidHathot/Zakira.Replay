@@ -39,6 +39,19 @@ public sealed class InlineCaptionInterceptorRegistryTests
     }
 
     [Fact]
+    public void CreateForIncludesMediastreamByDefault()
+    {
+        // Newer profile for the mediastream.microsoft.com Shaka-player wrapper used by
+        // Microsoft Build "InstaVOD" sessions (BRK247-style). Must ship alongside Medius so
+        // the registry handles both player flavours out of the box.
+        var warnings = new List<ReplayWarning>();
+
+        var interceptors = InlineCaptionInterceptorRegistry.CreateFor(Request(captureCaptions: true), warnings);
+
+        Assert.Contains(interceptors, i => i.Name == "mediastream");
+    }
+
+    [Fact]
     public void EveryRegisteredInterceptorExposesNonEmptyName()
     {
         // Names back log lines and warning sources; an empty/whitespace name would break tooling

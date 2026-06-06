@@ -189,6 +189,35 @@ public static class ReplayWarningCodes
     /// </summary>
     public const string CaptureMediusTranscriptFailed = "CAPTURE_MEDIUS_TRANSCRIPT_FAILED";
 
+    /// <summary>
+    /// Browser capture recognised a Microsoft <c>mediastream.microsoft.com</c> Shaka-player
+    /// embed (used by Microsoft Build "InstaVOD" sessions whose <c>onDemandUrl</c> looks like
+    /// <c>.../player.html?path=/events/.../Config-&lt;CODE&gt;IVOD.json</c>) and parsed the
+    /// <c>coreConfig.manifests.main[].manifest</c> + <c>cdns[origin][].hostName</c> blocks to
+    /// derive the HLS master playlist URL. Severity is <c>info</c>; reports the discovered
+    /// playlist URL. The actual subtitle download happens in a follow-up step.
+    /// </summary>
+    public const string CaptureMediastreamTranscriptDiscovered = "CAPTURE_MEDIASTREAM_TRANSCRIPT_DISCOVERED";
+
+    /// <summary>
+    /// A <c>mediastream.microsoft.com</c> session's subtitle track was successfully extracted
+    /// from its HLS subtitle playlist: every <c>Segment(NNN).vtt</c> was fetched in parallel,
+    /// the per-segment rolling-cue progression was deduped (CEA-608/708-style word-by-word
+    /// caption growth collapses to one stable cue per phrase), and the result landed under
+    /// <c>captions/mediastream-NNNN-&lt;lang&gt;.vtt</c>. Severity is <c>info</c>; reports the
+    /// segment count, dedup ratio, language, output path, and elapsed seconds.
+    /// </summary>
+    public const string CaptureMediastreamTranscriptDownloaded = "CAPTURE_MEDIASTREAM_TRANSCRIPT_DOWNLOADED";
+
+    /// <summary>
+    /// A step in the <c>mediastream.microsoft.com</c> caption extraction pipeline failed:
+    /// the player config JSON couldn't be fetched / parsed, the HLS master playlist had no
+    /// <c>#EXT-X-MEDIA:TYPE=SUBTITLES</c> entry, the subtitle playlist returned no segments,
+    /// every segment fetch failed, or the merged VTT was empty. Severity is <c>warning</c>;
+    /// other capture paths (player iframe, frame extraction from the HLS URL) still proceed.
+    /// </summary>
+    public const string CaptureMediastreamTranscriptFailed = "CAPTURE_MEDIASTREAM_TRANSCRIPT_FAILED";
+
     public const string AuthProfileNotFound = "AUTH_PROFILE_NOT_FOUND";
 
     public const string AuthProfileStale = "AUTH_PROFILE_STALE";

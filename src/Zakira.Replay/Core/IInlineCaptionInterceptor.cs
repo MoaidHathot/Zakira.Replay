@@ -94,6 +94,13 @@ internal static class InlineCaptionInterceptorRegistry
         return
         [
             new MediusTranscriptInterceptor(request, warnings),
+            // Microsoft mediastream.microsoft.com Shaka-player wrapper. Used by Microsoft Build
+            // "InstaVOD" sessions (e.g. BRK247) whose onDemandUrl is
+            // mediastream.microsoft.com/.../player.html?path=/events/.../Config-<CODE>IVOD.json.
+            // Unlike Medius, captions are NOT inlined; the interceptor builds the config URL
+            // from the page URL's `path=` query, resolves the HLS master via cdns + manifests,
+            // and dedupes the rolling Segment(N).vtt subtitle track.
+            new MediastreamTranscriptInterceptor(request, warnings),
             // Future profiles drop in here. See IInlineCaptionInterceptor for the contract.
             // Examples we'd plug in next: GenericJsonLdSubtitleInterceptor, BitmovinPlayerInterceptor,
             // TheoPlayerInterceptor, JwPlayerInterceptor, BrightcoveInterceptor, KalturaInterceptor.

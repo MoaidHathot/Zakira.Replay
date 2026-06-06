@@ -2,25 +2,23 @@
 
 **Let LLMs and AI agents "watch" video.**
 
-LLMs cannot ingest video natively. Zakira.Replay turns any video source — YouTube URL, conference recording, course lecture, meeting capture, local `.mp4` — into the durable, timestamped artifacts an agent can actually reason over. Instead of pretending it watched a 90-minute talk, the agent quotes specific moments with timecodes from artifacts on disk.
+LLMs cannot ingest video natively. Zakira.Replay turns **almost any video on almost any website** — YouTube, Vimeo, conference recordings (Microsoft Build, Ignite), course lectures, webinars, SharePoint Stream / Microsoft Stream, Medius / mediastream.microsoft.com players, Microsoft Teams meeting recordings, plain local `.mp4` / `.mkv` / `.webm` files, and the ~1000 other sites yt-dlp supports — into the durable, timestamped, fact-shaped artifacts an agent can actually reason over.
 
-The pipeline produces three complementary views of the same video so an agent can pick whichever fits the question:
+Instead of pretending it watched a 90-minute talk, your agent quotes specific moments with timecodes from files on disk.
 
-- **Transcripts** — speaker-attributed text from existing captions (via `yt-dlp` for URLs, sidecar `.vtt`/`.srt` for local files) when available, or local Whisper STT (`--llm-provider local-whisper`) when no captions exist. Silence-aware chunking handles long-form audio without hitting per-request limits. Optional local speaker diarization (`--diarize`, sherpa-onnx + pyannote + 3D-Speaker) attributes audio when caption tags don't.
-- **Vision** — representative frames extracted at ffmpeg scene-change boundaries, then routed through OCR (local RapidOCR PP-OCRv5 by default, or LLM-routed) and structured vision analysis (local CLIP / Florence-2 on-device, or GitHub Copilot SDK / OpenAI / Azure OpenAI / Ollama). Perceptual-hash slide grouping runs OCR and vision once per unique on-screen slide and records first/last visible timestamps as facts.
-- **Structured evidence** — every run lands in `runs/<source-slug>-<sha8>/` with `manifest.json` (pipeline timings + dependency snapshot), `evidence.json` (timestamped facts), `transcript.md`, extracted frames, slides, per-speaker registry, optional chapter index, and structured warnings. Schema-versioned and machine-readable so agents can quote with confidence.
+## What you get
 
-One .NET 10 binary ships **two surfaces** for the same pipeline: a `zakira-replay` CLI (drive from shell scripts or `dnx`) and an MCP server (`zakira-replay mcp serve`) so any MCP-aware agent can analyze video as a first-class tool. Local providers run fully on-device when you want air-gapped operation; cloud LLM providers plug in via `Microsoft.Extensions.AI.IChatClient` when you want stronger summarization or vision quality.
+- **Transcripts.** Speaker-attributed text pulled from existing captions when the source ships them (yt-dlp for URLs, sidecar `.vtt`/`.srt` for local files, SharePoint Stream / Medius / mediastream extractors for embeds), or generated on-device with local Whisper (`--llm-provider local-whisper`) or routed to GitHub Copilot / OpenAI / Azure OpenAI when no captions exist. Long audio is silence-aware-chunked so it never hits per-request token limits. Optional local speaker diarization (`--diarize`) attributes audio when caption tags don't.
+- **Frames.** Two modes: full-analysis pipeline picks representative frames at ffmpeg scene-change boundaries with perceptual-hash slide grouping (so the same slide isn't OCR'd ten times), or ad-hoc spot capture — `zakira-replay frames --at 02:34,03:10,04:55` or `--from 02:00 --to 03:00 --count 5` — for known timestamps. Frames are seek-accurate; for MSE / Shaka-based players (Microsoft Build, Medius) the pipeline ffmpeg-seeks the inline HLS URL directly so spot captures work even when the JS player won't boot headlessly.
+- **Structured evidence for agents.** Every run lands in `runs/<source-slug>-<sha8>/` with `manifest.json` (pipeline timings, dependency snapshot, artifact index), `evidence.json` (timestamped transcript segments + slides + per-frame OCR + per-frame vision + per-speaker registry + structured warnings), `transcript.md`, the frame images themselves, optional chapters and cross-modal alignment views, and an optional local search index (TF-IDF, SQLite FTS5, or on-device ONNX embeddings). Every file is schema-versioned (`schemas/*.schema.json`) and machine-readable.
 
-> **0.9.0 is a breaking release.** MCP tool names moved to `verb.noun` (`analyze`, `analyze.start`, `queue.enqueue`, `index.build`, `chapters.build`, `align`, …) and the CLI was rebuilt on top of `System.CommandLine` 3.0 with grouped `noun verb` subcommands (`runs list|show|delete|export`, `index build|query`, `align build`, `deps status`, `llm chat`) plus recursive global flags (`--output-format text|json|ndjson`, `--log-file`, `--log-level`, `--correlation-id`). The MCP server now also exposes `replay://` resources and supports stdio / HTTP / SSE transports. See [CHANGELOG.md](CHANGELOG.md#090--mcp--cli-modernization-breaking) for the full rename tables.
+One .NET 10 binary ships **two surfaces** for the same pipeline: a `zakira-replay` CLI (drive from shell scripts, hosted agents, or `dnx`) and an **MCP server** (`zakira-replay mcp serve`, stdio / HTTP / SSE) so any MCP-aware agent can analyze video as a first-class tool. Local providers run fully on-device when you want air-gapped operation; cloud LLM providers plug in via `Microsoft.Extensions.AI.IChatClient` when you want stronger summarization or vision quality.
 
 > Part of the [Zakira](https://github.com/MoaidHathot?tab=repositories&q=Zakira) project family.
 
-System binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) and the search-embedding model are opt-in: install them upfront with `zakira-replay deps install`, or set `dependencies.autoDownload=true` once and let Zakira.Replay fetch them on first need. Local providers (OCR, Whisper STT, diarization, local vision) **auto-download their models on first use by default** — opt out per-provider if you want strict offline control. Missing dependencies always fail with a clear, actionable error.
-
 ## Install
 
-Zakira.Replay ships as a regular .NET global tool on NuGet. Requires the **.NET 10 SDK** (or runtime).
+Zakira.Replay ships as a .NET global tool on NuGet. Requires the **.NET 10 SDK** (or runtime).
 
 ```bash
 # Install once, run anywhere (recommended for repeated use):
@@ -31,67 +29,95 @@ zakira-replay version
 dnx Zakira.Replay version
 ```
 
-Both invocations expose the same `zakira-replay` command surface documented below.
-
-## Getting Started
-
-Confirm the tool launches and inspect environment readiness:
+System binaries (`yt-dlp`, `ffmpeg`, `ffprobe`) are opt-in. Install them upfront:
 
 ```bash
-zakira-replay version
-zakira-replay doctor          # one-line per dependency: found / missing / version
-zakira-replay info --json     # machine-readable resolved-paths + capability flags
+zakira-replay deps install media     # yt-dlp + ffmpeg + ffprobe (portable, per-RID)
+zakira-replay doctor                  # confirm everything is found / runnable
 ```
 
-Install the OS-level binaries Zakira.Replay relies on. They are **not bundled**; `deps install` fetches portable copies into the configured portable directory (override with `dependencies.portableDirectory` or `ZAKIRA_REPLAY_PORTABLE_DIRECTORY`):
+…or flip `zakira-replay config set dependencies.autoDownload true` once and let Zakira.Replay fetch what it needs on first use. Local providers (OCR, Whisper STT, diarization, local vision) already auto-download their models on first run by default — no extra flag.
+
+## Quick examples
+
+**Analyze a YouTube video** end-to-end. Frames at scene boundaries, OCR on each unique slide, vision notes, transcript from captions — all cached so re-runs are free:
 
 ```bash
-# Media essentials (ffmpeg + ffprobe + yt-dlp). Required for almost everything.
-zakira-replay deps install media
-
-# Optional local-only providers — install only what you plan to use:
-zakira-replay deps install ocr              # RapidOCR PP-OCRv5 latin pack (~30 MB)
-zakira-replay deps install whisper-model    # local Whisper ggml model for --llm-provider local-whisper
-zakira-replay deps install diarization      # pyannote-segmentation + 3D-Speaker ONNX (for --diarize)
-zakira-replay deps install onnx             # configurable search-embedding model (bge-small-en-v1.5 default; arctic-embed-s / multilingual-e5-small)
-
-# Or install everything at once:
-zakira-replay deps install all
+zakira-replay analyze "https://www.youtube.com/watch?v=dQw4w9WgXcQ" --ocr --vision --cache
 ```
 
-### Or: enable on-demand auto-download
-
-If you'd rather have Zakira.Replay fetch system tools the moment they're needed (instead of running `deps install` upfront), flip one flag:
+**Transcribe a local meeting recording** with speaker diarization and on-device Whisper STT (no captions in the source):
 
 ```bash
-zakira-replay config set dependencies.autoDownload true
+zakira-replay analyze "C:\meetings\team-sync.mp4" --preset meeting --llm-provider local-whisper --allow-media-download
 ```
 
-After that, the first invocation that needs `yt-dlp` auto-fetches it from the official GitHub release (Windows, Linux x64, Linux ARM64, macOS).
-
-Two caveats:
-
-- **`ffmpeg` / `ffprobe`** portable auto-download is **Windows-x64 only**. On Linux/macOS install through your package manager (`apt install ffmpeg`, `brew install ffmpeg`, etc.).
-- The **ONNX search embedding model** is separately opt-in: `zakira-replay config set search.onnx.autoDownload true` to enable for the `sqlite-onnx` search backend.
-
-Local providers (OCR, Whisper STT, diarization, local vision) already auto-download their models on first use by default — no extra flag required.
-
-Run your first analysis. Output lands under `runs/<source-slug>-<sha8>/` (the run-id is deterministic per source so `--cache` reuse "just works"):
+**Grab three specific frames** from a Microsoft Build session at known timestamps. Works against MSE/Shaka players that yt-dlp can't resolve:
 
 ```bash
-zakira-replay analyze https://www.youtube.com/watch?v=dQw4w9WgXcQ
+zakira-replay frames "https://build.microsoft.com/en-US/sessions/KEY01" --at 02:34,35:12,01:47:45
 ```
 
-Inspect what came out:
+**Extract a clip** between two timestamps:
 
 ```bash
-ls runs/                              # find the generated run folder
-cat runs/<run-id>/manifest.json       # pipeline timings, dependency snapshot, artifact index
-cat runs/<run-id>/transcript.md       # speaker-attributed transcript
-cat runs/<run-id>/evidence.json       # structured timestamped facts for LLM agents
+zakira-replay clip "C:\demos\walkthrough.mp4" --start 01:20 --end 02:05 --output-name key-demo
 ```
 
-For one-off ad-hoc operations without a full analyze run, see `zakira-replay frames`, `clip`, `transcribe`, and `search` further down. For agent integration, see [MCP Jobs](#mcp-jobs) and [Agent Skills](#agent-skills). For default behaviour, override flags, and per-stage configuration, continue with [Commands](#commands), [Defaults](#defaults), and [Dependency Configuration](#dependency-configuration).
+**Drive Zakira.Replay from an agent.** Either invoke the CLI with structured JSON output (every long-running command honors `--output-format json` — single envelope on stdout, progress on stderr):
+
+```bash
+zakira-replay analyze "<url-or-file>" --ocr --vision --cache --output-format json
+```
+
+…or start the MCP server and let any MCP-aware client (Claude Desktop, Cursor, VS Code Copilot, hosted agent platforms) call `analyze`, `analyze.start`, `frames`, `clip`, `index.build`, `chapters.build`, etc. as native tools:
+
+```bash
+zakira-replay mcp serve                              # stdio (default; for subprocess MCP clients)
+zakira-replay mcp serve --transport http --port 8765 # streamable HTTP for hosted agents
+```
+
+**Search across a whole conference** after analyzing every session into individual runs:
+
+```bash
+zakira-replay index build-conference build-2026 --runs "runs/*"
+zakira-replay index query build-2026 "Foundry hosted agents" --top 10 --output-format json
+```
+
+Output for every analyze run lands in `runs/<source-slug>-<sha8>/` (the run-id is deterministic per source URL so `--cache` reuse "just works"). Inspect it:
+
+```bash
+zakira-replay runs list                              # most-recent-first
+zakira-replay runs show <run-id> --output-format json # manifest body on stdout
+cat runs/<run-id>/manifest.json                       # timings, dependency snapshot, artifact index
+cat runs/<run-id>/transcript.md                       # speaker-attributed transcript
+cat runs/<run-id>/evidence.json                       # structured timestamped facts for LLM agents
+```
+
+## Agent skills (drop these into Claude / Cursor / your agent runtime)
+
+Reusable agent skill packages ship inside the NuGet package and the repo:
+
+| Skill | Location | When to use |
+|---|---|---|
+| `zakira-replay-cli` | [`skills/zakira-replay-cli/SKILL.md`](skills/zakira-replay-cli/SKILL.md) | Agent can run shell commands. The full CLI workflow: which flags to set per source type, how to read the artifacts, how to branch on warning codes, how to cite timestamps. |
+| `zakira-replay-mcp` | [`skills/zakira-replay-mcp/SKILL.md`](skills/zakira-replay-mcp/SKILL.md) | Agent is connected to `zakira-replay mcp serve`. Same workflow, but via the MCP tool surface (`analyze`, `analyze.start`, `frames`, `clip`, `chapters.build`, `index.build`, …) and `replay://` resources. |
+| `zakira-replay` (router) | [`skills/zakira-replay/SKILL.md`](skills/zakira-replay/SKILL.md) | Compatibility router. Points the agent at the right focused skill above based on what surface it has access to. |
+| Per-source profiles | [`skills/zakira-replay/sources/*.md`](skills/zakira-replay/sources/) | Indexed by host (SharePoint Stream, Microsoft Build / Medius, YouTube, generic). The agent looks up the URL's host and reads only the matching profile, which names the recommended capture mode, flags, expected artifacts, and known warnings for that source. |
+
+The skills are packed into the NuGet payload under the same `skills/` paths so they're available after `dotnet tool install -g Zakira.Replay`. Examples for MCP client config and JSON-RPC job flows live alongside in `skills/zakira-replay/examples/`.
+
+Core rule for every skill: **never claim to have watched the video.** Answer from `manifest.json`, `evidence.json`, `transcript.md`, frame images, `ocr/combined.md`, `vision/combined.md`, and `chapters/chapters.md`. Zakira.Replay produces facts; the agent synthesizes the answer.
+
+## Where to go next
+
+- [Commands](#commands) — the full subcommand reference (with `--output-format json` envelope shapes).
+- [Defaults](#defaults) — what `zakira-replay analyze <url>` does out of the box (frame strategy, OCR provider, frame budgeting, cache key).
+- [Dependency Configuration](#dependency-configuration) — pinning paths, opting in to auto-download, switching the search-embedding model.
+- [Frame Capture Modes](#frame-capture-modes) — `ytdlp` vs `browser` vs `auto`, the inline-media sidestep for MSE players, SharePoint Stream / Medius caption extraction.
+- [MCP Jobs](#mcp-jobs) — the full MCP tool + `replay://` resource surface for agent integration.
+- [Artifact Contract](#artifact-contract) — what each file in `runs/<run-id>/` contains.
+- [CHANGELOG.md](CHANGELOG.md) — full release history and per-version migration notes.
 
 ## Commands
 

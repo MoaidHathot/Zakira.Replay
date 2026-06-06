@@ -17,7 +17,7 @@
 
   <!-- Single source of truth for the package version. -->
   <PropertyGroup>
-    <VersionPrefix>0.12.0</VersionPrefix>
+    <VersionPrefix>0.13.0</VersionPrefix>
   </PropertyGroup>
 
   <!-- Shared pack / repo metadata. Leaf csprojs add PackageId / Description / PackageReleaseNotes. -->

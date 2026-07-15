@@ -179,20 +179,7 @@ public static class CliApp
                 return 0;
             }
 
-            foreach (var dep in report.Dependencies)
-            {
-                if (dep.IsFound)
-                {
-                    var source = string.IsNullOrWhiteSpace(dep.Source) ? string.Empty : $" via {dep.Source}";
-                    stdout.WriteLine(dep.IsRunnable
-                        ? $"{dep.Name}: found{source} ({dep.Path})"
-                        : $"{dep.Name}: found but not runnable{source} ({dep.Path}) - {dep.RunnableError}");
-                }
-                else
-                {
-                    stdout.WriteLine($"{dep.Name}: missing ({dep.Message})");
-                }
-            }
+            CliDiagnostics.RenderDoctorText(report, stdout, ConsoleStyle.ColorEnabled);
             return 0;
         });
         return command;

@@ -1444,6 +1444,51 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public void DoctorTextRendererProducesStructuredPlainReportWithoutColor()
+    {
+        var report = new DoctorReport(DateTimeOffset.UnixEpoch,
+        [
+            new DoctorDependencyReport("yt-dlp", IsFound: true, IsRunnable: true, Path: @"C:\tools\yt-dlp.exe", Source: "config:yt-dlp.path", Message: null, RunnableError: null),
+            new DoctorDependencyReport("ffmpeg", IsFound: true, IsRunnable: false, Path: @"C:\tools\ffmpeg.exe", Source: "PATH", Message: null, RunnableError: "bad image"),
+            new DoctorDependencyReport("ollama", IsFound: false, IsRunnable: false, Path: null, Source: "daemon", Message: "daemon unreachable", RunnableError: null),
+        ]);
+
+        using var writer = new StringWriter();
+        CliDiagnostics.RenderDoctorText(report, writer, color: false);
+        var output = writer.ToString();
+
+        // Never leaks ANSI escape codes when color is disabled (pipes, files, tests).
+        Assert.DoesNotContain('\u001b', output);
+        // Count summary header + per-tier accounting.
+        Assert.Contains("Zakira.Replay doctor", output, StringComparison.Ordinal);
+        Assert.Contains("1 ok", output, StringComparison.Ordinal);
+        Assert.Contains("1 degraded", output, StringComparison.Ordinal);
+        Assert.Contains("1 missing", output, StringComparison.Ordinal);
+        // Each dependency and its reason are surfaced.
+        Assert.Contains("yt-dlp", output, StringComparison.Ordinal);
+        Assert.Contains("\u2192 bad image", output, StringComparison.Ordinal);
+        Assert.Contains("\u2192 daemon unreachable", output, StringComparison.Ordinal);
+        Assert.Contains("2 components need attention", output, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DoctorTextRendererEmitsAnsiAndReadyLineWhenAllHealthy()
+    {
+        var report = new DoctorReport(DateTimeOffset.UnixEpoch,
+        [
+            new DoctorDependencyReport("yt-dlp", IsFound: true, IsRunnable: true, Path: @"C:\tools\yt-dlp.exe", Source: "config", Message: null, RunnableError: null),
+        ]);
+
+        using var colored = new StringWriter();
+        CliDiagnostics.RenderDoctorText(report, colored, color: true);
+        Assert.Contains('\u001b', colored.ToString());
+
+        using var plain = new StringWriter();
+        CliDiagnostics.RenderDoctorText(report, plain, color: false);
+        Assert.Contains("All dependencies are ready.", plain.ToString(), StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task VersionAndInfoCommandsReportApplicationMetadata()
     {
         using var stdout = new StringWriter();

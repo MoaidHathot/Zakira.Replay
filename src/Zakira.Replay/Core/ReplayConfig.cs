@@ -561,6 +561,8 @@ public sealed class DependencyPathConfig
     public string? FfprobePath { get; set; }
 
     public string? EdgePath { get; set; }
+
+    public string? CopilotCliPath { get; set; }
 }
 
 public sealed class SearchConfig
@@ -1053,6 +1055,10 @@ public sealed class ConfigStore
             case "edge.path":
                 config.Dependencies.EdgePath = NormalizeExecutablePath(value, "msedge.exe");
                 break;
+            case "copilot-cli.path":
+            case "copilot.path":
+                config.Dependencies.CopilotCliPath = NormalizeExecutablePath(value, "copilot.exe");
+                break;
             case "search.onnx.modelpath":
             case "search.onnx.model-path":
                 config.Search.Onnx.ModelPath = NormalizeFilePath(value);
@@ -1506,6 +1512,7 @@ public sealed class ConfigStore
             "ffmpeg.path" => config.Dependencies.FfmpegPath,
             "ffprobe.path" => config.Dependencies.FfprobePath,
             "edge.path" => config.Dependencies.EdgePath,
+            "copilot-cli.path" or "copilot.path" => config.Dependencies.CopilotCliPath,
             "search.onnx.modelpath" or "search.onnx.model-path" => config.Search.Onnx.ModelPath,
             "search.onnx.vocabularypath" or "search.onnx.vocabulary-path" or "search.onnx.vocabpath" or "search.onnx.vocab-path" => config.Search.Onnx.VocabularyPath,
             "search.onnx.maxsequencelength" or "search.onnx.max-sequence-length" => config.Search.Onnx.MaxSequenceLength?.ToString(),
@@ -1616,6 +1623,7 @@ public sealed class ConfigStore
             ["ffmpeg.path"] = config.Dependencies.FfmpegPath,
             ["ffprobe.path"] = config.Dependencies.FfprobePath,
             ["edge.path"] = config.Dependencies.EdgePath,
+            ["copilot-cli.path"] = config.Dependencies.CopilotCliPath,
             ["search.onnx.modelPath"] = config.Search.Onnx.ModelPath,
             ["search.onnx.vocabularyPath"] = config.Search.Onnx.VocabularyPath,
             ["search.onnx.maxSequenceLength"] = config.Search.Onnx.MaxSequenceLength?.ToString(),

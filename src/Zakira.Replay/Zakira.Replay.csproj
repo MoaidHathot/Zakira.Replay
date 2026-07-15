@@ -7,6 +7,25 @@
     <NoWarn>$(NoWarn);NU5111;NU5100;NU5118</NoWarn>
   </PropertyGroup>
 
+  <!--
+    Do NOT bundle the ~52 MB GitHub Copilot CLI native binary. The GitHub.Copilot.SDK build
+    targets otherwise download it from npm at build time and copy copilot.exe into
+    runtimes/win-x64/native (and only for the build host's RID). Zakira.Replay instead downloads
+    the matching CLI on demand into the portable directory (PortableDependencyInstaller) and
+    points the SDK at it via CopilotClientOptions.CliPath - aligning it with yt-dlp/ffmpeg and
+    making the Copilot provider work on every platform rather than Windows-only.
+
+    CopilotCliVersion is defined by GitHub.Copilot.SDK.props (imported by the package). We surface
+    it as assembly metadata so the on-demand downloader stays in lockstep with the referenced SDK.
+  -->
+  <PropertyGroup>
+    <CopilotSkipCliDownload>true</CopilotSkipCliDownload>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <AssemblyMetadata Include="CopilotCliVersion" Value="$(CopilotCliVersion)" Condition="'$(CopilotCliVersion)' != ''" />
+  </ItemGroup>
+
   <PropertyGroup>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>zakira-replay</ToolCommandName>

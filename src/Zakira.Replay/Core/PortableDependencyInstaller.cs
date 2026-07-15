@@ -1,4 +1,6 @@
+using System.Formats.Tar;
 using System.IO.Compression;
+using System.Reflection;
 using System.Runtime.InteropServices;
 
 namespace Zakira.Replay.Core;
@@ -14,6 +16,12 @@ public sealed class PortableDependencyInstaller
     public const string Diarization = "diarization";
     public const string Vision = "vision";
     public const string All = "all";
+
+    // `deps install copilot-cli` target token vs. the on-disk executable name. Mirrors how the
+    // Ffmpeg target yields two executables (ffmpeg + ffprobe): the target is "copilot-cli" but the
+    // resolved binary is "copilot" (copilot.exe on Windows) so it also matches a PATH-installed CLI.
+    public const string CopilotCli = "copilot-cli";
+    public const string Copilot = "copilot";
 
     // RapidOCR PP-OCRv5 latin model files (matches RapidOcrNet defaults; see https://github.com/BobLd/RapidOcrNet).
     public const string OcrDetectionModelFile = "ch_PP-OCRv5_det_mobile.onnx";
@@ -32,6 +40,14 @@ public sealed class PortableDependencyInstaller
     private const string YtDlpLinuxArm64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
     private const string YtDlpMacOsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
     private const string FfmpegWindowsX64Url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
+
+    // GitHub Copilot CLI (native, self-contained "copilot"/"copilot.exe"). Published per-platform on
+    // the public npm registry as @github/copilot-<platform>, which is exactly where the SDK's own
+    // build targets fetch it. We download it on demand instead of bundling the ~52 MB binary. The
+    // version is surfaced from the referenced GitHub.Copilot.SDK via assembly metadata (see
+    // Zakira.Replay.csproj) so the download tracks the SDK; DefaultCopilotCliVersion is a fallback.
+    private const string CopilotCliNpmRegistry = "https://registry.npmjs.org";
+    private const string DefaultCopilotCliVersion = "1.0.36-0";
 
     // RapidAI's RapidOCR model store on ModelScope; same SHA-pinned tag the upstream Python package uses.
     private const string RapidOcrModelBaseUrl = "https://www.modelscope.cn/models/RapidAI/RapidOCR/resolve/v3.8.0";
@@ -186,6 +202,7 @@ public sealed class PortableDependencyInstaller
                     AddUnique(normalized, Ocr);
                     AddUnique(normalized, WhisperModel);
                     AddUnique(normalized, Diarization);
+                    AddUnique(normalized, CopilotCli);
                     break;
                 case "media":
                     AddUnique(normalized, YtDlp);
@@ -233,8 +250,15 @@ public sealed class PortableDependencyInstaller
                 case "local-vision":
                     AddUnique(normalized, Vision);
                     break;
+                case CopilotCli:
+                case Copilot:
+                case "gh-copilot":
+                case "github-copilot":
+                case "copilot-exe":
+                    AddUnique(normalized, CopilotCli);
+                    break;
                 default:
-                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, diarization, vision, media, or all.");
+                    throw new ReplayException($"Unknown dependency target: {target}. Use yt-dlp, ffmpeg, ffprobe, onnx, ocr, whisper-model, diarization, vision, copilot-cli, media, or all.");
             }
         }
 
@@ -310,6 +334,9 @@ public sealed class PortableDependencyInstaller
                 case Vision:
                     items.AddRange(await InstallVisionModelsAsync(visionMode, force, progress, cancellationToken).ConfigureAwait(false));
                     break;
+                case CopilotCli:
+                    items.Add(await InstallCopilotCliAsync(force, progress, cancellationToken).ConfigureAwait(false));
+                    break;
             }
         }
 
@@ -356,6 +383,29 @@ public sealed class PortableDependencyInstaller
             new PortableDependencyInstallItem(Ffmpeg, ffmpegPath, true, FfmpegWindowsX64Url, "downloaded"),
             new PortableDependencyInstallItem(Ffprobe, ffprobePath, true, FfmpegWindowsX64Url, "downloaded")
         ];
+    }
+
+    private async Task<PortableDependencyInstallItem> InstallCopilotCliAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        var url = GetCopilotCliUrl();
+        var destinationPath = GetPortableExecutablePath(Copilot);
+        if (!force && File.Exists(destinationPath))
+        {
+            return new PortableDependencyInstallItem(Copilot, destinationPath, false, url, "already exists");
+        }
+
+        Directory.CreateDirectory(Layout.PortableDirectory);
+        var downloadDirectory = Path.Combine(Layout.PortableDirectory, ".downloads");
+        Directory.CreateDirectory(downloadDirectory);
+        var archivePath = Path.Combine(downloadDirectory, "copilot-cli.tgz");
+        await DownloadFileAsync(url, archivePath, force: true, progress, cancellationToken).ConfigureAwait(false);
+
+        // The npm tarball nests everything under `package/`; the CLI is a single self-contained
+        // binary (copilot.exe on Windows, copilot elsewhere) - no sibling files are required, which
+        // is why the SDK's own targets copy only that one file too.
+        ExtractExecutableFromTarGz(archivePath, GetExecutableFileName(Copilot), destinationPath);
+        SetExecutableBit(destinationPath);
+        return new PortableDependencyInstallItem(Copilot, destinationPath, true, url, "downloaded");
     }
 
     private async Task<PortableDependencyInstallItem> InstallOnnxAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -602,6 +652,39 @@ public sealed class PortableDependencyInstaller
         entry.ExtractToFile(destinationPath, overwrite: true);
     }
 
+    /// <summary>
+    /// Extracts a single executable entry from a gzip-compressed tarball (npm <c>.tgz</c>). npm
+    /// packs everything under a top-level <c>package/</c> directory, so we match by trailing path
+    /// segment or file name. Uses only the BCL (<see cref="GZipStream"/> + <see cref="TarReader"/>),
+    /// so no third-party archive dependency is needed.
+    /// </summary>
+    private static void ExtractExecutableFromTarGz(string archivePath, string executableName, string destinationPath)
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(destinationPath)!);
+
+        using var fileStream = File.OpenRead(archivePath);
+        using var gzip = new GZipStream(fileStream, CompressionMode.Decompress);
+        using var reader = new TarReader(gzip);
+
+        while (reader.GetNextEntry() is { } entry)
+        {
+            if (entry.EntryType is not (TarEntryType.RegularFile or TarEntryType.V7RegularFile))
+            {
+                continue;
+            }
+
+            var entryName = entry.Name.Replace('\\', '/');
+            if (entryName.EndsWith('/' + executableName, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(Path.GetFileName(entryName), executableName, StringComparison.OrdinalIgnoreCase))
+            {
+                entry.ExtractToFile(destinationPath, overwrite: true);
+                return;
+            }
+        }
+
+        throw new ReplayException($"Downloaded Copilot CLI archive did not contain {executableName}.");
+    }
+
     private static string GetYtDlpUrl()
     {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
@@ -620,6 +703,55 @@ public sealed class PortableDependencyInstaller
         }
 
         throw new ReplayException("Portable yt-dlp download is not supported on this operating system. Install yt-dlp manually or configure yt-dlp.path.");
+    }
+
+    private static string GetCopilotCliUrl()
+    {
+        var platform = GetCopilotCliPlatform();
+        var version = GetCopilotCliVersion();
+        return $"{CopilotCliNpmRegistry}/@github/copilot-{platform}/-/copilot-{platform}-{version}.tgz";
+    }
+
+    // Maps the current OS/arch to the npm platform token used by the @github/copilot-<platform>
+    // packages (win32-x64, win32-arm64, linux-x64, linux-arm64, darwin-x64, darwin-arm64) - the
+    // same mapping GitHub.Copilot.SDK.targets uses.
+    private static string GetCopilotCliPlatform()
+    {
+        var arch = RuntimeInformation.ProcessArchitecture switch
+        {
+            Architecture.X64 => "x64",
+            Architecture.Arm64 => "arm64",
+            _ => throw new ReplayException($"Portable GitHub Copilot CLI download is not supported on {RuntimeInformation.ProcessArchitecture}. Install the Copilot CLI manually or configure copilot-cli.path.")
+        };
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            return $"win32-{arch}";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
+        {
+            return $"linux-{arch}";
+        }
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            return $"darwin-{arch}";
+        }
+
+        throw new ReplayException("Portable GitHub Copilot CLI download is not supported on this operating system. Install the Copilot CLI manually or configure copilot-cli.path.");
+    }
+
+    // The CLI version tracked by the referenced GitHub.Copilot.SDK, surfaced as assembly metadata
+    // by the csproj so the on-demand download and the compiled-in SDK never drift. Falls back to a
+    // pinned default if the metadata is unavailable (e.g. in a unit-test host).
+    private static string GetCopilotCliVersion()
+    {
+        var version = typeof(PortableDependencyInstaller).Assembly
+            .GetCustomAttributes<AssemblyMetadataAttribute>()
+            .FirstOrDefault(attribute => string.Equals(attribute.Key, "CopilotCliVersion", StringComparison.OrdinalIgnoreCase))?
+            .Value;
+        return string.IsNullOrWhiteSpace(version) ? DefaultCopilotCliVersion : version;
     }
 
     private static string GetPortableDirectory(ReplayConfig config)

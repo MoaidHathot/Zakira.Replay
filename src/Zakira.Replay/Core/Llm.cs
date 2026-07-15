@@ -29,12 +29,24 @@ public sealed class GitHubCopilotLlmProvider : ILlmProvider
 {
     public const string DefaultModel = "gpt-5.4";
 
+    private readonly DependencyResolver dependencies;
+
+    public GitHubCopilotLlmProvider(DependencyResolver? dependencies = null)
+    {
+        this.dependencies = dependencies ?? new DependencyResolver();
+    }
+
     public string Name => LlmProviders.GitHubCopilot;
 
     public async Task<string> CompleteAsync(LlmRequest request, CancellationToken cancellationToken)
     {
+        // The Copilot CLI native binary is no longer bundled in the package; resolve (and, when
+        // dependencies.autoDownload is on, fetch on demand) the portable copy and point the SDK at
+        // it. Falls back to ZAKIRA_REPLAY_COPILOT_CLI_PATH / COPILOT_CLI_PATH / PATH via the resolver.
+        var cliPath = dependencies.RequireCopilotCli("GitHub Copilot chat/vision/OCR completion");
         await using var client = new CopilotClient(new CopilotClientOptions
         {
+            CliPath = cliPath,
             Cwd = request.WorkingDirectory ?? Environment.CurrentDirectory,
             UseLoggedInUser = true
         });
@@ -487,7 +499,7 @@ public static class LlmProviderFactory
     {
         return Normalize(provider ?? GetConfiguredProvider(config)) switch
         {
-            LlmProviders.GitHubCopilot => new GitHubCopilotLlmProvider(),
+            LlmProviders.GitHubCopilot => new GitHubCopilotLlmProvider(new DependencyResolver(config)),
             LlmProviders.OpenAi => new OpenAiLlmProvider(
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.OpenAi.ApiKeyEnvironmentVariables, "OPENAI_API_KEY")) ?? throw new ReplayException($"OpenAI provider requires one of these environment variables: {string.Join(", ", WithDefaults(config.Llm.OpenAi.ApiKeyEnvironmentVariables, "OPENAI_API_KEY"))}."),
                 GetFirstEnvironmentVariable(WithDefaults(config.Llm.OpenAi.BaseUrlEnvironmentVariables, "OPENAI_BASE_URL")) ?? config.Llm.OpenAi.BaseUrl,

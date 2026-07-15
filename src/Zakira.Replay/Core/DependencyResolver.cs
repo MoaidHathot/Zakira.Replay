@@ -20,6 +20,25 @@ public sealed class DependencyResolver
 
     public DependencyStatus GetFfprobeStatus() => GetExecutableStatus("ffprobe", "ZAKIRA_REPLAY_FFPROBE_PATH", config.Dependencies.FfprobePath);
 
+    public DependencyStatus GetCopilotCliStatus()
+    {
+        // Primary env var follows the ZAKIRA_REPLAY_* convention; also honour the SDK's own
+        // COPILOT_CLI_PATH so users who already set it keep working. Both are checked before the
+        // config path / portable dir / PATH ladder in GetExecutableStatus.
+        foreach (var envVarName in new[] { "ZAKIRA_REPLAY_COPILOT_CLI_PATH", "COPILOT_CLI_PATH" })
+        {
+            var configured = Environment.GetEnvironmentVariable(envVarName);
+            if (!string.IsNullOrWhiteSpace(configured))
+            {
+                return File.Exists(configured)
+                    ? DependencyStatus.Found("copilot", configured, envVarName)
+                    : DependencyStatus.Missing("copilot", $"{envVarName} is set but does not exist: {configured}", envVarName);
+            }
+        }
+
+        return GetExecutableStatus("copilot", "ZAKIRA_REPLAY_COPILOT_CLI_PATH", config.Dependencies.CopilotCliPath);
+    }
+
     public DependencyStatus GetEdgeStatus()
     {
         var configured = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_PATH");
@@ -59,6 +78,8 @@ public sealed class DependencyResolver
 
     public string RequireEdge(string requiredFor) => Require(GetEdgeStatus(), "edge", requiredFor, "ZAKIRA_REPLAY_EDGE_PATH");
 
+    public string RequireCopilotCli(string requiredFor) => Require(GetCopilotCliStatus(), "copilot", requiredFor, "ZAKIRA_REPLAY_COPILOT_CLI_PATH");
+
     public IReadOnlyList<DependencyStatus> GetAllStatuses()
     {
         return
@@ -67,7 +88,8 @@ public sealed class DependencyResolver
             GetFfmpegStatus(),
             GetFfprobeStatus(),
             GetEdgeStatus(),
-            DependencyStatus.Found("github-copilot-sdk", "uses logged-in GitHub Copilot session", null)
+            GetCopilotCliStatus(),
+            DependencyStatus.Found("github-copilot-sdk", "managed SDK compiled in (auth: logged-in GitHub Copilot session)", null)
         ];
     }
 
@@ -86,6 +108,7 @@ public sealed class DependencyResolver
                 "yt-dlp" => GetYtDlpStatus(),
                 "ffmpeg" => GetFfmpegStatus(),
                 "ffprobe" => GetFfprobeStatus(),
+                "copilot" => GetCopilotCliStatus(),
                 _ => status
             };
 
@@ -136,7 +159,7 @@ public sealed class DependencyResolver
 
     private static bool SupportsPortableDownload(string dependency)
     {
-        return dependency is "yt-dlp" or "ffmpeg" or "ffprobe";
+        return dependency is "yt-dlp" or "ffmpeg" or "ffprobe" or "copilot";
     }
 
     private static string? FindOnPath(string executableName)

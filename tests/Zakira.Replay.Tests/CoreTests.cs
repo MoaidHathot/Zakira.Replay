@@ -1,5 +1,6 @@
 using Zakira.Replay.Core;
 using Zakira.Replay.Cli;
+using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net;
 
@@ -324,6 +325,54 @@ public sealed class CoreTests
     }
 
     [Fact]
+    public void PortableDependencyInstallerNormalizesCopilotAliasesAndIncludesInAll()
+    {
+        Assert.Equal([PortableDependencyInstaller.CopilotCli], PortableDependencyInstaller.NormalizeTargets(["copilot"]));
+        Assert.Equal([PortableDependencyInstaller.CopilotCli], PortableDependencyInstaller.NormalizeTargets(["copilot-cli"]));
+        Assert.Equal([PortableDependencyInstaller.CopilotCli], PortableDependencyInstaller.NormalizeTargets(["gh-copilot"]));
+        Assert.Contains(PortableDependencyInstaller.CopilotCli, PortableDependencyInstaller.NormalizeTargets(["all"]));
+    }
+
+    [Fact]
+    public void DependencyResolverResolvesCopilotCliFromPortableDirectoryAndListsIt()
+    {
+        using var temp = new TestTempDirectory();
+        var previousZakira = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_COPILOT_CLI_PATH");
+        var previousSdk = Environment.GetEnvironmentVariable("COPILOT_CLI_PATH");
+        var previousPortable = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_COPILOT_CLI_PATH", null);
+            Environment.SetEnvironmentVariable("COPILOT_CLI_PATH", null);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", null);
+
+            var portable = temp.GetPath("tools");
+            Directory.CreateDirectory(portable);
+            var binaryName = OperatingSystem.IsWindows() ? "copilot.exe" : "copilot";
+            var binaryPath = System.IO.Path.Combine(portable, binaryName);
+            File.WriteAllBytes(binaryPath, [1]);
+
+            var resolver = new DependencyResolver(new ReplayConfig
+            {
+                Dependencies = new DependencyPathConfig { PortableDirectory = portable }
+            });
+
+            var status = resolver.GetCopilotCliStatus();
+            Assert.True(status.IsFound);
+            Assert.Equal(binaryPath, status.Path);
+            Assert.Equal("portable", status.Source);
+            Assert.Equal(binaryPath, resolver.RequireCopilotCli("test"));
+            Assert.Contains(resolver.GetAllStatuses(), s => s.Name == "copilot");
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_COPILOT_CLI_PATH", previousZakira);
+            Environment.SetEnvironmentVariable("COPILOT_CLI_PATH", previousSdk);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", previousPortable);
+        }
+    }
+
+    [Fact]
     public void PortableDependencyInstallerUsesConfiguredPaths()
     {
         using var temp = new TestTempDirectory();
@@ -434,6 +483,50 @@ public sealed class CoreTests
             Assert.Equal(2, result.Items.Count);
             Assert.True(File.Exists(System.IO.Path.Combine(temp.GetPath("tools"), "ffmpeg.exe")));
             Assert.True(File.Exists(System.IO.Path.Combine(temp.GetPath("tools"), "ffprobe.exe")));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", previousPortableDirectory);
+        }
+    }
+
+    [Fact]
+    public async Task PortableDependencyInstallerExtractsCopilotCliTarballWithFakeHttp()
+    {
+        using var temp = new TestTempDirectory();
+
+        // Build a minimal npm-style .tgz: gzip(tar) with the single binary nested under package/.
+        using var tgzStream = new MemoryStream();
+        using (var gzip = new GZipStream(tgzStream, CompressionLevel.Fastest, leaveOpen: true))
+        using (var tar = new TarWriter(gzip, TarEntryFormat.Pax, leaveOpen: true))
+        {
+            var binaryName = OperatingSystem.IsWindows() ? "copilot.exe" : "copilot";
+            tar.WriteEntry(new PaxTarEntry(TarEntryType.RegularFile, "package/" + binaryName)
+            {
+                DataStream = new MemoryStream([7, 8, 9])
+            });
+        }
+
+        var previousPortableDirectory = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", null);
+            using var handler = new RecordingHttpMessageHandler(_ => new ByteArrayContent(tgzStream.ToArray()));
+            var installer = new PortableDependencyInstaller(new ReplayConfig
+            {
+                Dependencies = new DependencyPathConfig { PortableDirectory = temp.GetPath("tools") }
+            }, new HttpClient(handler, disposeHandler: false));
+
+            var result = await installer.InstallAsync([PortableDependencyInstaller.CopilotCli], force: false, progress: null, CancellationToken.None);
+
+            var item = Assert.Single(result.Items);
+            Assert.Equal(PortableDependencyInstaller.Copilot, item.Name);
+            Assert.True(item.Installed);
+            var binaryName = OperatingSystem.IsWindows() ? "copilot.exe" : "copilot";
+            var expected = System.IO.Path.Combine(temp.GetPath("tools"), binaryName);
+            Assert.Equal(expected, item.Path);
+            Assert.True(File.Exists(expected));
+            Assert.Equal<byte[]>([7, 8, 9], await File.ReadAllBytesAsync(expected));
         }
         finally
         {

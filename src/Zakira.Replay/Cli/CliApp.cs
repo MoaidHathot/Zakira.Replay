@@ -1172,6 +1172,7 @@ public static class CliApp
             stdout.WriteLine($"yt-dlp: {installer.GetPortableExecutablePath(PortableDependencyInstaller.YtDlp)}");
             stdout.WriteLine($"ffmpeg: {installer.GetPortableExecutablePath(PortableDependencyInstaller.Ffmpeg)}");
             stdout.WriteLine($"ffprobe: {installer.GetPortableExecutablePath(PortableDependencyInstaller.Ffprobe)}");
+            stdout.WriteLine($"copilot: {installer.GetPortableExecutablePath(PortableDependencyInstaller.Copilot)}");
             var activeSearchModel = installer.GetActiveSearchEmbeddingModel();
             stdout.WriteLine($"Search embedding model: {activeSearchModel?.Id ?? (config.Search.Onnx.Model ?? "<custom>")} (kind={activeSearchModel?.ModelKind.ToString().ToLowerInvariant() ?? "?"})");
             stdout.WriteLine($"ONNX model directory: {installer.Layout.OnnxModelDirectory}");

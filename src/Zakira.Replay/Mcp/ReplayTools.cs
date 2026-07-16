@@ -39,7 +39,8 @@ public sealed class ReplayTools
     private readonly ChapterBuilder chapterBuilder;
     private readonly EvidenceAlignmentService alignmentService;
     private readonly DiscoveryService discoveryService;
-    private readonly DependencyResolver dependencyResolver;
+    private readonly DiagnosticsService diagnostics;
+    private readonly ConfigStore configStore;
 
     public ReplayTools(
         Func<AnalysisPipeline> pipelineFactory,
@@ -50,7 +51,8 @@ public sealed class ReplayTools
         ChapterBuilder chapterBuilder,
         EvidenceAlignmentService alignmentService,
         DiscoveryService discoveryService,
-        DependencyResolver dependencyResolver)
+        DiagnosticsService diagnostics,
+        ConfigStore configStore)
     {
         this.pipelineFactory = pipelineFactory;
         this.jobManager = jobManager;
@@ -60,7 +62,8 @@ public sealed class ReplayTools
         this.chapterBuilder = chapterBuilder;
         this.alignmentService = alignmentService;
         this.discoveryService = discoveryService;
-        this.dependencyResolver = dependencyResolver;
+        this.diagnostics = diagnostics;
+        this.configStore = configStore;
     }
 
     // ---------------------------------------------------------------------------------------
@@ -640,10 +643,42 @@ public sealed class ReplayTools
     }
 
     [McpServerTool(Name = "doctor")]
-    [Description("Reports Zakira.Replay dependency availability without installing anything.")]
-    public string Doctor()
+    [Description("Reports Zakira.Replay dependency availability (binaries, local models, Ollama daemon, Edge profile) without installing anything. Pair with deps-install to self-provision what's missing.")]
+    public async Task<string> DoctorAsync(CancellationToken cancellationToken = default)
     {
-        return Serialize(dependencyResolver.GetAllStatuses());
+        return Serialize(await diagnostics.BuildDoctorReportAsync(cancellationToken).ConfigureAwait(false));
+    }
+
+    [McpServerTool(Name = "info")]
+    [Description("Reports the resolved configuration, dependency layout, and capability summary: config path, runs directory, LLM provider/model, portable + per-feature model directories, and which optional features (local OCR/whisper/diarization, yt-dlp, ffmpeg) are ready.")]
+    public async Task<string> InfoAsync(CancellationToken cancellationToken = default)
+    {
+        return Serialize(await diagnostics.BuildInfoAsync(cancellationToken).ConfigureAwait(false));
+    }
+
+    [McpServerTool(Name = "deps-install")]
+    [Description("Downloads portable dependencies on demand into the portable directory so an agent can self-provision what `doctor` reports missing (no CLI shell-out needed). Returns the resolved paths and whether each item was freshly downloaded.")]
+    public async Task<string> DepsInstallAsync(
+        [Description("Comma/space-separated targets: media (default = yt-dlp + ffmpeg), yt-dlp, ffmpeg, copilot-cli, onnx, ocr, whisper-model, diarization, vision, or all.")] string targets = "media",
+        [Description("Re-download even if already installed.")] bool force = false,
+        [Description("Whisper model size for the whisper-model target (e.g. large-v3-turbo).")] string? whisperModel = null,
+        [Description("OCR language pack for the ocr target (e.g. latin).")] string? language = null,
+        [Description("Local vision mode for the vision target (e.g. clip, clip-caption).")] string? mode = null,
+        [Description("Search-embedding model id for the onnx target (e.g. bge-small-en-v1.5).")] string? model = null,
+        CancellationToken cancellationToken = default)
+    {
+        var config = await configStore.EnsureExistsAsync(cancellationToken).ConfigureAwait(false);
+        if (!string.IsNullOrWhiteSpace(model))
+        {
+            // Apply the search-embedding override before building the installer so the ONNX
+            // layout + download target both see the chosen model id (mirrors `deps install`).
+            config.Search.Onnx.Model = model;
+        }
+
+        var installer = new PortableDependencyInstaller(config);
+        var targetList = targets.Split([',', ';', ' '], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var result = await installer.InstallAsync(targetList, force, progress: null, cancellationToken, whisperModel, language, mode).ConfigureAwait(false);
+        return Serialize(result);
     }
 
     // ---------------------------------------------------------------------------------------

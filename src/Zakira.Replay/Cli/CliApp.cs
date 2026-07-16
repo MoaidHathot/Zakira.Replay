@@ -140,7 +140,7 @@ public static class CliApp
         var command = new Command("info", "Prints the resolved configuration, dependency layout, and capability summary.");
         command.SetAction(async (parseResult, cancellationToken) =>
         {
-            var info = await CliDiagnostics.BuildInfoAsync(cancellationToken).ConfigureAwait(false);
+            var info = await new DiagnosticsService().BuildInfoAsync(cancellationToken).ConfigureAwait(false);
             if (IsJson(parseResult, outputFormat))
             {
                 stdout.WriteLine(JsonSerializer.Serialize(info, CliJson.Options));
@@ -172,7 +172,7 @@ public static class CliApp
         var command = new Command("doctor", "Reports dependency availability without installing anything.");
         command.SetAction(async (parseResult, cancellationToken) =>
         {
-            var report = await CliDiagnostics.BuildDoctorReportAsync(cancellationToken).ConfigureAwait(false);
+            var report = await new DiagnosticsService().BuildDoctorReportAsync(cancellationToken).ConfigureAwait(false);
             if (IsJson(parseResult, outputFormat))
             {
                 stdout.WriteLine(JsonSerializer.Serialize(report, CliJson.Options));

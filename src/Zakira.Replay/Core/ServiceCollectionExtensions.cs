@@ -22,6 +22,12 @@ public static class ServiceCollectionExtensions
         services.AddSingleton(provider => new DependencyResolver(provider.GetRequiredService<ReplayConfig>()));
         services.AddSingleton<ProcessRunner>();
 
+        // Shared info/doctor probe logic, consumed by both the CLI (info/doctor commands) and
+        // the MCP server (info/doctor/deps-install tools).
+        services.AddSingleton(provider => new DiagnosticsService(
+            provider.GetRequiredService<ConfigStore>(),
+            provider.GetRequiredService<ProcessRunner>()));
+
         // Artifact store roots at the configured runs directory (env var > config >
         // <cwd>/runs default). Resolving here means every DI consumer — pipeline, MCP host,
         // runs CLI group — sees the same answer.

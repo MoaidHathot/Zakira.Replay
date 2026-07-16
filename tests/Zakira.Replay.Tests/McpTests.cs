@@ -43,6 +43,8 @@ public sealed class McpTests
         Assert.Contains("align", names);
         Assert.Contains("discover", names);
         Assert.Contains("doctor", names);
+        Assert.Contains("info", names);
+        Assert.Contains("deps-install", names);
     }
 
     [Fact]
@@ -206,6 +208,94 @@ public sealed class McpTests
         finally
         {
             Environment.CurrentDirectory = previousCurrentDirectory;
+        }
+    }
+
+    [Fact]
+    public async Task InfoToolReportsConfigAndCapabilities()
+    {
+        using var temp = new TestTempDirectory();
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", temp.GetPath("Zakira.Replay.json"));
+            await using var harness = await McpTestHarness.CreateAsync();
+
+            var payload = await harness.CallAndParseAsync("info", new Dictionary<string, object?>());
+
+            Assert.True(payload.RootElement.TryGetProperty("configPath", out _));
+            Assert.True(payload.RootElement.TryGetProperty("llmProvider", out _));
+            Assert.True(payload.RootElement.TryGetProperty("resolvedDependencies", out _));
+            Assert.True(payload.RootElement.TryGetProperty("capabilities", out _));
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+        }
+    }
+
+    [Fact]
+    public async Task DoctorToolReportsModelsNotJustBinaries()
+    {
+        using var temp = new TestTempDirectory();
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", temp.GetPath("Zakira.Replay.json"));
+            await using var harness = await McpTestHarness.CreateAsync();
+
+            var payload = await harness.CallAndParseAsync("doctor", new Dictionary<string, object?>());
+
+            var names = payload.RootElement.GetProperty("dependencies").EnumerateArray()
+                .Select(d => d.GetProperty("name").GetString())
+                .ToArray();
+            // Upgraded from GetAllStatuses() (binaries only) to the full report (binaries + models).
+            Assert.Contains("yt-dlp", names);
+            Assert.Contains("copilot", names);
+            Assert.Contains("whisper-model", names);
+            Assert.Contains("ocr-models", names);
+            Assert.Contains("vision-models", names);
+            Assert.Contains("edge-profile", names);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+        }
+    }
+
+    [Fact]
+    public async Task DepsInstallToolReportsAlreadyInstalledWithoutDownloading()
+    {
+        using var temp = new TestTempDirectory();
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousPortable = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY");
+        try
+        {
+            var portable = temp.GetPath("portable");
+            Directory.CreateDirectory(portable);
+            // Pre-create the binary so the installer takes the "already exists" path (no network).
+            var binaryName = OperatingSystem.IsWindows() ? "yt-dlp.exe" : "yt-dlp";
+            File.WriteAllBytes(Path.Combine(portable, binaryName), [1]);
+
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", temp.GetPath("Zakira.Replay.json"));
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", portable);
+            await using var harness = await McpTestHarness.CreateAsync();
+
+            var payload = await harness.CallAndParseAsync("deps-install", new Dictionary<string, object?>
+            {
+                ["targets"] = "yt-dlp",
+                ["force"] = false
+            });
+
+            var items = payload.RootElement.GetProperty("items").EnumerateArray().ToArray();
+            var ytDlp = items.Single(i => i.GetProperty("name").GetString() == "yt-dlp");
+            Assert.False(ytDlp.GetProperty("installed").GetBoolean());
+            Assert.EndsWith(binaryName, ytDlp.GetProperty("path").GetString()!, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", previousPortable);
         }
     }
 
@@ -484,7 +574,9 @@ internal sealed class McpTestHarness : IAsyncDisposable
                 McpServerTool.Create((Delegate)replayTools.ChaptersBuildAsync, new() { Name = "chapters-build" }),
                 McpServerTool.Create((Delegate)replayTools.AlignAsync, new() { Name = "align" }),
                 McpServerTool.Create((Delegate)replayTools.DiscoverAsync, new() { Name = "discover" }),
-                McpServerTool.Create((Delegate)replayTools.Doctor, new() { Name = "doctor" })
+                McpServerTool.Create((Delegate)replayTools.DoctorAsync, new() { Name = "doctor" }),
+                McpServerTool.Create((Delegate)replayTools.InfoAsync, new() { Name = "info" }),
+                McpServerTool.Create((Delegate)replayTools.DepsInstallAsync, new() { Name = "deps-install" })
             ],
             ResourceCollection = BuildResourceCollection(host.Services.GetRequiredService<ReplayResources>())
         });

@@ -7,6 +7,76 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.15.0] — MCP self-provisioning tools + slimmer package
+
+Lets an MCP agent set itself up (download missing dependencies, read the resolved config) without shelling out to the CLI, and trims dead weight from the package.
+
+### Added
+
+- **`deps-install` MCP tool.** Downloads portable dependencies on demand into the portable
+  directory — `media` (yt-dlp + ffmpeg), `yt-dlp`, `ffmpeg`, `copilot-cli`, `onnx`, `ocr`,
+  `whisper-model`, `diarization`, `vision`, or `all` — mirroring the CLI `deps install`
+  (`targets`, `force`, `whisperModel`, `language`, `mode`, `model`). Returns each item's
+  resolved path and whether it was freshly downloaded. Closes the loop with `doctor`: an
+  agent can now diagnose *and* fix missing dependencies.
+- **`info` MCP tool.** Returns the resolved configuration, dependency layout, and capability
+  summary (config path, runs directory, LLM provider/model, portable + per-feature model
+  directories, and which optional features are ready) — the MCP equivalent of `zakira-replay info`.
+
+### Changed
+
+- **`doctor` MCP tool now returns the full report.** Previously it listed only the resolved
+  binaries; it now matches the CLI `doctor` — binaries plus local models (`whisper-model`,
+  `ocr-models`, `vision-models`, `diarization-models`), the Ollama daemon, and the Edge profile.
+- **Info/doctor probe logic moved to a shared Core `DiagnosticsService`** so the CLI and MCP
+  server run identical logic. The CLI keeps only the human-readable rendering. The
+  `DoctorReport` / `ReplayInfo` record types are now public under `Zakira.Replay.Core`.
+
+### Packaging
+
+- Stripped the redundant bundled RapidOCR `models/v5` set (~12 MB). Zakira.Replay never loaded
+  it — `LocalOnnxOcrProvider` uses explicit portable-directory paths, and OCR models are
+  downloaded on demand (`ocr.local.autoDownload`, default true) or via `deps install ocr`.
+
+## [0.14.2] — Colorized `doctor` output + on-demand Copilot CLI download
+
+### Added
+
+- **Colorized, structured `doctor` output.** The text report now shows a count summary header,
+  aligned per-dependency rows with status glyphs (green ✓ ok / yellow ! degraded / red ✗ missing),
+  dimmed source/paths, and an indented reason line for anything that needs attention. Auto-disables
+  when stdout is redirected/piped, when `NO_COLOR` is set, or when the Windows console can't be
+  switched into virtual-terminal mode. `--output-format json` is unchanged.
+
+### Changed
+
+- **The GitHub Copilot CLI (`copilot.exe`, ~52 MB) is no longer bundled in the package.** It is
+  downloaded on demand into the portable directory (the matching `@github/copilot-<platform>` npm
+  tarball) and the SDK is pointed at it via `CopilotClientOptions.CliPath` — aligning it with
+  yt-dlp/ffmpeg. This also fixes the Copilot provider on Linux/macOS (the bundled binary shipped
+  win-x64 only). New config key `copilot-cli.path`, env var `ZAKIRA_REPLAY_COPILOT_CLI_PATH` (the
+  SDK's own `COPILOT_CLI_PATH` is also honored), and `deps install copilot-cli` target (included in
+  `deps install all`). With `dependencies.autoDownload` on, it fetches on first Copilot-backed use.
+
+## [0.14.1] — Documentation / default-flag scrub
+
+### Changed
+
+- Scrubbed remaining stale default-flag references across the README, skills, schemas, and the
+  MCP/CLI doc comments so the documented defaults match the 0.14.0 "just works" behavior. No
+  runtime behavior change.
+
+## [0.14.0] — `analyze <url>` Just Works with no flags
+
+### Changed
+
+- **A bare `analyze <url>` now does the sensible thing with zero flags:** auto capture-mode
+  selection, host-aware inline-media sidestep for browser-only sources, `frames=15` with the
+  `interval` strategy by default, and session-coded run ids for stable artifact folders.
+- Added global `--verbose` / `--quiet` verbosity controls; the default mode suppresses in-flight
+  progress and info-severity warnings, surfacing only the final summary plus warning/error
+  severities. Noisy info-level warnings were demoted accordingly.
+
 ## [0.13.1] — Synchronous progress callbacks in `CliApp` (fixes in-process API race)
 
 Patch release for a latent race in the public `Zakira.Replay.Cli.CliApp.RunAsync(args,

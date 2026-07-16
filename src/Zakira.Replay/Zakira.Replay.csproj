@@ -176,10 +176,14 @@
     RapidOcrNet bundles its own PP-OCRv5 ONNX models under models/v5 (~12 MB). Zakira.Replay
     never loads them: LocalOnnxOcrProvider always calls RapidOcr.InitModels with explicit
     portable-directory paths (different filenames), and the OCR models are downloaded on demand
-    (ocr.local.autoDownload, default true) or via `deps install ocr`. Strip the dead weight.
+    (ocr.local.autoDownload, default true) or via `deps install ocr`. Clear RapidOcrNet's @(Models)
+    item before its copy targets run so the models never reach build/publish output (and thus the
+    package) - more robust than deleting post-publish, which races the pack file enumeration.
   -->
-  <Target Name="TrimBundledOcrModels" AfterTargets="Publish" BeforeTargets="GenerateNuspec;_GetPackageFiles">
-    <RemoveDir Directories="$(PublishDir)models\v5" />
+  <Target Name="StripBundledOcrModels" BeforeTargets="CopyModelsBuild;CopyModelsPublish">
+    <ItemGroup>
+      <Models Remove="@(Models)" />
+    </ItemGroup>
   </Target>
 
 </Project>

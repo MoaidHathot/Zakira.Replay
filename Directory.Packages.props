@@ -9,7 +9,7 @@
   <ItemGroup>
     <PackageVersion Include="Azure.AI.OpenAI" Version="2.1.0" />
     <PackageVersion Include="GitHub.Copilot.SDK" Version="0.3.0" />
-    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.7" />
+    <PackageVersion Include="Microsoft.Data.Sqlite" Version="10.0.11" />
     <PackageVersion Include="Microsoft.Extensions.AI.Abstractions" Version="10.5.2" />
     <PackageVersion Include="Microsoft.Extensions.AI.OpenAI" Version="10.5.2" />
     <PackageVersion Include="Microsoft.Extensions.DependencyInjection" Version="10.0.8" />
@@ -28,6 +28,23 @@
     <PackageVersion Include="System.CommandLine" Version="3.0.0-preview.4.26230.115" />
     <PackageVersion Include="Whisper.net" Version="1.9.0" />
     <PackageVersion Include="Whisper.net.Runtime" Version="1.9.0" />
+  </ItemGroup>
+
+  <!-- Transitive vulnerability overrides.
+       CentralPackageTransitivePinningEnabled is on, so a PackageVersion here pins a package
+       nothing references directly.
+
+       MessagePack: GitHub.Copilot.SDK 0.3.0 -> StreamJsonRpc 2.24.84 -> MessagePack 2.5.198,
+       which carries two high-severity advisories (GHSA-hv8m-jj95-wg3x, GHSA-vh6j-jc39-fggf)
+       plus eight moderate ones. 2.5.302 is the fix, and it is exactly what a later
+       StreamJsonRpc (2.25.29) depends on upstream, so the pairing is a known-good combination
+       rather than a guess. Pinning here avoids dragging the whole Copilot SDK forward.
+
+       Note this went unnoticed because the repo pinned itself to nuget.org only, which is
+       blocked at the TLS layer on this machine, so NuGet could never download the vulnerability
+       database and silently degraded the audit to NU1900. -->
+  <ItemGroup>
+    <PackageVersion Include="MessagePack" Version="2.5.302" />
   </ItemGroup>
 
   <!-- Build / SourceLink. -->

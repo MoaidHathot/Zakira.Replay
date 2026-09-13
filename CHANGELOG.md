@@ -7,6 +7,28 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.15.1] — Security patch: MessagePack + SQLitePCLRaw advisories
+
+No API, CLI, MCP or schema changes - dependency updates only.
+
+### Security
+
+- **MessagePack 2.5.198 -> 2.5.302.** Pulled in transitively via
+  `GitHub.Copilot.SDK 0.3.0` -> `StreamJsonRpc 2.24.84`. The 2.5.198 build carries two
+  high-severity advisories (GHSA-hv8m-jj95-wg3x, GHSA-vh6j-jc39-fggf) and eight moderate ones.
+  2.5.302 is the version a later StreamJsonRpc (2.25.29) depends on upstream, so the pairing is
+  a known-good combination; pinning it here avoids dragging the whole Copilot SDK forward.
+  Both builds expose assembly version 2.5.0.0, so the binding is unchanged.
+- **SQLitePCLRaw native bundle 2.1.11 -> 2.1.12**, via `Microsoft.Data.Sqlite 10.0.7 -> 10.0.11`.
+  `SQLitePCLRaw.lib.e_sqlite3` 2.1.11 carries GHSA-2m69-gcr7-jv3q (high).
+
+Both went unnoticed for months because this repository shipped a `NuGet.config` that cleared all
+inherited sources and pinned restore to `nuget.org` only. On a machine where `api.nuget.org` is
+blocked at the TLS layer, NuGet cannot download the vulnerability database and silently degrades
+the audit to an NU1900 "unable to load the service index" warning, so every package looked clean.
+That `NuGet.config` has been removed; restore now inherits the reachable feeds and the audit
+actually runs.
+
 ## [0.15.0] — MCP self-provisioning tools + slimmer package
 
 Lets an MCP agent set itself up (download missing dependencies, read the resolved config) without shelling out to the CLI, and trims dead weight from the package.

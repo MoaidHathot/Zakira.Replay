@@ -7,6 +7,47 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.16.0] — Frames from YouTube again: bounded range requests for remote inputs
+
+Frame capture from yt-dlp direct URLs (YouTube in particular) had silently degraded to zero
+frames: `analyze` reported `frameCount: 0`, `frames --at` returned `FRAME_CAPTURE_NO_FRAMES`, and
+the transcript still arrived, so summaries came out text-only. No API, MCP or schema changes.
+
+### Fixed
+
+- **ffmpeg drained whole remote files instead of seeking.** googlevideo answers ffmpeg's initial
+  `Range: bytes=0-` with a whole-file `Content-Range`, and recent ffmpeg builds inherit a "short
+  seek" threshold from the TCP layer large enough to cover the entire stream. `http_seek_internal`
+  then satisfies a seek to 02:30 by *reading and discarding* everything up to it — over an
+  open-ended connection that googlevideo serves at roughly playback speed — so one frame took
+  minutes and every frame stage timed out. Every ffmpeg invocation whose input is an http(s) URL
+  now passes `-short_seek_size 65536` (forces a real range request) and, when the build lists it
+  (`ffmpeg -h protocol=https`, probed once per client), `-request_size 1048576` so reads become
+  bounded ranges that the CDN serves at full speed. Measured on a 17-minute 720p stream: a seek
+  went from >90 s (killed) to 0.2 s; a full interval `analyze` from a timeout to 14 s. Local files
+  and non-http sources are untouched.
+- **`frames --at` and the interval strategy reported `FRAME_CAPTURE_NO_FRAMES` with no cause.**
+  Same root cause; the per-timestamp capture returned null on the ffmpeg timeout.
+
+### Changed
+
+- **Direct-URL format selector prefers H.264 up to 720p.** YouTube no longer exposes progressive
+  (video + audio) https streams for most videos, so the video-only fallback decided what ffmpeg
+  read — and `best[...][vcodec!=none]` resolved to the highest rendition (itag 401, 4K AV1) for
+  what ends up as a <=1280 px still. The selector now tries, in order: progressive https (mp4
+  first; unchanged, and still first so STT keeps a combined stream when one exists), then
+  `bestvideo[vcodec^=avc1][height<=720]`, then any codec `<=720p`, then the previous fallbacks.
+  Frames are visually identical at the sizes Replay emits; whole-stream passes (scene detection,
+  audio extraction) read a fraction of the bytes.
+
+### Notes for orchestrators
+
+- YouTube stream URLs are only valid when yt-dlp can solve the player's `n` challenge. A pip
+  install without the `yt-dlp-ejs` package (or without a JS runtime such as Deno/Node) yields URLs
+  that every downloader rejects with `403 Forbidden` — captions still work, so the symptom is
+  again "transcript but no frames". Keep yt-dlp current (`pip install -U yt-dlp yt-dlp-ejs`) or
+  use the official standalone executable, which bundles the solver.
+
 ## [0.15.1] — Security patch: MessagePack + SQLitePCLRaw advisories
 
 No API, CLI, MCP or schema changes - dependency updates only.

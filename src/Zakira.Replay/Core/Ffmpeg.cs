@@ -81,13 +81,116 @@ public sealed record SilenceDetectionOptions(double NoiseDb = -30, double MinSil
 
 public sealed class FfmpegClient : IFfmpegClient
 {
+    /// <summary>
+    /// <c>-request_size</c> handed to ffmpeg's http(s) protocol for remote inputs: every read
+    /// becomes a bounded <c>Range: bytes=a-b</c> request of at most this many bytes.
+    /// </summary>
+    /// <remarks>
+    /// Two problems with googlevideo (and similar CDN) URLs go away with bounded requests. First,
+    /// ffmpeg's http layer answers a forward seek by <em>draining</em> the rest of the current
+    /// response when the remaining bytes fit its "short seek" threshold - and the threshold it
+    /// inherits from the TCP layer on some builds is large enough to cover a whole 14 MB stream,
+    /// so a seek to 02:30 silently downloads the entire file first. With bounded requests the
+    /// drain is capped at one request. Second, open-ended (<c>bytes=0-</c>) reads from googlevideo
+    /// are served at roughly playback speed, while bounded ranges are served at full speed, so
+    /// whole-stream reads (scene detection, audio extraction) finish in seconds instead of minutes.
+    /// 1 MiB keeps request count reasonable for whole-stream reads while keeping any drain cheap.
+    /// </remarks>
+    internal const long RemoteInputRequestSizeBytes = 1_048_576;
+
+    /// <summary>
+    /// <c>-short_seek_size</c> handed to ffmpeg's http(s) protocol for remote inputs. Overrides
+    /// the threshold below which ffmpeg drains the current response instead of issuing a new
+    /// range request (see <see cref="RemoteInputRequestSizeBytes"/>). Present in every ffmpeg
+    /// release since 4.0, so it is applied unconditionally; <c>-request_size</c> is newer and is
+    /// probed first (<see cref="SupportsRequestSizeAsync"/>).
+    /// </summary>
+    internal const int RemoteInputShortSeekSizeBytes = 65_536;
+
     private readonly DependencyResolver dependencies;
     private readonly ProcessRunner processRunner;
+    private readonly SemaphoreSlim probeGate = new(1, 1);
+    private bool? supportsRequestSize;
 
     public FfmpegClient(DependencyResolver dependencies, ProcessRunner processRunner)
     {
         this.dependencies = dependencies;
         this.processRunner = processRunner;
+    }
+
+    /// <summary>
+    /// Builds the protocol options that must precede <c>-i &lt;mediaSource&gt;</c>. Empty for local
+    /// files and non-http(s) sources, so callers can splice the result into any argument list.
+    /// </summary>
+    internal async Task<IReadOnlyList<string>> GetInputOptionsAsync(string ffmpeg, string mediaSource, CancellationToken cancellationToken)
+    {
+        if (!SourceLocator.IsHttpUrl(mediaSource))
+        {
+            return [];
+        }
+
+        var options = new List<string>
+        {
+            "-short_seek_size", RemoteInputShortSeekSizeBytes.ToString(CultureInfo.InvariantCulture)
+        };
+
+        if (await SupportsRequestSizeAsync(ffmpeg, cancellationToken).ConfigureAwait(false))
+        {
+            options.Add("-request_size");
+            options.Add(RemoteInputRequestSizeBytes.ToString(CultureInfo.InvariantCulture));
+        }
+
+        return options;
+    }
+
+    /// <summary>
+    /// Probes (once per client) whether this ffmpeg build's http protocol knows
+    /// <c>-request_size</c>. ffmpeg aborts on unknown options, so the flag can only be passed when
+    /// <c>ffmpeg -h protocol=https</c> lists it. Any probe failure counts as "unsupported": the
+    /// capture then still works, just via <c>-short_seek_size</c> alone.
+    /// </summary>
+    private async Task<bool> SupportsRequestSizeAsync(string ffmpeg, CancellationToken cancellationToken)
+    {
+        if (supportsRequestSize is bool cached)
+        {
+            return cached;
+        }
+
+        await probeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (supportsRequestSize is bool cachedAfterWait)
+            {
+                return cachedAfterWait;
+            }
+
+            bool supported;
+            try
+            {
+                var result = await processRunner.RunAsync(
+                    ffmpeg,
+                    ["-hide_banner", "-h", "protocol=https"],
+                    timeout: TimeSpan.FromSeconds(30),
+                    cancellationToken: cancellationToken).ConfigureAwait(false);
+                supported = result.ExitCode == 0
+                    && FfmpegOutputPatterns.RequestSizeOptionRegex().IsMatch(result.StandardOutput + "\n" + result.StandardError);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception)
+            {
+                supported = false;
+            }
+
+            supportsRequestSize = supported;
+            return supported;
+        }
+        finally
+        {
+            probeGate.Release();
+        }
     }
 
     public async Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(
@@ -187,9 +290,11 @@ public sealed class FfmpegClient : IFfmpegClient
         // rangeStart back below. Input-side seeking is faster but resets PTS to zero, which
         // would force us to recover the absolute timestamp by other means.
         var filter = $"select=gt(scene\\,0.35){GetScaleFilterSuffix(options)},showinfo";
-        var args = new List<string>
-        {
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
+        List<string> args =
+        [
             "-hide_banner",
+            .. inputOptions,
             "-i", mediaSource,
             "-ss", rangeStart.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
             "-to", rangeEnd.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
@@ -199,7 +304,7 @@ public sealed class FfmpegClient : IFfmpegClient
             "-q:v", MapJpegQualityToQscale(options.JpegQuality).ToString(CultureInfo.InvariantCulture),
             "-y",
             outputPattern
-        };
+        ];
 
         var result = await processRunner.RunAsync(
             ffmpeg,
@@ -265,14 +370,16 @@ public sealed class FfmpegClient : IFfmpegClient
         var outputPath = run.GetPath(relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
 
-        var args = new List<string>
-        {
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
+        List<string> args =
+        [
             "-hide_banner",
             "-loglevel", "error",
+            .. inputOptions,
             "-ss", seconds.ToString("0.###", CultureInfo.InvariantCulture),
             "-i", mediaSource,
             "-frames:v", "1"
-        };
+        ];
         var scaleSuffix = GetScaleFilterSuffix(options);
         if (scaleSuffix.Length > 0)
         {
@@ -333,10 +440,12 @@ public sealed class FfmpegClient : IFfmpegClient
     {
         var ffmpeg = dependencies.RequireFfmpeg("extracting every frame from video media");
         var outputPattern = run.GetPath(Path.Combine("frames", "frame-%06d.jpg"));
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
+                .. inputOptions,
                 "-i", mediaSource,
                 "-vf", "showinfo",
                 "-vsync", "0",
@@ -384,10 +493,12 @@ public sealed class FfmpegClient : IFfmpegClient
         var safetyCap = Math.Max(1, sceneSafetyCap);
         var ffmpeg = dependencies.RequireFfmpeg("extracting scene-change frames from video media");
         var outputPattern = run.GetPath(Path.Combine("frames", "scene-%04d.jpg"));
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
+                .. inputOptions,
                 "-i", mediaSource,
                 "-vf", "select=gt(scene\\,0.35),showinfo",
                 "-vsync", "vfr",
@@ -439,11 +550,13 @@ public sealed class FfmpegClient : IFfmpegClient
         var relativePath = Path.Combine("audio", "audio.wav");
         var outputPath = run.GetPath(relativePath);
 
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
                 "-loglevel", "error",
+                .. inputOptions,
                 "-i", mediaSource,
                 "-vn",
                 "-ac", "1",
@@ -472,11 +585,13 @@ public sealed class FfmpegClient : IFfmpegClient
         var relativePath = Path.Combine("clips", fileName);
         var outputPath = run.GetPath(relativePath);
         Directory.CreateDirectory(Path.GetDirectoryName(outputPath)!);
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
                 "-loglevel", "error",
+                .. inputOptions,
                 "-ss", start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                 "-to", end.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                 "-i", mediaSource,
@@ -496,6 +611,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 [
                     "-hide_banner",
                     "-loglevel", "error",
+                    .. inputOptions,
                     "-ss", start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                     "-to", end.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                     "-i", mediaSource,
@@ -542,11 +658,13 @@ public sealed class FfmpegClient : IFfmpegClient
         var ffmpeg = dependencies.RequireFfmpeg("detecting silence boundaries for audio chunking");
         var noise = options.NoiseDb.ToString("0.###", CultureInfo.InvariantCulture);
         var minSilence = options.MinSilenceSeconds.ToString("0.###", CultureInfo.InvariantCulture);
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
                 "-nostats",
+                .. inputOptions,
                 "-i", mediaSource,
                 "-af", $"silencedetect=noise={noise}dB:d={minSilence}",
                 "-f", "null",
@@ -577,11 +695,13 @@ public sealed class FfmpegClient : IFfmpegClient
             Directory.CreateDirectory(directory);
         }
 
+        var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
         var result = await processRunner.RunAsync(
             ffmpeg,
             [
                 "-hide_banner",
                 "-loglevel", "error",
+                .. inputOptions,
                 "-ss", start.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                 "-t", duration.TotalSeconds.ToString("0.###", CultureInfo.InvariantCulture),
                 "-i", mediaSource,
@@ -780,6 +900,13 @@ public static partial class FfmpegOutputPatterns
 
     [GeneratedRegex("(silence_start|silence_end): ([0-9.]+)(?: \\| silence_duration: ([0-9.]+))?")]
     public static partial Regex SilenceLineRegex();
+
+    /// <summary>
+    /// Matches the <c>-request_size</c> entry in <c>ffmpeg -h protocol=https</c> output
+    /// (one option per line, e.g. <c>-request_size      &lt;int64&gt;      .D......... size (in bytes) of requests to make</c>).
+    /// </summary>
+    [GeneratedRegex(@"(?m)^\s*-request_size\s")]
+    public static partial Regex RequestSizeOptionRegex();
 }
 
 public static class Timestamp

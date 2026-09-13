@@ -141,13 +141,39 @@ public sealed class YtDlpClient : IYtDlpClient
         return string.Join(',', entries);
     }
 
+    /// <summary>
+    /// yt-dlp format selector used by <see cref="GetBestMediaUrlAsync"/> to resolve the direct
+    /// media URL that ffmpeg reads (frames, audio, clips). Branches, in order:
+    /// <list type="number">
+    ///   <item>a progressive https stream (video + audio in one file), mp4 preferred - the only
+    ///   branch that also serves audio extraction, kept first so STT keeps working when such a
+    ///   stream exists;</item>
+    ///   <item>the best H.264 video-only https stream up to 720p, then any codec up to 720p -
+    ///   frames are downscaled to at most 1280 px anyway, and H.264 decodes far faster than AV1/VP9
+    ///   while keeping the stream (and every whole-stream pass such as scene detection) small;</item>
+    ///   <item>the previous fallbacks: best video-only https stream at any resolution, then a
+    ///   merged pair, then anything.</item>
+    /// </list>
+    /// Without the 720p branch YouTube's video-only listing resolves to its highest rendition
+    /// (e.g. itag 401, 4K AV1), which is pointless for stills and made the remote reads ffmpeg
+    /// performs on it painfully slow.
+    /// </summary>
+    internal const string DirectMediaUrlFormatSelector =
+        "best[protocol=https][vcodec!=none][acodec!=none][ext=mp4]"
+        + "/best[protocol=https][vcodec!=none][acodec!=none]"
+        + "/bestvideo[protocol=https][vcodec^=avc1][height<=720][ext=mp4]"
+        + "/bestvideo[protocol=https][height<=720][ext=mp4]"
+        + "/best[protocol=https][vcodec!=none][ext=mp4]"
+        + "/best[protocol=https][vcodec!=none]"
+        + "/bv*+ba/b";
+
     public async Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken)
     {
         var ytDlp = dependencies.RequireYtDlp("resolving direct media URL for ffmpeg");
         var args = CreateBaseArguments(request);
         args.AddRange([
             "--no-playlist",
-            "-f", "best[protocol=https][vcodec!=none][acodec!=none][ext=mp4]/best[protocol=https][vcodec!=none][acodec!=none]/best[protocol=https][vcodec!=none][ext=mp4]/best[protocol=https][vcodec!=none]/bv*+ba/b",
+            "-f", DirectMediaUrlFormatSelector,
             "-g", request.Source
         ]);
         var result = await processRunner.RunAsync(

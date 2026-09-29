@@ -20,10 +20,13 @@ public sealed class McpJobManager
     public McpJobManager(Func<AnalysisPipeline> pipelineFactory, string? jobsDirectory = null)
     {
         this.pipelineFactory = pipelineFactory;
-        this.jobsDirectory = jobsDirectory ?? Path.Combine(ArtifactStore.GetDefaultRootDirectory(), ".mcp", "jobs");
+        this.jobsDirectory = jobsDirectory ?? ArtifactStore.GetMcpJobsDirectory(ArtifactStore.GetDefaultRootDirectory());
         Directory.CreateDirectory(this.jobsDirectory);
         LoadPersistedJobs();
     }
+
+    /// <summary>Directory where job snapshots are persisted.</summary>
+    public string JobsDirectory => jobsDirectory;
 
     public McpJob Create(AnalyzeRequest request)
     {

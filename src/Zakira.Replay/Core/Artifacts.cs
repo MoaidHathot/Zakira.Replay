@@ -47,10 +47,35 @@ public sealed class ArtifactStore
         return Path.Combine(Environment.CurrentDirectory, "runs");
     }
 
+    /// <summary>
+    /// Resolves the runs root for callers that don't have a DI-provided <see cref="ArtifactStore"/>
+    /// at hand (CLI helper commands, static path resolution). Loads the user config best-effort so
+    /// <c>runs.directory</c> is honoured here too: before 0.16.1 this helper passed
+    /// <c>config: null</c>, which made every sidecar directory it fed (<c>.mcp/jobs</c>,
+    /// <c>.queue</c>, <c>.indexes</c>, batch folders) land under <c>&lt;cwd&gt;/runs</c> while the
+    /// pipeline itself wrote to the configured root.
+    /// </summary>
     public static string GetDefaultRootDirectory()
     {
-        return ResolveRootDirectory(config: null);
+        ReplayConfig? config = null;
+        try
+        {
+            config = new ConfigStore().Load();
+        }
+        catch
+        {
+            // Best-effort: env-var or the <cwd>/runs default still applies when the config file
+            // is missing or unparseable. Callers that need a hard failure go through DI.
+        }
+
+        return ResolveRootDirectory(config);
     }
+
+    /// <summary>Directory holding persisted MCP job snapshots for the given runs root.</summary>
+    public static string GetMcpJobsDirectory(string rootDirectory) => Path.Combine(rootDirectory, ".mcp", "jobs");
+
+    /// <summary>Directory holding persistent analysis queues for the given runs root.</summary>
+    public static string GetQueueRootDirectory(string rootDirectory) => Path.Combine(rootDirectory, ".queue");
 
     public VideoRun CreateRun(string source, string? requestedRunId = null)
     {

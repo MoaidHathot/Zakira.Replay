@@ -17,7 +17,7 @@ public sealed class AnalysisQueue
     public AnalysisQueue(Func<AnalysisPipeline> pipelineFactory, string? queuesRootDirectory = null)
     {
         this.pipelineFactory = pipelineFactory;
-        this.queuesRootDirectory = queuesRootDirectory ?? Path.Combine(ArtifactStore.GetDefaultRootDirectory(), ".queue");
+        this.queuesRootDirectory = queuesRootDirectory ?? ArtifactStore.GetQueueRootDirectory(ArtifactStore.GetDefaultRootDirectory());
         Directory.CreateDirectory(this.queuesRootDirectory);
     }
 

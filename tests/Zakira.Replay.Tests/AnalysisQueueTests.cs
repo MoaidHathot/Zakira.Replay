@@ -4,6 +4,60 @@ namespace Zakira.Replay.Tests;
 
 public sealed class AnalysisQueueTests
 {
+    /// <summary>
+    /// The MCP tools and the CLI derive the queue root from the runs root; the batch runner
+    /// receives it explicitly. Both must land under the configured runs directory rather than
+    /// <c>&lt;cwd&gt;/runs</c>.
+    /// </summary>
+    [Fact]
+    public async Task QueueAndBatchRootsDeriveFromConfiguredRunsDirectory()
+    {
+        using var temp = new TestTempDirectory();
+        var configuredRuns = temp.GetPath("configured-runs");
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        await File.WriteAllTextAsync(configFile, System.Text.Json.JsonSerializer.Serialize(new { runs = new { directory = configuredRuns } }));
+        var sourcePath = temp.GetPath("source.mp4");
+        await File.WriteAllTextAsync(sourcePath, "not real video", CancellationToken.None);
+
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousRuns = Environment.GetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, null);
+            Directory.CreateDirectory(temp.GetPath("vault"));
+            Environment.CurrentDirectory = temp.GetPath("vault");
+
+            Assert.Equal(Path.Combine(Path.GetFullPath(configuredRuns), ".queue"), ArtifactStore.GetQueueRootDirectory(ArtifactStore.GetDefaultRootDirectory()));
+
+            var store = new ArtifactStore(ArtifactStore.GetDefaultRootDirectory());
+            var queue = new AnalysisQueue(() => AnalysisPipelineTests.CreatePipeline(store));
+            var enqueue = await queue.EnqueueAsync("cfg", AnalysisPipelineTests.CreateRequest(sourcePath, "queue-cfg"), "job-1", retries: 0, CancellationToken.None);
+            Assert.StartsWith(Path.Combine(Path.GetFullPath(configuredRuns), ".queue"), enqueue.QueueDirectory, StringComparison.OrdinalIgnoreCase);
+
+            var manifestPath = temp.GetPath("batch.json");
+            await File.WriteAllTextAsync(manifestPath, System.Text.Json.JsonSerializer.Serialize(new BatchManifest
+            {
+                BatchId = "cfg-batch",
+                Frames = 0,
+                IncludeTranscript = false,
+                Items = [new BatchItem { Source = sourcePath, RunId = "cfg-batch-item" }],
+            }, new System.Text.Json.JsonSerializerOptions(System.Text.Json.JsonSerializerDefaults.Web)));
+            var runner = new BatchRunner(() => AnalysisPipelineTests.CreatePipeline(store), store.RootDirectory);
+            var result = await runner.RunAsync(manifestPath, progress: null, CancellationToken.None);
+            Assert.StartsWith(Path.GetFullPath(configuredRuns), result.BatchDirectory, StringComparison.OrdinalIgnoreCase);
+
+            Assert.False(Directory.Exists(Path.Combine(Environment.CurrentDirectory, "runs")), "nothing should be written under <cwd>/runs");
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, previousRuns);
+        }
+    }
+
     [Fact]
     public async Task QueuePersistsEnqueuedJobsAndRunsToSuccess()
     {

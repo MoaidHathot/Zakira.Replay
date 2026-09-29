@@ -41,6 +41,7 @@ public sealed class ReplayTools
     private readonly DiscoveryService discoveryService;
     private readonly DiagnosticsService diagnostics;
     private readonly ConfigStore configStore;
+    private readonly ArtifactStore artifactStore;
 
     public ReplayTools(
         Func<AnalysisPipeline> pipelineFactory,
@@ -52,7 +53,8 @@ public sealed class ReplayTools
         EvidenceAlignmentService alignmentService,
         DiscoveryService discoveryService,
         DiagnosticsService diagnostics,
-        ConfigStore configStore)
+        ConfigStore configStore,
+        ArtifactStore artifactStore)
     {
         this.pipelineFactory = pipelineFactory;
         this.jobManager = jobManager;
@@ -64,7 +66,15 @@ public sealed class ReplayTools
         this.discoveryService = discoveryService;
         this.diagnostics = diagnostics;
         this.configStore = configStore;
+        this.artifactStore = artifactStore;
     }
+
+    /// <summary>
+    /// Persistent queue rooted at the configured runs directory (<c>&lt;runs&gt;/.queue</c>), the
+    /// same root the pipeline writes run artifacts to.
+    /// </summary>
+    private AnalysisQueue CreateQueue() =>
+        new(pipelineFactory, ArtifactStore.GetQueueRootDirectory(artifactStore.RootDirectory));
 
     // ---------------------------------------------------------------------------------------
     //  Analysis: synchronous + background-job lifecycle
@@ -262,7 +272,7 @@ public sealed class ReplayTools
         [Description("Opt in to downloading source video locally. Default off.")] bool? allowMediaDownload = null,
         CancellationToken cancellationToken = default)
     {
-        var queue = new AnalysisQueue(pipelineFactory);
+        var queue = CreateQueue();
         var request = new AnalyzeRequest(
             Source: source,
             VisionInstruction: visionInstruction ?? string.Empty,
@@ -307,7 +317,7 @@ public sealed class ReplayTools
         [Description("Retry count beyond the first attempt.")] int retries = 0,
         CancellationToken cancellationToken = default)
     {
-        var queue = new AnalysisQueue(pipelineFactory);
+        var queue = CreateQueue();
         var result = await queue.RunAsync(queueId, new AnalysisQueueRunOptions(Concurrency: concurrency, Retries: retries), progress: null, cancellationToken).ConfigureAwait(false);
         return Serialize(result);
     }
@@ -318,7 +328,7 @@ public sealed class ReplayTools
         [Description("Persistent queue id. Defaults to 'default'.")] string? queueId = null,
         CancellationToken cancellationToken = default)
     {
-        var queue = new AnalysisQueue(pipelineFactory);
+        var queue = CreateQueue();
         var state = await queue.GetStatusAsync(queueId, cancellationToken).ConfigureAwait(false);
         return Serialize(state);
     }
@@ -499,7 +509,7 @@ public sealed class ReplayTools
             OnnxModel: onnxModel,
             OnnxModelKind: onnxModelKind);
         // Polymorphic target: file path, run dir, or conference slug under .indexes/.
-        var resolved = SearchIndexService.ResolveQueryTarget(target, ArtifactStore.GetDefaultRootDirectory()) ?? target;
+        var resolved = SearchIndexService.ResolveQueryTarget(target, artifactStore.RootDirectory) ?? target;
         var result = await searchService.QueryAsync(resolved, query, top, options, cancellationToken).ConfigureAwait(false);
         return Serialize(result);
     }
@@ -516,7 +526,7 @@ public sealed class ReplayTools
             throw new ReplayException("'runs' is required: pass a comma-separated list of paths or globs (e.g. 'runs/*').");
         }
 
-        var artifactRoot = ArtifactStore.GetDefaultRootDirectory();
+        var artifactRoot = artifactStore.RootDirectory;
         var runDirectories = ExpandRunDirectories(runs, artifactRoot);
         if (runDirectories.Count == 0)
         {

@@ -486,7 +486,7 @@ public static class CliApp
         run.Options.Add(concurrency);
         run.SetAction(async (parseResult, cancellationToken) =>
         {
-            var runner = new BatchRunner(CreatePipeline);
+            var runner = new BatchRunner(CreatePipeline, ResolveRunsRoot());
             var isJson = IsJson(parseResult, outputFormat);
             // Default + Quiet: suppress per-item progress; Verbose: stream. JSON: suppress
             // (batch progress is free-form text; mixing it with the JSON envelope or log
@@ -837,7 +837,7 @@ public static class CliApp
             // or a conference id under <runs-root>/.indexes/<slug>/index.json. Fall back to the
             // raw argument so the existing error path still fires for plain bad inputs.
             var rawTarget = parseResult.GetValue(queryTarget)!;
-            var resolved = SearchIndexService.ResolveQueryTarget(rawTarget, ArtifactStore.GetDefaultRootDirectory())
+            var resolved = SearchIndexService.ResolveQueryTarget(rawTarget, ResolveRunsRoot())
                 ?? Path.GetFullPath(rawTarget);
             var result = await new SearchIndexService().QueryAsync(
                 resolved,
@@ -858,7 +858,7 @@ public static class CliApp
         buildConference.SetAction(async (parseResult, cancellationToken) =>
         {
             var raw = parseResult.GetValue(conferenceRuns)!;
-            var artifactRoot = ArtifactStore.GetDefaultRootDirectory();
+            var artifactRoot = ResolveRunsRoot();
             var runDirs = ExpandRunDirectories(raw, artifactRoot);
             if (runDirs.Count == 0)
             {
@@ -973,7 +973,7 @@ public static class CliApp
         }
         enqueue.SetAction(async (parseResult, cancellationToken) =>
         {
-            var queue = new AnalysisQueue(CreatePipeline);
+            var queue = new AnalysisQueue(CreatePipeline, ArtifactStore.GetQueueRootDirectory(ResolveRunsRoot()));
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, !parseResult.GetValue(noTranscript), parseResult.GetValue(frames), parseResult.GetValue(runId));
             var result = await queue.EnqueueAsync(
                 parseResult.GetValue(queueId),
@@ -1008,7 +1008,7 @@ public static class CliApp
         };
         run.SetAction(async (parseResult, cancellationToken) =>
         {
-            var queue = new AnalysisQueue(CreatePipeline);
+            var queue = new AnalysisQueue(CreatePipeline, ArtifactStore.GetQueueRootDirectory(ResolveRunsRoot()));
             var isJson = IsJson(parseResult, outputFormat);
             // Default + Quiet: suppress per-job progress; Verbose: stream. JSON: route to stderr.
             var streamQueue = !isJson && CliVerbosityHelpers.ShouldStreamProgress(CliVerbosityHelpers.Resolve(parseResult));
@@ -1042,7 +1042,7 @@ public static class CliApp
         var status = new Command("status", "Reports persistent queue status.") { queueId };
         status.SetAction(async (parseResult, cancellationToken) =>
         {
-            var queue = new AnalysisQueue(CreatePipeline);
+            var queue = new AnalysisQueue(CreatePipeline, ArtifactStore.GetQueueRootDirectory(ResolveRunsRoot()));
             var state = await queue.GetStatusAsync(parseResult.GetValue(queueId), cancellationToken).ConfigureAwait(false);
             if (IsJson(parseResult, outputFormat))
             {

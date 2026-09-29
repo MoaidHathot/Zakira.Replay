@@ -405,6 +405,78 @@ public sealed class McpTests
         Assert.False(manager.Cancel("does-not-exist"));
     }
 
+    /// <summary>
+    /// Regression for job snapshots landing in <c>&lt;cwd&gt;/runs/.mcp/jobs</c> even when the user
+    /// configured <c>runs.directory</c>: the job manager used to resolve its root with
+    /// <c>config: null</c>, so only the env var was honoured. Both the static default and the
+    /// MCP host's DI registration must follow the configured runs root.
+    /// </summary>
+    [Fact]
+    public void JobManagerAndSidecarDirectoriesFollowConfiguredRunsDirectory()
+    {
+        using var temp = new TestTempDirectory();
+        var configuredRuns = temp.GetPath("configured-runs");
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        File.WriteAllText(configFile, JsonSerializer.Serialize(new { runs = new { directory = configuredRuns } }));
+
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousRuns = Environment.GetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable);
+        var previousCwd = Environment.CurrentDirectory;
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, null);
+            Directory.CreateDirectory(temp.GetPath("some-vault"));
+            Environment.CurrentDirectory = temp.GetPath("some-vault");
+
+            // Static default used by CLI helper commands and parameterless constructors.
+            Assert.Equal(Path.GetFullPath(configuredRuns), ArtifactStore.GetDefaultRootDirectory());
+            var defaultManager = new McpJobManager(() => throw new InvalidOperationException("Pipeline should not be created."));
+            Assert.Equal(Path.Combine(Path.GetFullPath(configuredRuns), ".mcp", "jobs"), defaultManager.JobsDirectory);
+
+            // DI registration used by both MCP transports.
+            var services = new ServiceCollection();
+            services.AddReplay();
+            McpHost.AddJobManager(services);
+            using var provider = services.BuildServiceProvider();
+            var diManager = provider.GetRequiredService<McpJobManager>();
+            Assert.Equal(Path.Combine(Path.GetFullPath(configuredRuns), ".mcp", "jobs"), diManager.JobsDirectory);
+            Assert.True(Directory.Exists(diManager.JobsDirectory));
+
+            Assert.False(Directory.Exists(Path.Combine(Environment.CurrentDirectory, "runs")), "nothing should be written under <cwd>/runs");
+        }
+        finally
+        {
+            Environment.CurrentDirectory = previousCwd;
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, previousRuns);
+        }
+    }
+
+    /// <summary>The env var still outranks <c>runs.directory</c> for the static default.</summary>
+    [Fact]
+    public void DefaultRunsRootPrefersEnvironmentVariableOverConfig()
+    {
+        using var temp = new TestTempDirectory();
+        var configFile = temp.GetPath("Zakira.Replay.json");
+        File.WriteAllText(configFile, JsonSerializer.Serialize(new { runs = new { directory = temp.GetPath("from-config") } }));
+
+        var previousConfig = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH");
+        var previousRuns = Environment.GetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable);
+        try
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", configFile);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, temp.GetPath("from-env"));
+
+            Assert.Equal(Path.GetFullPath(temp.GetPath("from-env")), ArtifactStore.GetDefaultRootDirectory());
+        }
+        finally
+        {
+            Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", previousConfig);
+            Environment.SetEnvironmentVariable(ArtifactStore.RunsDirectoryEnvironmentVariable, previousRuns);
+        }
+    }
+
     [Fact]
     public async Task JobManagerRestoresCompletedJobSnapshotsFromDisk()
     {

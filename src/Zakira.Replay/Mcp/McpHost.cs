@@ -57,8 +57,7 @@ public static class McpHost
         });
 
         builder.Services.AddReplay();
-        builder.Services.AddSingleton<McpJobManager>(provider => new McpJobManager(
-            () => provider.GetRequiredService<AnalysisPipeline>()));
+        AddJobManager(builder.Services);
 
         builder.Services
             .AddMcpServer(options =>
@@ -77,6 +76,20 @@ public static class McpHost
         return 0;
     }
 
+    /// <summary>
+    /// Registers the background job manager rooted at the DI-resolved <see cref="ArtifactStore"/>
+    /// so job snapshots land under <c>&lt;runs&gt;/.mcp/jobs</c> for the <em>configured</em> runs
+    /// directory (env var &gt; <c>runs.directory</c> &gt; <c>&lt;cwd&gt;/runs</c>), matching where
+    /// the pipeline writes run artifacts. Shared by the stdio and HTTP transports.
+    /// </summary>
+    internal static IServiceCollection AddJobManager(IServiceCollection services)
+    {
+        services.AddSingleton<McpJobManager>(provider => new McpJobManager(
+            () => provider.GetRequiredService<AnalysisPipeline>(),
+            ArtifactStore.GetMcpJobsDirectory(provider.GetRequiredService<ArtifactStore>().RootDirectory)));
+        return services;
+    }
+
     private static async Task<int> RunHttpAsync(int port, CancellationToken cancellationToken)
     {
         var builder = WebApplication.CreateBuilder();
@@ -85,8 +98,7 @@ public static class McpHost
         builder.Logging.AddConsole();
 
         builder.Services.AddReplay();
-        builder.Services.AddSingleton<McpJobManager>(provider => new McpJobManager(
-            () => provider.GetRequiredService<AnalysisPipeline>()));
+        AddJobManager(builder.Services);
 
         builder.Services
             .AddMcpServer(options =>

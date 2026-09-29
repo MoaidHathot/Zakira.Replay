@@ -12,17 +12,25 @@ public sealed class BatchRunner
     };
 
     private readonly Func<AnalyzeRequest, IProgress<string>?, CancellationToken, Task<AnalyzeResult>> analyzer;
+    private readonly string? artifactRootDirectory;
 
-    public BatchRunner(Func<AnalysisPipeline> pipelineFactory)
-        : this((request, progress, ct) => pipelineFactory().AnalyzeAsync(request, progress, ct))
+    /// <param name="pipelineFactory">Creates one pipeline per batch item.</param>
+    /// <param name="artifactRootDirectory">
+    /// Runs root that receives the per-batch summary folder. Pass the same root the pipeline's
+    /// <see cref="ArtifactStore"/> uses; when omitted the configured default
+    /// (<see cref="ArtifactStore.GetDefaultRootDirectory"/>) is resolved at run time.
+    /// </param>
+    public BatchRunner(Func<AnalysisPipeline> pipelineFactory, string? artifactRootDirectory = null)
+        : this((request, progress, ct) => pipelineFactory().AnalyzeAsync(request, progress, ct), artifactRootDirectory)
     {
     }
 
     // Test seam: tests inject a controllable analyzer delegate (delay, failure, parallelism
     // counter) without having to subclass the sealed AnalysisPipeline.
-    internal BatchRunner(Func<AnalyzeRequest, IProgress<string>?, CancellationToken, Task<AnalyzeResult>> analyzer)
+    internal BatchRunner(Func<AnalyzeRequest, IProgress<string>?, CancellationToken, Task<AnalyzeResult>> analyzer, string? artifactRootDirectory = null)
     {
         this.analyzer = analyzer;
+        this.artifactRootDirectory = artifactRootDirectory;
     }
 
     public async Task<BatchResult> RunAsync(string manifestPath, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -62,7 +70,7 @@ public sealed class BatchRunner
             ? $"batch-{DateTimeOffset.UtcNow:yyyyMMdd-HHmmss}"
             : Slug.Create(manifest.BatchId, 80);
 
-        var batchDirectory = Path.Combine(ArtifactStore.GetDefaultRootDirectory(), batchId);
+        var batchDirectory = Path.Combine(artifactRootDirectory ?? ArtifactStore.GetDefaultRootDirectory(), batchId);
         Directory.CreateDirectory(batchDirectory);
 
         // One slot per input item — each task writes to its own index, so we get manifest-order

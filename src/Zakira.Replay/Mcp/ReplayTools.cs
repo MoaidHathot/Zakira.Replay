@@ -127,13 +127,14 @@ public sealed class ReplayTools
         [Description("Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly (Microsoft Build/Medius).")] bool preferInlineMedia = false,
         [Description("Chromium autoplay-policy override: default | no-user-gesture-required. Per-host map in capture.browser.autoplayPolicyByHost still applies when this is unset.")] string? autoplayPolicy = null,
         [Description("Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: the run emits MEDIA_DOWNLOAD_DECLINED rather than silently consuming bandwidth.")] bool? allowMediaDownload = null,
+        [Description("Capture source comments during the metadata probe: off (default), top (top ~20 threads, pinned/uploader first), all (up to 1000). Surfaced under manifest.sourceDetails.comments and comments/comments.json.")] string? comments = null,
         CancellationToken cancellationToken = default)
     {
         var request = BuildAnalyzeRequest(source, visionInstruction, ocrInstruction, noTranscript, frames, runId, audio, stt, ocr, vision,
             diarize, numSpeakers, diarizeThreshold, maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode,
             smartCrop, smartCropProfile, captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser,
             captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force,
-            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload);
+            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload, comments);
         var job = jobManager.Create(request);
         while (!cancellationToken.IsCancellationRequested)
         {
@@ -190,13 +191,14 @@ public sealed class ReplayTools
         [Description("Comma-separated languages to also persist as transcript.<lang>.md alongside the primary transcript. Off by default.")] string? secondaryCaptionLanguages = null,
         [Description("Skip the in-browser play+duration probe; resolve the source's inline media URL (e.g. Medius HLS) and seek via ffmpeg. Fast path for MSE players that don't boot headlessly (Microsoft Build/Medius).")] bool preferInlineMedia = false,
         [Description("Chromium autoplay-policy override: default | no-user-gesture-required.")] string? autoplayPolicy = null,
-        [Description("Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: emits MEDIA_DOWNLOAD_DECLINED.")] bool? allowMediaDownload = null)
+        [Description("Opt in to downloading the source video locally when no direct or inline URL is reachable. Default off: emits MEDIA_DOWNLOAD_DECLINED.")] bool? allowMediaDownload = null,
+        [Description("Capture source comments: off (default), top (pinned/uploader first, ~20 threads), all (up to 1000).")] string? comments = null)
     {
         var request = BuildAnalyzeRequest(source, visionInstruction, ocrInstruction, noTranscript, frames, runId, audio, stt, ocr, vision,
             diarize, numSpeakers, diarizeThreshold, maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode,
             smartCrop, smartCropProfile, captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser,
             captionLanguages, slideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force,
-            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload);
+            secondaryCaptionLanguages, preferInlineMedia, autoplayPolicy, allowMediaDownload, comments);
         var job = jobManager.Create(request);
         return Serialize(job.Snapshot(includeLogs: false));
     }
@@ -852,7 +854,7 @@ public sealed class ReplayTools
         bool? smartCrop, string? smartCropProfile, string? captureMode, string? authProfile, string? frameStrategy, bool everyFrame,
         string? cookies, string? cookiesFromBrowser, string? captionLanguages, bool? slideGrouping, int? slideHashDistance,
         int? framesPerMinute, int? sceneSafetyCap, bool cache, bool force,
-        string? secondaryCaptionLanguages, bool preferInlineMedia, string? autoplayPolicy, bool? allowMediaDownload)
+        string? secondaryCaptionLanguages, bool preferInlineMedia, string? autoplayPolicy, bool? allowMediaDownload, string? comments = null)
     {
         return new AnalyzeRequest(
             Source: source,
@@ -891,7 +893,8 @@ public sealed class ReplayTools
             SecondaryCaptionLanguages: ParseCaptionLanguages(secondaryCaptionLanguages),
             PreferInlineMedia: preferInlineMedia,
             AutoplayPolicy: autoplayPolicy,
-            AllowMediaDownload: allowMediaDownload);
+            AllowMediaDownload: allowMediaDownload,
+            Comments: CommentsModes.Normalize(comments));
     }
 
     private static IReadOnlyList<string>? ParseCaptionLanguages(string? raw)

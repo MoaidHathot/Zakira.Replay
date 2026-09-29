@@ -292,12 +292,45 @@ public sealed record ArtifactManifest(
     IReadOnlyList<SecondaryTranscriptArtifact>? SecondaryTranscripts = null,
     SessionMetadata? SessionMetadata = null,
     string Status = RunStatuses.Completed,
-    RunFailure? Failure = null)
+    RunFailure? Failure = null,
+    SourceDetails? SourceDetails = null)
 {
     /// <summary>True when every stage ran; the artifact set is complete (warnings may still be present).</summary>
     [JsonIgnore]
     public bool IsCompleted => string.Equals(Status, RunStatuses.Completed, StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(Status);
 }
+
+/// <summary>
+/// Facts the source itself publishes, lifted from the yt-dlp probe into the manifest so an agent
+/// does not have to open <c>metadata.json</c>: the description (recipes and links routinely live
+/// there), creator chapters, uploader/channel, counts, tags, and - when the run asked for them -
+/// the top comments with pinned / uploader-authored ones first (Shorts creators post the recipe
+/// in a pinned comment because the description is empty). Null for local files.
+/// </summary>
+public sealed record SourceDetails(
+    string? Description,
+    string? Uploader,
+    string? Channel,
+    string? UploadDate,
+    long? ViewCount,
+    long? LikeCount,
+    long? CommentCount,
+    IReadOnlyList<string>? Tags,
+    IReadOnlyList<string>? Categories,
+    IReadOnlyList<SourceChapter>? Chapters,
+    IReadOnlyList<SourceComment>? Comments,
+    string? CommentsPath = null);
+
+public sealed record SourceChapter(string Title, double StartSeconds, double? EndSeconds, string StartLabel);
+
+public sealed record SourceComment(
+    string? Author,
+    string Text,
+    long? LikeCount,
+    bool IsPinned,
+    bool AuthorIsUploader,
+    string? PublishedAt,
+    string? Id = null);
 
 /// <summary>
 /// Outcome of a run as recorded in <c>manifest.status</c>. A pipeline exception no longer means

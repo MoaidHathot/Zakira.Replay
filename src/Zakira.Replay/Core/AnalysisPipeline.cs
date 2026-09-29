@@ -103,6 +103,7 @@ public sealed class AnalysisPipeline
         public string? AudioPath { get; set; }
         public string? OcrPath { get; set; }
         public string? VisionPath { get; set; }
+        public SourceDetails? SourceDetails { get; set; }
     }
 
     private async Task<ArtifactManifest?> TryWriteFailureManifestAsync(
@@ -153,7 +154,8 @@ public sealed class AnalysisPipeline
                 Warnings: warnings,
                 Timings: timings.ToArtifact(),
                 Status: hasUsableArtifacts ? RunStatuses.Partial : RunStatuses.Failed,
-                Failure: failure);
+                Failure: failure,
+                SourceDetails: state.SourceDetails);
 
             // The caller's token may already be cancelled; the manifest write must not be.
             await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, CancellationToken.None).ConfigureAwait(false);
@@ -234,6 +236,20 @@ public sealed class AnalysisPipeline
         {
             await artifactStore.WriteTextAsync(run, YtDlpInfoJson.FileName, info.RawJson + Environment.NewLine, cancellationToken).ConfigureAwait(false);
             infoJsonPath = run.GetPath(YtDlpInfoJson.FileName);
+        }
+
+        // Lift what the source publishes (description, chapters, counts, comments) into a shape
+        // the manifest can carry; the full comment list, when captured, gets its own file.
+        if (!isLocalFile)
+        {
+            string? commentsPath = null;
+            if (info.Comments is { Count: > 0 })
+            {
+                commentsPath = "comments/comments.json";
+                await artifactStore.WriteJsonAsync(run, commentsPath, info.Comments, cancellationToken).ConfigureAwait(false);
+            }
+
+            state.SourceDetails = SourceDetailsBuilder.FromInfo(info, commentsPath);
         }
         state.Stage = RunStages.Captions;
 
@@ -971,7 +987,8 @@ public sealed class AnalysisPipeline
             // Deterministic page-derived metadata (title, speakers, abstract, …) extracted from
             // the source page during browser capture. Null when not browser-captured or when no
             // strategy produced any field.
-            SessionMetadata: sessionMetadata);
+            SessionMetadata: sessionMetadata,
+            SourceDetails: state.SourceDetails);
 
         await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, cancellationToken).ConfigureAwait(false);
         if (cacheKey is not null)
@@ -2539,7 +2556,41 @@ public sealed record AnalyzeRequest(
     // Default false: the pipeline emits MEDIA_DOWNLOAD_DECLINED and returns empty frames /
     // audio rather than silently pulling gigabytes off the network. Resolved at the pipeline
     // boundary as cli ?? config.Capture.AllowMediaDownload ?? false.
-    bool? AllowMediaDownload = null);
+    bool? AllowMediaDownload = null,
+    // Comment capture during the metadata probe: null/"off" (default), "top" (yt-dlp
+    // --write-comments limited to the top ~20 threads, no replies) or "all" (up to 1000).
+    // Shorts creators routinely post the recipe / links in a pinned comment because the
+    // description is empty; see CommentsModes.
+    string? Comments = null);
+
+/// <summary>Values for <see cref="AnalyzeRequest.Comments"/>.</summary>
+public static class CommentsModes
+{
+    public const string Off = "off";
+    public const string Top = "top";
+    public const string All = "all";
+
+    public static string Normalize(string? value)
+    {
+        var normalized = (value ?? Off).Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "" or Off or "none" or "false" or "0" => Off,
+            Top => Top,
+            All => All,
+            _ => throw new ReplayException($"Unknown comments mode '{value}'. Use off, top, or all.")
+        };
+    }
+
+    /// <summary>yt-dlp extractor arguments for the requested mode (null when off).</summary>
+    public static string? ToExtractorArguments(string? value) => Normalize(value) switch
+    {
+        // max_comments = max-comments,max-parents,max-replies,max-replies-per-thread
+        Top => "youtube:max_comments=60,20,0,0;comment_sort=top",
+        All => "youtube:max_comments=1000,200,800,20;comment_sort=top",
+        _ => null
+    };
+}
 
 public static class FrameSelectionStrategies
 {

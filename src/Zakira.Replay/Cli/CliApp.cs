@@ -1613,13 +1613,15 @@ public static class CliApp
         var sceneSafetyCap = new Option<int?>("--scene-safety-cap") { Description = "Per-run scene safety cap." };
         var cache = new Option<bool>("--cache") { Description = "Reuse cached run." };
         var force = new Option<bool>("--force") { Description = "Force recompute." };
+        var comments = new Option<string?>("--comments") { Description = "Capture source comments during the metadata probe: off (default), top (top ~20 threads, pinned/uploader first - Shorts creators post the recipe there), or all (up to 1000). Surfaced under manifest.sourceDetails.comments and comments/comments.json." };
+        comments.AcceptOnlyFromAmong("off", "top", "all");
 
         var options = new Option[]
         {
             visionInstruction, ocrInstruction, stt, audio, ocr, vision, diarize, numSpeakers, diarizeThreshold,
             maxAiFrames, llmProvider, model, ocrProvider, visionProvider, localVisionMode, smartCrop, smartCropProfile,
             captureMode, authProfile, frameStrategy, everyFrame, cookies, cookiesFromBrowser, browserAuth,
-            captionLanguages, secondaryTranscripts, preferInlineMedia, autoplayPolicy, allowMediaDownload, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force
+            captionLanguages, secondaryTranscripts, preferInlineMedia, autoplayPolicy, allowMediaDownload, noSlideGrouping, slideHashDistance, framesPerMinute, sceneSafetyCap, cache, force, comments
         };
 
         Func<ParseResult, string, bool, int, string?, AnalyzeRequest> apply = (parseResult, source, includeTranscript, frameCount, runId) =>
@@ -1683,7 +1685,8 @@ public static class CliApp
                 AutoplayPolicy: parseResult.GetValue(autoplayPolicy),
                 // Flag present → true (opt in); flag absent → null so the pipeline can
                 // fall back to capture.allowMediaDownload from config (defaults to false).
-                AllowMediaDownload: parseResult.GetValue(allowMediaDownload) ? true : (bool?)null);
+                AllowMediaDownload: parseResult.GetValue(allowMediaDownload) ? true : (bool?)null,
+                Comments: parseResult.GetValue(comments));
         };
 
         return (options, apply);

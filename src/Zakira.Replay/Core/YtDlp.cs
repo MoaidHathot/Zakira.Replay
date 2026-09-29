@@ -170,7 +170,14 @@ public sealed class YtDlpClient : IYtDlpClient
     {
         var ytDlp = dependencies.RequireYtDlp("extracting media metadata and caption information");
         var args = CreateBaseArguments(request);
-        args.AddRange(["--dump-single-json", "--no-warnings", "--no-playlist", request.Source]);
+        args.AddRange(["--dump-single-json", "--no-warnings", "--no-playlist"]);
+        if (CommentsModes.ToExtractorArguments(request.Comments) is { } commentArguments)
+        {
+            // Comments are only fetched by the extractor when asked; capping them keeps the
+            // probe fast (the "top" preset finishes in a few seconds on YouTube).
+            args.AddRange(["--write-comments", "--extractor-args", commentArguments]);
+        }
+        args.Add(request.Source);
         var result = await processRunner.RunAsync(
             ytDlp,
             args,
@@ -494,6 +501,36 @@ public sealed class YtDlpInfo
     [JsonPropertyName("uploader")]
     public string? Uploader { get; set; }
 
+    [JsonPropertyName("channel")]
+    public string? Channel { get; set; }
+
+    /// <summary>yt-dlp's <c>YYYYMMDD</c> upload date.</summary>
+    [JsonPropertyName("upload_date")]
+    public string? UploadDate { get; set; }
+
+    [JsonPropertyName("view_count")]
+    public long? ViewCount { get; set; }
+
+    [JsonPropertyName("like_count")]
+    public long? LikeCount { get; set; }
+
+    [JsonPropertyName("comment_count")]
+    public long? CommentCount { get; set; }
+
+    [JsonPropertyName("tags")]
+    public List<string>? Tags { get; set; }
+
+    [JsonPropertyName("categories")]
+    public List<string>? Categories { get; set; }
+
+    /// <summary>Creator-authored chapters (YouTube description timestamps, container chapters).</summary>
+    [JsonPropertyName("chapters")]
+    public List<YtDlpChapter>? Chapters { get; set; }
+
+    /// <summary>Present only when the probe ran with <c>--write-comments</c> (see <see cref="AnalyzeRequest.Comments"/>).</summary>
+    [JsonPropertyName("comments")]
+    public List<YtDlpComment>? Comments { get; set; }
+
     [JsonPropertyName("language")]
     public string? Language { get; set; }
 
@@ -551,6 +588,59 @@ public sealed class AvailableSubtitleLanguage
 
     [JsonPropertyName("hasAuto")]
     public bool HasAuto { get; set; }
+}
+
+public sealed class YtDlpChapter
+{
+    [JsonPropertyName("start_time")]
+    public double? StartTime { get; set; }
+
+    [JsonPropertyName("end_time")]
+    public double? EndTime { get; set; }
+
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
+}
+
+public sealed class YtDlpComment
+{
+    [JsonPropertyName("id")]
+    public string? Id { get; set; }
+
+    [JsonPropertyName("text")]
+    public string? Text { get; set; }
+
+    [JsonPropertyName("author")]
+    public string? Author { get; set; }
+
+    [JsonPropertyName("author_id")]
+    public string? AuthorId { get; set; }
+
+    [JsonPropertyName("author_is_uploader")]
+    public bool? AuthorIsUploader { get; set; }
+
+    [JsonPropertyName("is_pinned")]
+    public bool? IsPinned { get; set; }
+
+    [JsonPropertyName("is_favorited")]
+    public bool? IsFavorited { get; set; }
+
+    [JsonPropertyName("like_count")]
+    public long? LikeCount { get; set; }
+
+    /// <summary>Unix seconds.</summary>
+    [JsonPropertyName("timestamp")]
+    public long? Timestamp { get; set; }
+
+    /// <summary>"root" for top-level comments, otherwise the parent comment id.</summary>
+    [JsonPropertyName("parent")]
+    public string? Parent { get; set; }
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? Extra { get; set; }
 }
 
 internal static class YtDlpJson

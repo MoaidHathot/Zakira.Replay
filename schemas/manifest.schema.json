@@ -83,9 +83,64 @@
         { "type": "null" },
         { "$ref": "#/$defs/runFailure" }
       ]
+    },
+    "sourceDetails": {
+      "description": "Facts the source publishes, lifted from the yt-dlp probe: description, uploader/channel, upload date, counts, tags, creator chapters, and (when the run asked for them via --comments) the top comments with pinned / uploader-authored ones first. Null/absent for local files.",
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/sourceDetails" }
+      ]
     }
   },
   "$defs": {
+    "sourceDetails": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "description": { "type": ["string", "null"] },
+        "uploader": { "type": ["string", "null"] },
+        "channel": { "type": ["string", "null"] },
+        "uploadDate": { "type": ["string", "null"], "description": "ISO date (YYYY-MM-DD) when yt-dlp supplied YYYYMMDD." },
+        "viewCount": { "type": ["integer", "null"] },
+        "likeCount": { "type": ["integer", "null"] },
+        "commentCount": { "type": ["integer", "null"] },
+        "tags": { "type": ["array", "null"], "items": { "type": "string" } },
+        "categories": { "type": ["array", "null"], "items": { "type": "string" } },
+        "chapters": {
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["title", "startSeconds", "startLabel"],
+            "properties": {
+              "title": { "type": "string" },
+              "startSeconds": { "type": "number", "minimum": 0 },
+              "endSeconds": { "type": ["number", "null"], "minimum": 0 },
+              "startLabel": { "type": "string" }
+            }
+          }
+        },
+        "comments": {
+          "description": "At most 20 top-level comments: pinned first, then uploader-authored, then by like count; text capped at 2000 characters. The full capture is in commentsPath.",
+          "type": ["array", "null"],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["text", "isPinned", "authorIsUploader"],
+            "properties": {
+              "author": { "type": ["string", "null"] },
+              "text": { "type": "string" },
+              "likeCount": { "type": ["integer", "null"] },
+              "isPinned": { "type": "boolean" },
+              "authorIsUploader": { "type": "boolean" },
+              "publishedAt": { "type": ["string", "null"] },
+              "id": { "type": ["string", "null"] }
+            }
+          }
+        },
+        "commentsPath": { "type": ["string", "null"], "description": "Relative path of the full comment capture (comments/comments.json) when comments were requested." }
+      }
+    },
     "runFailure": {
       "type": "object",
       "additionalProperties": false,

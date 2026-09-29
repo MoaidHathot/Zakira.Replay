@@ -218,8 +218,16 @@ public static partial class TranscriptParser
             return (null, trimmed);
         }
 
+        // Our own writer only emits [Name] for speakers, but caption text can legitimately start
+        // with a bracketed annotation ([music], [laughter]) that must survive a markdown round
+        // trip (STT / diarization paths re-parse transcript.md) without becoming a speaker.
         var name = match.Groups[1].Value.Trim();
-        return (string.IsNullOrWhiteSpace(name) ? null : name, match.Groups[2].Value.Trim());
+        if (string.IsNullOrWhiteSpace(name) || !SpeakerLabelHeuristics.LooksLikeSpeakerLabel(name))
+        {
+            return (null, trimmed);
+        }
+
+        return (name, match.Groups[2].Value.Trim());
     }
 
     private static string? NormalizeSpeakerId(string? displayName)

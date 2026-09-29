@@ -78,6 +78,31 @@ public sealed class AnalysisPipeline
 
         TranscriptArtifact? transcript = null;
         ReplayWarning? missingTranscriptWarning = null;
+        IReadOnlyList<TranscriptSegment> rawTranscriptSegments = [];
+        TranscriptNormalizationResult? transcriptNormalization = null;
+
+        // Normalize as soon as a transcript exists (captions, STT, browser captions) rather than
+        // after the frame stage: a run that dies resolving media or capturing frames must still
+        // leave the deduplicated transcript.md on disk, not the raw rolling captions where every
+        // phrase appears two or three times. Idempotent per transcript instance.
+        async Task NormalizeTranscriptAsync()
+        {
+            if (transcript is null || transcriptNormalization is not null)
+            {
+                return;
+            }
+
+            rawTranscriptSegments = transcript.Segments is { Count: > 0 } captionSegments
+                ? captionSegments
+                : await TranscriptParser.FromMarkdownFileAsync(transcript.MarkdownPath, cancellationToken).ConfigureAwait(false);
+            transcriptNormalization = TranscriptNormalizer.NormalizeWithReport(rawTranscriptSegments);
+            await artifactStore.WriteTextAsync(run, "transcript/raw.md", TranscriptNormalizer.ToMarkdown(rawTranscriptSegments), cancellationToken).ConfigureAwait(false);
+            await artifactStore.WriteJsonAsync(run, "transcript/raw.json", rawTranscriptSegments, cancellationToken).ConfigureAwait(false);
+            await artifactStore.WriteJsonAsync(run, "transcript/normalization.json", transcriptNormalization.Report, cancellationToken).ConfigureAwait(false);
+            await File.WriteAllTextAsync(transcript.MarkdownPath, TranscriptNormalizer.ToMarkdown(transcriptNormalization.Segments), cancellationToken).ConfigureAwait(false);
+            transcript = transcript with { Segments = transcriptNormalization.Segments };
+        }
+
         if (request.IncludeTranscript)
         {
             progress?.Report(isLocalFile ? "Looking for sidecar subtitles..." : "Looking for existing subtitles/captions...");
@@ -103,6 +128,10 @@ public sealed class AnalysisPipeline
                         "No captions/subtitles were extracted. Use --stt to request audio transcription fallback.",
                         Source: isLocalFile ? "sidecar" : "yt-dlp");
                 warnings.Add(missingTranscriptWarning);
+            }
+            else
+            {
+                await NormalizeTranscriptAsync().ConfigureAwait(false);
             }
         }
 
@@ -264,10 +293,23 @@ public sealed class AnalysisPipeline
             }
         }
 
+        await NormalizeTranscriptAsync().ConfigureAwait(false);
+
         if (request.UseDiarization)
         {
             using var diarizationScope = timings.Measure(RunTimingStages.Diarization);
-            await TryRunDiarizationAsync(request, run, audioPath, transcript, warnings, progress, cancellationToken).ConfigureAwait(false);
+            var diarization = await TryRunDiarizationAsync(request, run, audioPath, transcript, warnings, progress, cancellationToken).ConfigureAwait(false);
+            if (diarization is { Count: > 0 } && transcript?.Segments is { Count: > 0 } segmentsToAttribute)
+            {
+                // Attribute the in-memory (normalized) segments and re-render transcript.md from
+                // them, so disk and the evidence/alignment passes agree. The previous markdown
+                // round-trip was silently discarded for caption-sourced transcripts because the
+                // late normalization pass rewrote transcript.md from the un-annotated segments.
+                var attributed = DiarizationMerger.Merge(segmentsToAttribute, diarization);
+                transcript = transcript with { Segments = attributed };
+                await File.WriteAllTextAsync(transcript.MarkdownPath, TranscriptNormalizer.ToMarkdown(attributed), cancellationToken).ConfigureAwait(false);
+                progress?.Report($"Diarization attributed {diarization.Count} speaker segment(s) across {diarization.Select(s => s.SpeakerId).Distinct().Count()} speaker(s).");
+            }
         }
 
         IReadOnlyList<FrameArtifact> frames = [];
@@ -421,6 +463,8 @@ public sealed class AnalysisPipeline
                     warnings.Remove(missingTranscriptWarning);
                     missingTranscriptWarning = null;
                 }
+
+                await NormalizeTranscriptAsync().ConfigureAwait(false);
             }
         }
         else if (browserCaptureAttempted && request.IncludeTranscript && transcript is null)
@@ -450,20 +494,10 @@ public sealed class AnalysisPipeline
             slides = SlideGrouper.Group(frames, slideOptions);
         }
 
-        var rawTranscriptSegments = transcript is null
-            ? []
-            : transcript.Segments is { Count: > 0 } captionSegments
-                ? captionSegments
-                : await TranscriptParser.FromMarkdownFileAsync(transcript.MarkdownPath, cancellationToken).ConfigureAwait(false);
-        var transcriptNormalization = TranscriptNormalizer.NormalizeWithReport(rawTranscriptSegments);
-        var transcriptSegments = transcriptNormalization.Segments;
-        if (transcript is not null)
-        {
-            await artifactStore.WriteTextAsync(run, "transcript/raw.md", TranscriptNormalizer.ToMarkdown(rawTranscriptSegments), cancellationToken).ConfigureAwait(false);
-            await artifactStore.WriteJsonAsync(run, "transcript/raw.json", rawTranscriptSegments, cancellationToken).ConfigureAwait(false);
-            await artifactStore.WriteJsonAsync(run, "transcript/normalization.json", transcriptNormalization.Report, cancellationToken).ConfigureAwait(false);
-            await File.WriteAllTextAsync(transcript.MarkdownPath, TranscriptNormalizer.ToMarkdown(transcriptSegments), cancellationToken).ConfigureAwait(false);
-        }
+        // Safety net for any transcript path that did not normalize above; the in-memory
+        // segments are authoritative from here on (they already carry diarization when it ran).
+        await NormalizeTranscriptAsync().ConfigureAwait(false);
+        IReadOnlyList<TranscriptSegment> transcriptSegments = transcript?.Segments ?? [];
 
         var speakers = BuildSpeakerRegistry(transcriptSegments);
 
@@ -949,7 +983,12 @@ public sealed class AnalysisPipeline
     /// prefixes so the rest of the pipeline (<see cref="TranscriptNormalizer"/>, evidence
     /// alignment, search) picks up the new attribution automatically.
     /// </summary>
-    private async Task TryRunDiarizationAsync(
+    /// <summary>
+    /// Runs speaker diarization over the extracted audio. Returns the diarization segments on
+    /// success (the caller attributes the transcript), or <c>null</c> when diarization did not
+    /// run or produced nothing; every failure mode is recorded as a warning.
+    /// </summary>
+    private async Task<IReadOnlyList<DiarizationSegment>?> TryRunDiarizationAsync(
         AnalyzeRequest request,
         VideoRun run,
         string? audioPath,
@@ -965,7 +1004,7 @@ public sealed class AnalysisPipeline
                 "Diarization was requested but no audio artifact was available. Diarization needs the 16 kHz mono PCM WAV the audio extraction stage produces.",
                 Source: "ffmpeg",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         if (transcript is null)
@@ -975,7 +1014,7 @@ public sealed class AnalysisPipeline
                 "Diarization was requested but no transcript was extracted. Diarization labels existing transcript segments; enable --stt or supply captions.",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         var providerName = DiarizationProviderFactory.Normalize(null);
@@ -986,7 +1025,7 @@ public sealed class AnalysisPipeline
                 $"Unknown diarization provider: {providerName}. Only `sherpa-onnx` is wired in this release.",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         var config = new ConfigStore().Load();
@@ -1006,7 +1045,7 @@ public sealed class AnalysisPipeline
                 $"Failed to resolve diarization options: {ex.Message}",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         var missing = options.MissingFiles();
@@ -1031,7 +1070,7 @@ public sealed class AnalysisPipeline
                     $"Diarization auto-download failed: {ex.Message}. Run `zakira-replay deps install diarization` manually.",
                     Source: "diarization",
                     Severity: ReplayWarningSeverities.Error));
-                return;
+                return null;
             }
         }
 
@@ -1042,7 +1081,7 @@ public sealed class AnalysisPipeline
                 $"Diarization models not found. Run `zakira-replay deps install diarization` (or set `diarization.autoDownload=true`). Missing: {string.Join(", ", missing)}.",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         IReadOnlyList<DiarizationSegment> segments;
@@ -1063,7 +1102,7 @@ public sealed class AnalysisPipeline
                 ex.Message,
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
         catch (Exception ex)
         {
@@ -1072,7 +1111,7 @@ public sealed class AnalysisPipeline
                 $"Diarization failed: {ex.Message}",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Error));
-            return;
+            return null;
         }
 
         if (segments.Count == 0)
@@ -1084,28 +1123,10 @@ public sealed class AnalysisPipeline
                 "Diarization completed but produced no speaker segments. Audio may be silent, music-only, or below the model's detection threshold.",
                 Source: "diarization",
                 Severity: ReplayWarningSeverities.Info));
-            return;
+            return null;
         }
 
-        // Rewrite transcript.md with [SPEAKER_NN] prefixes so the rest of the pipeline
-        // (TranscriptNormalizer, evidence.json speakers[] rollup, evidence-aligned slide /
-        // chapter speaker rollups, search) picks up the attribution automatically.
-        var markdownPath = run.GetPath("transcript.md");
-        if (!File.Exists(markdownPath))
-        {
-            warnings.Add(new ReplayWarning(
-                ReplayWarningCodes.DiarizationNoTranscript,
-                $"transcript.md disappeared between STT and diarization: {markdownPath}.",
-                Source: "diarization",
-                Severity: ReplayWarningSeverities.Error));
-            return;
-        }
-
-        var existing = await File.ReadAllTextAsync(markdownPath, cancellationToken).ConfigureAwait(false);
-        var annotated = DiarizationMerger.AnnotateMarkdown(existing, segments);
-        await File.WriteAllTextAsync(markdownPath, annotated + Environment.NewLine, cancellationToken).ConfigureAwait(false);
-
-        progress?.Report($"Diarization wrote {segments.Count} speaker segments across {segments.Select(s => s.SpeakerId).Distinct().Count()} speaker(s).");
+        return segments;
     }
 
     private static bool IsDiarizationAutoDownloadEnabled(ReplayConfig config)

@@ -346,8 +346,7 @@ public static partial class SubtitleConverter
     public static IReadOnlyList<TranscriptSegment> ParseSegments(string text)
     {
         var blocks = Regex.Split(text.Replace("\r\n", "\n", StringComparison.Ordinal), "\n\n+");
-        var segments = new List<TranscriptSegment>();
-        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var cues = new List<ParsedCue>();
 
         foreach (var block in blocks)
         {
@@ -369,36 +368,71 @@ public static partial class SubtitleConverter
             var endTimestamp = timingParts.Length > 1 ? timingParts[1].Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)[0] : null;
 
             string? speakerDisplayName = null;
+            var speakerKind = SpeakerLabelKind.None;
             var spokenLines = new List<string>();
+            var spokenLinesWithLabel = new List<string>();
             foreach (var line in lines.Where(line => !line.Contains("-->", StringComparison.Ordinal)))
             {
-                var (lineSpeaker, cleaned) = ExtractSpeakerAndCleanLine(line);
-                if (lineSpeaker is not null && speakerDisplayName is null)
+                var parsed = ExtractSpeakerAndCleanLine(line);
+                if (parsed.SpeakerDisplayName is not null && speakerDisplayName is null)
                 {
-                    speakerDisplayName = lineSpeaker;
+                    speakerDisplayName = parsed.SpeakerDisplayName;
+                    speakerKind = parsed.Kind;
                 }
 
-                if (!string.IsNullOrWhiteSpace(cleaned))
+                if (!string.IsNullOrWhiteSpace(parsed.CleanedText))
                 {
-                    spokenLines.Add(cleaned);
+                    spokenLines.Add(parsed.CleanedText);
+                }
+
+                if (!string.IsNullOrWhiteSpace(parsed.CleanedTextWithLabel))
+                {
+                    spokenLinesWithLabel.Add(parsed.CleanedTextWithLabel);
                 }
             }
 
             var spoken = WhitespaceRegex().Replace(string.Join(' ', spokenLines), " ").Trim();
+            var spokenWithLabel = WhitespaceRegex().Replace(string.Join(' ', spokenLinesWithLabel), " ").Trim();
+            if (spoken.Length == 0 && spokenWithLabel.Length == 0)
+            {
+                continue;
+            }
+
+            cues.Add(new ParsedCue(startTimestamp, endTimestamp, speakerDisplayName, speakerKind, spoken, spokenWithLabel));
+        }
+
+        // `Name: text` is only trusted when the document behaves like a speaker-labelled
+        // transcript (some label recurs). Otherwise every colon candidate is folded back into
+        // the spoken text - see SpeakerLabelHeuristics for the evidence behind this gate.
+        var acceptColonLabels = SpeakerLabelHeuristics.AcceptColonLabels(
+            cues.Where(cue => cue.SpeakerKind == SpeakerLabelKind.Colon).Select(cue => cue.SpeakerDisplayName));
+
+        var segments = new List<TranscriptSegment>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var cue in cues)
+        {
+            var speakerDisplayName = cue.SpeakerDisplayName;
+            var spoken = cue.Spoken;
+            if (cue.SpeakerKind == SpeakerLabelKind.Colon && !acceptColonLabels)
+            {
+                speakerDisplayName = null;
+                spoken = cue.SpokenWithLabel;
+            }
+
             if (spoken.Length == 0)
             {
                 continue;
             }
 
-            var dedupeKey = $"{startTimestamp}|{speakerDisplayName ?? string.Empty}|{spoken}";
+            var dedupeKey = $"{cue.StartTimestamp}|{speakerDisplayName ?? string.Empty}|{spoken}";
             if (!seen.Add(dedupeKey))
             {
                 continue;
             }
 
-            var startSeconds = ParseTimestampSeconds(startTimestamp);
-            var endSeconds = endTimestamp is null ? null : ParseTimestampSeconds(endTimestamp);
-            var timestamp = endTimestamp is null ? startTimestamp : $"{startTimestamp} - {endTimestamp}";
+            var startSeconds = ParseTimestampSeconds(cue.StartTimestamp);
+            var endSeconds = cue.EndTimestamp is null ? null : ParseTimestampSeconds(cue.EndTimestamp);
+            var timestamp = cue.EndTimestamp is null ? cue.StartTimestamp : $"{cue.StartTimestamp} - {cue.EndTimestamp}";
             segments.Add(new TranscriptSegment(
                 StartSeconds: startSeconds,
                 EndSeconds: endSeconds,
@@ -410,6 +444,28 @@ public static partial class SubtitleConverter
 
         return segments;
     }
+
+    private enum SpeakerLabelKind
+    {
+        None,
+        VoiceTag,
+        Bracket,
+        Colon
+    }
+
+    private sealed record ParsedCue(
+        string StartTimestamp,
+        string? EndTimestamp,
+        string? SpeakerDisplayName,
+        SpeakerLabelKind SpeakerKind,
+        string Spoken,
+        string SpokenWithLabel);
+
+    private sealed record ParsedLine(
+        string? SpeakerDisplayName,
+        SpeakerLabelKind Kind,
+        string CleanedText,
+        string CleanedTextWithLabel);
 
     public static async Task<string> ToMarkdownAsync(string path, CancellationToken cancellationToken)
     {
@@ -439,57 +495,46 @@ public static partial class SubtitleConverter
         return builder.ToString();
     }
 
-    private static (string? SpeakerDisplayName, string CleanedText) ExtractSpeakerAndCleanLine(string line)
+    private static ParsedLine ExtractSpeakerAndCleanLine(string line)
     {
-        // Try VTT voice tag first: <v Speaker Name>text</v> or self-terminating <v Speaker Name>
+        // Try VTT voice tag first: <v Speaker Name>text</v> or self-terminating <v Speaker Name>.
+        // Explicit markup is always trusted (SharePoint/Teams emit <v @1> for unnamed speakers).
         var voiceMatch = VttVoiceRegex().Match(line);
         if (voiceMatch.Success)
         {
             var name = voiceMatch.Groups[1].Value.Trim();
             var residual = (voiceMatch.Groups[2].Value + line[(voiceMatch.Index + voiceMatch.Length)..]).Trim();
             var cleaned = CleanSubtitleLine(residual);
-            return (string.IsNullOrWhiteSpace(name) ? null : name, cleaned);
+            return string.IsNullOrWhiteSpace(name)
+                ? new ParsedLine(null, SpeakerLabelKind.None, cleaned, cleaned)
+                : new ParsedLine(name, SpeakerLabelKind.VoiceTag, cleaned, cleaned);
         }
 
         var cleanedLine = CleanSubtitleLine(line);
 
-        // Bracketed speaker: [Speaker Name] text
+        // Bracketed speaker: [Speaker Name] text. Sound annotations ([music], [laughter]) and
+        // prose-shaped brackets stay in the text.
         var bracketMatch = BracketSpeakerRegex().Match(cleanedLine);
         if (bracketMatch.Success)
         {
             var name = bracketMatch.Groups[1].Value.Trim();
-            return (string.IsNullOrWhiteSpace(name) ? null : name, bracketMatch.Groups[2].Value.Trim());
+            if (SpeakerLabelHeuristics.LooksLikeSpeakerLabel(name))
+            {
+                return new ParsedLine(name, SpeakerLabelKind.Bracket, bracketMatch.Groups[2].Value.Trim(), cleanedLine);
+            }
+
+            return new ParsedLine(null, SpeakerLabelKind.None, cleanedLine, cleanedLine);
         }
 
-        // Colon-separated speaker prefix: Speaker Name: text. Limited to short, name-shaped prefixes
-        // to avoid swallowing punctuation like time mentions ("at 12:00") or sentences with colons.
+        // Colon-separated speaker prefix: Speaker Name: text. Shape-checked here; the caller
+        // applies the document-level recurrence gate before trusting it.
         var colonMatch = ColonSpeakerRegex().Match(cleanedLine);
-        if (colonMatch.Success && IsLikelySpeakerLabel(colonMatch.Groups[1].Value))
+        if (colonMatch.Success && SpeakerLabelHeuristics.LooksLikeSpeakerLabel(colonMatch.Groups[1].Value))
         {
-            return (colonMatch.Groups[1].Value.Trim(), colonMatch.Groups[2].Value.Trim());
+            return new ParsedLine(colonMatch.Groups[1].Value.Trim(), SpeakerLabelKind.Colon, colonMatch.Groups[2].Value.Trim(), cleanedLine);
         }
 
-        return (null, cleanedLine);
-    }
-
-    /// <summary>
-    /// Heuristic: a speaker label is a short string (≤ 60 chars) made of letters, digits, spaces,
-    /// hyphens, and apostrophes; not all-numeric, not a single character.
-    /// </summary>
-    private static bool IsLikelySpeakerLabel(string candidate)
-    {
-        var trimmed = candidate.Trim();
-        if (trimmed.Length is 0 or > 60)
-        {
-            return false;
-        }
-
-        if (trimmed.All(char.IsDigit))
-        {
-            return false;
-        }
-
-        return SpeakerLabelShapeRegex().IsMatch(trimmed);
+        return new ParsedLine(null, SpeakerLabelKind.None, cleanedLine, cleanedLine);
     }
 
     private static string? NormalizeSpeakerId(string? displayName)
@@ -557,9 +602,6 @@ public static partial class SubtitleConverter
     [GeneratedRegex("^\\[([^\\]]{1,60})\\]\\s*(.+)$")]
     private static partial Regex BracketSpeakerRegex();
 
-    [GeneratedRegex("^([\\p{L}\\p{N}][\\p{L}\\p{N} '\\-\\.]{0,58}[\\p{L}\\p{N}\\.])\\s*:\\s+(.+)$")]
+    [GeneratedRegex("^([\\p{L}\\p{N}@#][\\p{L}\\p{N}@#_ '\\-\\.]{0,58}[\\p{L}\\p{N}\\.]|[\\p{L}\\p{N}@#])\\s*:\\s+(.+)$")]
     private static partial Regex ColonSpeakerRegex();
-
-    [GeneratedRegex("^[\\p{L}\\p{N}][\\p{L}\\p{N} '\\-\\.]*[\\p{L}\\p{N}\\.]$")]
-    private static partial Regex SpeakerLabelShapeRegex();
 }

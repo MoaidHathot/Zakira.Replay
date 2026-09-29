@@ -13,11 +13,12 @@
     "merges"
   ],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.1" },
+    "schemaVersion": { "type": "string", "enum": ["0.1", "0.2"] },
     "createdAt": { "type": "string", "format": "date-time" },
     "rawSegmentCount": { "type": "integer", "minimum": 0 },
     "normalizedSegmentCount": { "type": "integer", "minimum": 0 },
     "mergeCount": { "type": "integer", "minimum": 0 },
+    "splitCount": { "type": "integer", "minimum": 0 },
     "merges": {
       "type": "array",
       "items": { "$ref": "#/$defs/merge" }

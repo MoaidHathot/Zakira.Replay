@@ -380,11 +380,15 @@ Caption preferences default to `["auto"]`, which unions the source's primary lan
 
 When captions carry speaker tags, Zakira.Replay extracts them as facts, not synthesis:
 
-- VTT voice spans `<v Speaker Name>...</v>` (and self-terminating `<v Name>` lines).
-- SRT line prefixes `Speaker Name: utterance` (only when the prefix shape looks like a name).
-- Bracketed prefixes `[Speaker Name] utterance`.
+- VTT voice spans `<v Speaker Name>...</v>` (and self-terminating `<v Name>` lines) — explicit markup, always trusted.
+- Bracketed prefixes `[Speaker Name] utterance` when the label is name-shaped (1–4 capitalised words, `SPEAKER_01`, `@1`); sound annotations such as `[music]`, `[laughter]`, `[snorts]` stay in the text.
+- Line prefixes `Speaker Name: utterance` when the label is name-shaped **and** at least one such label recurs in the document. Ordinary prose that happens to contain a colon (`yogurt has two ingredients: milk`) never becomes a speaker — YouTube auto-captions used to produce phantom speakers this way.
 
 Each `transcript[*]` segment carries `speakerId` (slugified, stable) and `speakerDisplayName` (verbatim from the source). A per-speaker registry is written under `evidence.speakers[]` with `segmentCount`, `totalSeconds`, `firstSeenSeconds`, and `lastSeenSeconds`. Transcript normalization treats speaker changes as hard boundaries: two near-duplicate utterances by different speakers are kept separate. Speakers are never invented; segments without a recognisable tag carry `null` for both fields.
+
+### Transcript normalization
+
+`transcript.md` is normalized as soon as captions are parsed (before media resolution and frame extraction), so a run that fails later still leaves a clean transcript on disk; `transcript/raw.md` keeps the untouched cues. Rolling captions (YouTube auto-subs, live captions, where each cue repeats the previous cue's tail) are merged into continuous text and then re-segmented at sentence ends once a segment exceeds ~8 s (hard cap 20 s without punctuation), so timestamps stay fine-grained for chapters, alignment and search. Merging is case-insensitive and script-agnostic (Hebrew/Arabic captions normalize too). `transcript/normalization.json` records every merge and the number of sentence splits (`splitCount`).
 
 STT-derived transcripts do not carry speakers in this phase. Provider-backed diarization is out of scope for this release; the schema fields are stable so a future phase can plug in cloud or local diarization without breaking consumers.
 

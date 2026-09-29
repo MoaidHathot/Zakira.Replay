@@ -7,6 +7,21 @@ public static partial class TranscriptNormalizer
 {
     private const double DuplicateWindowSeconds = 2;
 
+    /// <summary>
+    /// Segmentation policy for rolling captions (YouTube auto-subs, live captions): once the
+    /// pairwise merges work, a continuous monologue would otherwise collapse into a single
+    /// segment spanning the whole video, destroying the timestamp granularity chapters,
+    /// alignment and search depend on. A continuation is therefore started as a new segment
+    /// when the running segment already ends a sentence and exceeds <see cref="SoftMaxSegmentSeconds"/>
+    /// (or <see cref="SoftMaxSegmentChars"/>), or unconditionally past <see cref="HardMaxSegmentSeconds"/>.
+    /// The new segment starts at the continuation cue's own start time, which for rolling
+    /// captions is exactly when its new words begin.
+    /// </summary>
+    public const double SoftMaxSegmentSeconds = 8;
+    public const int SoftMaxSegmentChars = 400;
+    public const double HardMaxSegmentSeconds = 20;
+    public const int MaxCarriedWords = 12;
+
     public static IReadOnlyList<TranscriptSegment> Normalize(IReadOnlyList<TranscriptSegment> segments)
     {
         return NormalizeWithReport(segments).Segments;
@@ -16,6 +31,7 @@ public static partial class TranscriptNormalizer
     {
         var normalized = new List<TranscriptSegment>();
         var merges = new List<TranscriptNormalizationMerge>();
+        var splitCount = 0;
         foreach (var segment in segments.Where(segment => !string.IsNullOrWhiteSpace(segment.Text)).OrderBy(segment => segment.StartSeconds ?? double.MaxValue))
         {
             var current = segment with { Text = WhitespaceRegex().Replace(segment.Text, " ").Trim() };
@@ -69,6 +85,14 @@ public static partial class TranscriptNormalizer
             var overlap = SuffixPrefixOverlap(previousTokens, currentTokens);
             if (IsUsefulOverlap(overlap, previousTokens, currentTokens))
             {
+                if (TrySplitContinuation(previous, current, overlap, out var head, out var opened))
+                {
+                    normalized[^1] = head;
+                    normalized.Add(opened);
+                    splitCount++;
+                    continue;
+                }
+
                 normalized[^1] = MergeAndReport(merges, "overlapping-continuation", previous, current, MergeOverlappingText(previous.Text, current.Text, overlap));
                 continue;
             }
@@ -79,14 +103,92 @@ public static partial class TranscriptNormalizer
         normalized = AssignSegmentIds(normalized);
 
         var report = new TranscriptNormalizationReport(
-            SchemaVersion: "0.1",
+            SchemaVersion: "0.2",
             CreatedAt: DateTimeOffset.UtcNow,
             RawSegmentCount: segments.Count,
             NormalizedSegmentCount: normalized.Count,
             MergeCount: merges.Count,
-            Merges: merges);
+            Merges: merges,
+            SplitCount: splitCount);
         return new TranscriptNormalizationResult(normalized, report);
     }
+
+    /// <summary>
+    /// Decides whether an overlapping continuation opens a new segment instead of extending
+    /// <paramref name="previous"/>. Only considered when <paramref name="current"/> really starts
+    /// later (a caption growing in place keeps its start and must keep merging).
+    /// <list type="bullet">
+    ///   <item>Past the soft budget, split at the last sentence terminator inside the running
+    ///   segment: the words after it (at most <see cref="MaxCarriedWords"/>) move to the front of
+    ///   the new segment, so segments align with sentences even though cue boundaries do not.</item>
+    ///   <item>Past the hard budget, split at the cue boundary regardless of punctuation.</item>
+    /// </list>
+    /// The new segment takes the continuation cue's own timing; for rolling captions that is
+    /// when its new words start. Carried words were spoken slightly earlier (within the previous
+    /// cue), an error bounded by one cue.
+    /// </summary>
+    private static bool TrySplitContinuation(TranscriptSegment previous, TranscriptSegment current, int overlap, out TranscriptSegment head, out TranscriptSegment opened)
+    {
+        head = previous;
+        opened = current;
+        if (previous.StartSeconds is null || current.StartSeconds is null || current.StartSeconds.Value <= previous.StartSeconds.Value)
+        {
+            return false;
+        }
+
+        var tail = TextAfterWords(current.Text, overlap);
+        if (tail.Length == 0)
+        {
+            return false;
+        }
+
+        var end = current.EndSeconds ?? current.StartSeconds.Value;
+        var duration = end - previous.StartSeconds.Value;
+        var overSoftBudget = duration > SoftMaxSegmentSeconds || previous.Text.Length > SoftMaxSegmentChars;
+        if (!overSoftBudget)
+        {
+            return false;
+        }
+
+        var (sentenceHead, carry) = SplitAtLastSentenceEnd(previous.Text);
+        if (sentenceHead is not null && CountWords(carry) <= MaxCarriedWords)
+        {
+            head = previous with { Text = sentenceHead };
+            var openedText = carry.Length == 0 ? tail : carry + " " + tail;
+            opened = current with { Text = openedText, Timestamp = FormatTimestampRange(current) };
+            return true;
+        }
+
+        if (duration > HardMaxSegmentSeconds)
+        {
+            opened = current with { Text = tail, Timestamp = FormatTimestampRange(current) };
+            return true;
+        }
+
+        return false;
+    }
+
+    /// <summary>
+    /// Splits <paramref name="text"/> after its last sentence terminator. Returns
+    /// <c>(null, text)</c> when there is none, or when the terminator is the very last character
+    /// (nothing to carry, the whole text is the head).
+    /// </summary>
+    private static (string? Head, string Carry) SplitAtLastSentenceEnd(string text)
+    {
+        var match = LastSentenceEndRegex().Match(text);
+        if (!match.Success)
+        {
+            return (null, text);
+        }
+
+        var end = match.Groups["end"];
+        var cut = end.Index + end.Length;
+        var head = text[..cut].TrimEnd();
+        var carry = text[cut..].Trim();
+        return head.Length == 0 ? (null, text) : (head, carry);
+    }
+
+    private static int CountWords(string text) => WordRegex().Matches(text).Count;
 
     private static List<TranscriptSegment> AssignSegmentIds(IReadOnlyList<TranscriptSegment> segments)
     {
@@ -194,14 +296,33 @@ public static partial class TranscriptNormalizer
 
     private static string MergeOverlappingText(string previous, string current, int overlap)
     {
-        var currentWordMatches = WordRegex().Matches(current).Cast<Match>().ToArray();
-        if (overlap >= currentWordMatches.Length)
+        var tail = TextAfterWords(current, overlap);
+        if (tail.Length == 0)
         {
             return previous;
         }
 
-        var appendStart = currentWordMatches[overlap].Index;
-        return WhitespaceRegex().Replace(previous.TrimEnd() + " " + current[appendStart..].TrimStart(), " ").Trim();
+        return WhitespaceRegex().Replace(previous.TrimEnd() + " " + tail, " ").Trim();
+    }
+
+    /// <summary>
+    /// The part of <paramref name="text"/> after its first <paramref name="wordCount"/> words
+    /// (empty when there is nothing left). The cut is made right after the last overlapped word
+    /// and skips only closing punctuation attached to it, so opening brackets/quotes that belong
+    /// to the next word (<c>[snorts]</c>, <c>"quoted</c>) survive the merge.
+    /// </summary>
+    private static string TextAfterWords(string text, int wordCount)
+    {
+        var wordMatches = WordRegex().Matches(text).Cast<Match>().ToArray();
+        if (wordCount >= wordMatches.Length)
+        {
+            return string.Empty;
+        }
+
+        var start = wordCount == 0 ? 0 : wordMatches[wordCount - 1].Index + wordMatches[wordCount - 1].Length;
+        var tail = text[start..].TrimStart();
+        tail = tail.TrimStart('.', ',', ';', ':', '!', '?', '…', ')', ']', '}', '"', '\'', '”', '’', '»').TrimStart();
+        return tail.Length == 0 ? text[wordMatches[wordCount].Index..].TrimStart() : tail;
     }
 
     private static bool TokensEqual(IReadOnlyList<string> left, IReadOnlyList<string> right)
@@ -306,8 +427,22 @@ public static partial class TranscriptNormalizer
         "a", "an", "and", "are", "as", "at", "be", "by", "for", "from", "in", "is", "it", "of", "on", "or", "that", "the", "this", "to", "with"
     };
 
-    [GeneratedRegex("[a-z0-9]+")]
+    // Unicode letters/digits, case-insensitive. Tokenize() lowercases before matching, but
+    // MergeOverlappingText() locates the append point on the ORIGINAL text; with the previous
+    // ASCII lowercase-only pattern any capitalised word inside the overlap ("I", "Today",
+    // "American") was skipped, shifting the index and dropping or truncating words at every
+    // merge boundary ("I spent 3 weeks" -> "I 3 weeks", "Today" -> "oday"). Non-Latin scripts
+    // produced no tokens at all, so Hebrew/Arabic captions were never normalized.
+    [GeneratedRegex(@"[\p{L}\p{N}]+")]
     private static partial Regex WordRegex();
+
+    // Sentence terminator (Latin, CJK, Arabic) optionally followed by closing quotes/brackets,
+    // that is followed by whitespace + an upper-case letter/digit/opening quote, or by the end of
+    // the text. The greedy `^.*` prefix makes the single match land on the LAST such terminator.
+    // Decimal points ("$5.99") and abbreviations followed by a lower-case word ("e.g. this")
+    // are excluded by the lookahead.
+    [GeneratedRegex(@"^.*(?<=\S)(?<end>[.!?…。؟]+[""'”’)\]]*)(?=\s+[\p{Lu}\p{N}""'“‘(\[]|\s*$)", RegexOptions.Singleline)]
+    private static partial Regex LastSentenceEndRegex();
 
     [GeneratedRegex("\\s+")]
     private static partial Regex WhitespaceRegex();
@@ -321,7 +456,8 @@ public sealed record TranscriptNormalizationReport(
     int RawSegmentCount,
     int NormalizedSegmentCount,
     int MergeCount,
-    IReadOnlyList<TranscriptNormalizationMerge> Merges);
+    IReadOnlyList<TranscriptNormalizationMerge> Merges,
+    int SplitCount = 0);
 
 public sealed record TranscriptNormalizationMerge(
     string Reason,

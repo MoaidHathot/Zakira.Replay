@@ -83,18 +83,24 @@ public sealed class DiagnosticsService
     {
         var config = configStore.Load();
         var dependencies = new DependencyResolver(config);
+        var checkTimeout = TimeoutsConfig.Resolve(config.Timeouts.DependencyCheckSeconds, 60);
         var reports = new List<DoctorDependencyReport>();
         foreach (var status in dependencies.GetAllStatuses())
         {
             string? runnable = null;
+            string? version = null;
             if (status.IsFound)
             {
-                runnable = await TryCheckRunnableAsync(status, processRunner, TimeoutsConfig.Resolve(config.Timeouts.DependencyCheckSeconds, 60), cancellationToken).ConfigureAwait(false);
+                (runnable, version) = await TryCheckRunnableAsync(status, processRunner, checkTimeout, cancellationToken).ConfigureAwait(false);
             }
 
-            reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, string.IsNullOrWhiteSpace(runnable), status.Path, status.Source, status.Message, runnable));
+            var advice = runnable is not null
+                ? DoctorAdvice.ForRunnableError(status.Name, runnable)
+                : status.Name == "yt-dlp" ? DoctorAdvice.ForYtDlpVersion(version, DateTimeOffset.UtcNow) : null;
+            reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, string.IsNullOrWhiteSpace(runnable), status.Path, status.Source, status.Message, runnable, version, advice));
         }
 
+        reports.Add(await BuildJsRuntimeReportAsync(checkTimeout, cancellationToken).ConfigureAwait(false));
         reports.Add(BuildWhisperDoctorReport(config));
         reports.Add(await BuildOllamaDoctorReportAsync(config, cancellationToken).ConfigureAwait(false));
         reports.Add(BuildDiarizationDoctorReport(config));
@@ -103,6 +109,66 @@ public sealed class DiagnosticsService
         reports.Add(BuildEdgeProfileDoctorReport(config));
 
         return new DoctorReport(DateTimeOffset.UtcNow, reports);
+    }
+
+    /// <summary>
+    /// yt-dlp needs a JavaScript runtime on PATH to solve YouTube's player challenges (the
+    /// "n"/signature functions moved to an external solver in 2025). Without one, formats go
+    /// missing ("Requested format is not available"), downloads throttle, or <c>-g</c> stalls -
+    /// the single most common real-world failure behind "yt-dlp timed out". Reported as its own
+    /// row so the fix (install deno) is visible before the first failed run.
+    /// </summary>
+    private async Task<DoctorDependencyReport> BuildJsRuntimeReportAsync(TimeSpan checkTimeout, CancellationToken cancellationToken)
+    {
+        foreach (var runtime in DoctorAdvice.JsRuntimes)
+        {
+            var path = DependencyResolver.FindExecutableOnPath(runtime);
+            if (path is null)
+            {
+                continue;
+            }
+
+            string? version = null;
+            string? error = null;
+            try
+            {
+                var result = await processRunner.RunAsync(path, ["--version"], timeout: checkTimeout, cancellationToken: cancellationToken).ConfigureAwait(false);
+                if (result.ExitCode == 0)
+                {
+                    version = FirstLine(result.StandardOutput + result.StandardError);
+                }
+                else
+                {
+                    error = FirstLines(result.StandardError + result.StandardOutput, 3);
+                }
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                error = ex.Message;
+            }
+
+            return new DoctorDependencyReport(
+                "js-runtime",
+                IsFound: true,
+                IsRunnable: error is null,
+                path,
+                "PATH",
+                $"{runtime} — JavaScript runtime yt-dlp uses for YouTube challenge solving",
+                error,
+                version,
+                Advice: null);
+        }
+
+        return new DoctorDependencyReport(
+            "js-runtime",
+            IsFound: false,
+            IsRunnable: false,
+            Path: null,
+            Source: "PATH",
+            Message: "No JavaScript runtime (deno, node or bun) found on PATH. Current yt-dlp needs one to solve YouTube's player challenges; without it formats go missing, downloads throttle and `-g` can stall until the timeout.",
+            RunnableError: null,
+            Version: null,
+            Advice: DoctorAdvice.InstallJsRuntime);
     }
 
     private static LocalWhisperOptions? SafeResolveWhisperOptions(ReplayConfig config)
@@ -394,32 +460,164 @@ public sealed class DiagnosticsService
         }
     }
 
-    private static async Task<string?> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, TimeSpan timeout, CancellationToken cancellationToken)
+    private static async Task<(string? Error, string? Version)> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(status.Path) || status.Name is not ("yt-dlp" or "ffmpeg" or "ffprobe"))
         {
-            return null;
+            return (null, null);
         }
 
         var args = status.Name == "yt-dlp" ? new[] { "--version" } : new[] { "-version" };
         try
         {
             var result = await runner.RunAsync(status.Path, args, timeout: timeout, cancellationToken: cancellationToken).ConfigureAwait(false);
-            return result.ExitCode == 0 ? null : FirstLine(result.StandardError + result.StandardOutput);
+            if (result.ExitCode == 0)
+            {
+                return (null, DoctorAdvice.ParseVersionLine(status.Name, FirstLine(result.StandardOutput + result.StandardError)));
+            }
+
+            // Keep a few lines: the diagnosis is often on the second one ("[PYI-110600:ERROR]
+            // Failed to load Python DLL" / "An Application Control policy has blocked this file").
+            return (FirstLines(result.StandardError + result.StandardOutput, 3), null);
         }
         catch (ProcessTimeoutException)
         {
-            return $"did not answer `{args[0]}` within {timeout.TotalSeconds:0}s (raise timeouts.dependencyCheckSeconds if this machine starts it slowly; antivirus scanning of a self-extracting yt-dlp.exe is a common cause)";
+            return ($"did not answer `{args[0]}` within {timeout.TotalSeconds:0}s (raise timeouts.dependencyCheckSeconds if this machine starts it slowly; antivirus scanning of a self-extracting yt-dlp.exe is a common cause)", null);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            return ex.Message;
+            return (ex.Message, null);
         }
     }
 
     private static string FirstLine(string value)
     {
         return value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "unknown error";
+    }
+
+    private static string FirstLines(string value, int count)
+    {
+        var lines = value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(count).ToArray();
+        return lines.Length == 0 ? "unknown error" : string.Join(" | ", lines);
+    }
+}
+
+/// <summary>
+/// Doctor heuristics that turn raw probe output into a next step: yt-dlp staleness (date-based
+/// versions; YouTube breaks old releases within weeks), the JavaScript runtime yt-dlp needs, and
+/// known "found but not runnable" signatures.
+/// </summary>
+public static class DoctorAdvice
+{
+    /// <summary>yt-dlp releases are dated; after this many days a release is very likely behind a YouTube change.</summary>
+    public const int YtDlpStaleAfterDays = 60;
+
+    /// <summary>Runtimes yt-dlp can use for its JavaScript challenge solver, in preference order.</summary>
+    public static readonly string[] JsRuntimes = ["deno", "node", "bun"];
+
+    public const string InstallJsRuntime = "Install deno (recommended: https://deno.com - `winget install DenoLand.Deno`, `brew install deno`, or `curl -fsSL https://deno.land/install.sh | sh`) or node, make sure it is on PATH, then re-run `zakira-replay doctor`.";
+
+    public static string? ParseVersionLine(string dependencyName, string? line)
+    {
+        if (string.IsNullOrWhiteSpace(line))
+        {
+            return null;
+        }
+
+        var trimmed = line.Trim();
+        if (dependencyName is "ffmpeg" or "ffprobe")
+        {
+            // "ffmpeg version N-124279-g0f6ba39122-20260430 Copyright (c) ..." -> "N-124279-g0f6ba39122-20260430"
+            const string prefix = " version ";
+            var start = trimmed.IndexOf(prefix, StringComparison.OrdinalIgnoreCase);
+            if (start >= 0)
+            {
+                trimmed = trimmed[(start + prefix.Length)..];
+            }
+
+            var copyright = trimmed.IndexOf(" Copyright", StringComparison.OrdinalIgnoreCase);
+            if (copyright > 0)
+            {
+                trimmed = trimmed[..copyright];
+            }
+        }
+
+        return trimmed.Trim();
+    }
+
+    /// <summary>Parses yt-dlp's <c>YYYY.MM.DD[.hotfix]</c> version into a release date.</summary>
+    public static DateOnly? ParseYtDlpReleaseDate(string? version)
+    {
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            return null;
+        }
+
+        var parts = version.Trim().Split('.');
+        if (parts.Length < 3
+            || !int.TryParse(parts[0], out var year)
+            || !int.TryParse(parts[1], out var month)
+            || !int.TryParse(parts[2], out var day)
+            || year < 2020 || month is < 1 or > 12 || day is < 1 or > 31)
+        {
+            return null;
+        }
+
+        try
+        {
+            return new DateOnly(year, month, day);
+        }
+        catch (ArgumentOutOfRangeException)
+        {
+            return null;
+        }
+    }
+
+    public static string? ForYtDlpVersion(string? version, DateTimeOffset now)
+    {
+        var released = ParseYtDlpReleaseDate(version);
+        if (released is null)
+        {
+            return null;
+        }
+
+        var age = DateOnly.FromDateTime(now.UtcDateTime).DayNumber - released.Value.DayNumber;
+        if (age <= YtDlpStaleAfterDays)
+        {
+            return null;
+        }
+
+        return $"yt-dlp {version} is {age} days old. YouTube changes break older releases within weeks (missing formats, bot checks, `-g` stalls); update with `zakira-replay deps install yt-dlp --force` (or `pip install -U yt-dlp` / `winget upgrade yt-dlp`).";
+    }
+
+    /// <summary>Known "installed but will not start" signatures.</summary>
+    public static string? ForRunnableError(string dependencyName, string? error)
+    {
+        if (string.IsNullOrWhiteSpace(error))
+        {
+            return null;
+        }
+
+        if (error.Contains("Application Control policy", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("blocked by your organization", StringComparison.OrdinalIgnoreCase)
+            || error.Contains("AppLocker", StringComparison.OrdinalIgnoreCase))
+        {
+            return dependencyName == "yt-dlp"
+                ? "An application-control policy blocks the self-extracting yt-dlp.exe (PyInstaller unpacks a Python DLL under %TEMP% and the policy refuses to load it). Use a Python-based install instead - `pip install yt-dlp` and point `yt-dlp.path` at the resulting yt-dlp.exe in Python's Scripts folder - or have the policy allow-list the yt-dlp extraction directory."
+                : "An application-control policy blocks this executable. Install it through a channel your policy trusts (winget/MSI) and point the matching *.path config key at it.";
+        }
+
+        if (error.Contains("Failed to load Python DLL", StringComparison.OrdinalIgnoreCase))
+        {
+            return "yt-dlp.exe could not unpack its embedded Python runtime (blocked or read-only %TEMP%). Try `pip install yt-dlp` and set `yt-dlp.path` to the Scripts\\yt-dlp.exe it installs.";
+        }
+
+        if (error.Contains("did not answer", StringComparison.OrdinalIgnoreCase))
+        {
+            return "The probe timed out rather than failed. Re-run doctor once (first start of a self-extracting binary is slow), then raise timeouts.dependencyCheckSeconds if it keeps happening.";
+        }
+
+        return null;
     }
 }
 
@@ -477,4 +675,6 @@ public sealed record DoctorDependencyReport(
     string? Path,
     string? Source,
     string? Message,
-    string? RunnableError);
+    string? RunnableError,
+    string? Version = null,
+    string? Advice = null);

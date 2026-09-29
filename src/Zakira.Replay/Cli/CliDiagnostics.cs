@@ -47,6 +47,11 @@ internal static class CliDiagnostics
             if (dep.IsFound && dep.IsRunnable)
             {
                 var detail = JoinDetail(dep.Source, dep.Path);
+                if (!string.IsNullOrWhiteSpace(dep.Version))
+                {
+                    detail = string.IsNullOrEmpty(detail) ? dep.Version! : $"{dep.Version}  {detail}";
+                }
+
                 var line = $"  {ConsoleStyle.Green("\u2713", color)} {ConsoleStyle.Green("ok".PadRight(8), color)} {dep.Name.PadRight(nameWidth)}";
                 if (!string.IsNullOrEmpty(detail))
                 {
@@ -54,16 +59,23 @@ internal static class CliDiagnostics
                 }
 
                 writer.WriteLine(line);
+                if (!string.IsNullOrWhiteSpace(dep.Advice))
+                {
+                    // Runnable but worth acting on (e.g. a yt-dlp release older than 60 days).
+                    writer.WriteLine(Indent + ConsoleStyle.Yellow("\u2192 " + dep.Advice, color));
+                }
             }
             else if (dep.IsFound)
             {
                 writer.WriteLine($"  {ConsoleStyle.Yellow("!", color)} {ConsoleStyle.Yellow("degraded".PadRight(8), color)} {dep.Name.PadRight(nameWidth)}{SourceSuffix(dep.Source, color)}");
                 WriteDetailLines(writer, Indent, dep.Path, FirstNonEmpty(dep.RunnableError, dep.Message), ConsoleStyle.Yellow, color);
+                WriteAdvice(writer, Indent, dep.Advice, color);
             }
             else
             {
                 writer.WriteLine($"  {ConsoleStyle.Red("\u2717", color)} {ConsoleStyle.Red("missing".PadRight(8), color)} {dep.Name.PadRight(nameWidth)}{SourceSuffix(dep.Source, color)}");
                 WriteDetailLines(writer, Indent, dep.Path, FirstNonEmpty(dep.Message, dep.RunnableError), ConsoleStyle.Red, color);
+                WriteAdvice(writer, Indent, dep.Advice, color);
             }
         }
 
@@ -77,6 +89,14 @@ internal static class CliDiagnostics
             var issues = missingCount + degradedCount;
             var noun = issues == 1 ? "component needs" : "components need";
             writer.WriteLine($"{issues} {noun} attention \u00b7 run `zakira-replay doctor --output-format json` for full detail.");
+        }
+    }
+
+    private static void WriteAdvice(TextWriter writer, string indent, string? advice, bool color)
+    {
+        if (!string.IsNullOrWhiteSpace(advice))
+        {
+            writer.WriteLine(indent + ConsoleStyle.Dim("fix: " + advice, color));
         }
     }
 

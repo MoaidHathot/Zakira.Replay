@@ -222,6 +222,17 @@ Zakira.Replay resolves dependency paths in this order:
 
 Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr [--language <pack>]` to download a RapidOCR PP-OCRv5 language pack for the local OCR provider (default `latin`; other packs: `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`), `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path, or `zakira-replay deps install diarization` to download the pyannote-segmentation-3.0 and 3D-Speaker ONNX models used by the `--diarize` flag. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, the configured OCR language pack, the default Whisper model, and the diarization models.
 
+### What `doctor` checks
+
+`zakira-replay doctor` runs each binary's `--version` (budget: `timeouts.dependencyCheckSeconds`, default 60 s — a cold self-extracting `yt-dlp.exe` under antivirus scanning regularly exceeded the old 15 s and produced false "not runnable" reports) and reports:
+
+- the **version** of yt-dlp / ffmpeg / ffprobe next to each `ok` row;
+- **yt-dlp staleness**: releases are dated (`2026.08.19`); one older than 60 days gets an update hint, because YouTube changes break older releases within weeks (missing formats, bot checks, `-g` stalls) — the most common real-world cause of "yt-dlp timed out";
+- a **`js-runtime`** row: current yt-dlp needs deno (recommended), node or bun on `PATH` to solve YouTube's player challenges; missing means degraded YouTube support and the row says how to install one;
+- **why** a found binary does not start: the first three lines of its output plus a concrete fix for known signatures, e.g. a `yt-dlp.exe` blocked by an application-control policy (`Failed to load Python DLL … An Application Control policy has blocked this file`) → use `pip install yt-dlp` and point `yt-dlp.path` at it.
+
+`--output-format json` carries the same data as `version` / `advice` fields per dependency.
+
 ### Runs output directory
 
 By default every analysis lands under `<cwd>/runs/<run-id>/`. To pin a stable location (recommended for daemon-style use), set `runs.directory` once:

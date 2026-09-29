@@ -165,6 +165,9 @@ public sealed class DependencyResolver
         return dependency is "yt-dlp" or "ffmpeg" or "ffprobe" or "copilot";
     }
 
+    /// <summary>First PATH entry that contains <paramref name="executableName"/> (PATHEXT-aware on Windows), or null.</summary>
+    public static string? FindExecutableOnPath(string executableName) => FindOnPath(executableName);
+
     private static string? FindOnPath(string executableName)
     {
         var path = Environment.GetEnvironmentVariable("PATH");

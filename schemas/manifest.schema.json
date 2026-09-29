@@ -27,6 +27,7 @@
     "audioPath": { "type": ["string", "null"] },
     "transcriptPath": { "type": ["string", "null"] },
     "ocrPath": { "type": ["string", "null"] },
+    "ocrStepsPath": { "type": ["string", "null"], "description": "Relative path of ocr/steps.json: the deduplicated, timestamped list of distinct on-screen text lines (first/last seen, occurrences, frame ids); ocr/steps.md is the readable form. Present when OCR ran." },
     "visionPath": { "type": ["string", "null"] },
     "evidencePath": { "type": ["string", "null"] },
     "frames": {

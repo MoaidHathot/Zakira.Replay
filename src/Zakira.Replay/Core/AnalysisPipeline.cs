@@ -102,6 +102,7 @@ public sealed class AnalysisPipeline
         public IReadOnlyList<FrameArtifact> Frames { get; set; } = [];
         public string? AudioPath { get; set; }
         public string? OcrPath { get; set; }
+        public string? OcrStepsPath { get; set; }
         public string? VisionPath { get; set; }
         public SourceDetails? SourceDetails { get; set; }
     }
@@ -155,7 +156,8 @@ public sealed class AnalysisPipeline
                 Timings: timings.ToArtifact(),
                 Status: hasUsableArtifacts ? RunStatuses.Partial : RunStatuses.Failed,
                 Failure: failure,
-                SourceDetails: state.SourceDetails);
+                SourceDetails: state.SourceDetails,
+                OcrStepsPath: state.OcrStepsPath);
 
             // The caller's token may already be cancelled; the manifest write must not be.
             await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, CancellationToken.None).ConfigureAwait(false);
@@ -227,6 +229,7 @@ public sealed class AnalysisPipeline
         ILlmProvider? llm = null;
         string? audioPath = null;
         string? ocrPath = null;
+        string? ocrStepsPath = null;
         string? visionPath = null;
 
         YtDlpInfo info;
@@ -830,6 +833,16 @@ public sealed class AnalysisPipeline
                         ocrPath = "ocr/combined.md";
                         await artifactStore.WriteTextAsync(run, ocrPath, FormatOcr(ocrResults), cancellationToken).ConfigureAwait(false);
                         state.OcrPath = ocrPath;
+
+                        // Deduplicated on-screen text timeline: for narration-free videos this is
+                        // the transcript ("REST FOR 15 MINUTES" once, with first/last seen), for
+                        // slide decks the text without the same slide repeated per frame.
+                        var steps = OcrStepBuilder.Build(ocrResults);
+                        ocrStepsPath = "ocr/steps.json";
+                        await artifactStore.WriteJsonAsync(run, ocrStepsPath, steps, cancellationToken).ConfigureAwait(false);
+                        await artifactStore.WriteTextAsync(run, "ocr/steps.md", OcrStepBuilder.ToMarkdown(steps), cancellationToken).ConfigureAwait(false);
+                        state.OcrStepsPath = ocrStepsPath;
+                        progress?.Report($"OCR text timeline: {steps.StepCount} distinct line(s) from {steps.LineCount} OCR line(s).");
                     }
                 }
             }
@@ -1000,7 +1013,8 @@ public sealed class AnalysisPipeline
             // the source page during browser capture. Null when not browser-captured or when no
             // strategy produced any field.
             SessionMetadata: sessionMetadata,
-            SourceDetails: state.SourceDetails);
+            SourceDetails: state.SourceDetails,
+            OcrStepsPath: ocrStepsPath);
 
         await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, cancellationToken).ConfigureAwait(false);
         if (cacheKey is not null)

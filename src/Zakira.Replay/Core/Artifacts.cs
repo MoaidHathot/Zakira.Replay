@@ -293,7 +293,8 @@ public sealed record ArtifactManifest(
     SessionMetadata? SessionMetadata = null,
     string Status = RunStatuses.Completed,
     RunFailure? Failure = null,
-    SourceDetails? SourceDetails = null)
+    SourceDetails? SourceDetails = null,
+    string? OcrStepsPath = null)
 {
     /// <summary>True when every stage ran; the artifact set is complete (warnings may still be present).</summary>
     [JsonIgnore]

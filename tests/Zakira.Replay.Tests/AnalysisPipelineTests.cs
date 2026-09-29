@@ -630,6 +630,13 @@ public sealed class AnalysisPipelineTests
         Assert.True(File.Exists(result.Run.GetPath("slides/slides.json")));
         Assert.True(File.Exists(result.Run.GetPath("ocr/frame-001.json")));
         Assert.True(File.Exists(result.Run.GetPath("vision/frame-001.json")));
+
+        // OCR also yields the deduplicated on-screen text timeline, referenced from the manifest.
+        Assert.Equal("ocr/steps.json", result.Manifest.OcrStepsPath);
+        var steps = await store.ReadJsonAsync<OcrStepList>(result.Run, "ocr/steps.json", CancellationToken.None);
+        Assert.NotNull(steps);
+        Assert.Equal(1, steps.FrameCount);
+        Assert.True(File.Exists(result.Run.GetPath("ocr/steps.md")));
     }
 
     [Fact]

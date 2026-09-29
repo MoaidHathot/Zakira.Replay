@@ -648,6 +648,7 @@ internal sealed class McpTestHarness : IAsyncDisposable
                 McpServerTool.Create((Delegate)replayTools.FramesStatus, new() { Name = "frames-status" }),
                 McpServerTool.Create((Delegate)replayTools.FramesResult, new() { Name = "frames-result" }),
                 McpServerTool.Create((Delegate)replayTools.FramesCancel, new() { Name = "frames-cancel" }),
+                McpServerTool.Create((Delegate)replayTools.SheetAsync, new() { Name = "sheet" }),
                 McpServerTool.Create((Delegate)replayTools.IndexBuildAsync, new() { Name = "index-build" }),
                 McpServerTool.Create((Delegate)replayTools.IndexQueryAsync, new() { Name = "index-query" }),
                 McpServerTool.Create((Delegate)replayTools.ChaptersBuildAsync, new() { Name = "chapters-build" }),

@@ -100,6 +100,7 @@ public static class CliApp
             BuildAnalyzeCommand(stdout, stderr, outputFormat),
             BuildTranscribeCommand(stdout, stderr, outputFormat),
             BuildFramesCommand(stdout, stderr, outputFormat),
+            BuildSheetCommand(stdout, stderr, outputFormat),
             BuildClipCommand(stdout, stderr, outputFormat),
             BuildDiscoverCommand(stdout),
             BuildBatchCommand(stdout, outputFormat),
@@ -201,13 +202,15 @@ public static class CliApp
         var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
         var frames = new Option<int>("--frames") { Description = "Number of representative frames to extract. Default 15 (was 500 in 0.13.2 and earlier; lower default keeps cold runs fast and bandwidth-light).", DefaultValueFactory = _ => 15 };
         var runId = new Option<string?>("--run-id") { Description = "Optional run id for the artifact folder." };
+        var sheet = new Option<bool>("--sheet") { Description = "After the run, tile every extracted frame into labelled contact-sheet JPEG(s) under sheets/ plus a contact-sheet.json legend (same as `zakira-replay sheet <run-id>`)." };
 
         var command = new Command("analyze", "Runs the full Zakira.Replay analysis pipeline against a video source.")
         {
             source,
             preset,
             frames,
-            runId
+            runId,
+            sheet
         };
         foreach (var option in analyzeOptions)
         {
@@ -218,7 +221,7 @@ public static class CliApp
         {
             var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, true, parseResult.GetValue(frames), parseResult.GetValue(runId));
             request = ApplyPreset(request, parseResult.GetValue(preset));
-            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken).ConfigureAwait(false);
+            return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken, buildSheet: parseResult.GetValue(sheet)).ConfigureAwait(false);
         });
         return command;
     }
@@ -386,6 +389,83 @@ public static class CliApp
             {
                 if (!CliVerbosityHelpers.ShouldRender(framesVerbosity, warning.Severity)) continue;
                 stdout.WriteLine($"[{warning.Severity}] {warning.Code}: {warning.Message}");
+            }
+            return 0;
+        });
+        return command;
+    }
+
+    private static Command BuildSheetCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
+    {
+        var runId = new Argument<string>("run-id") { Description = "Id of an existing run (analyze or frames)." };
+        var cols = new Option<int?>("--cols") { Description = "Grid columns. Default 6." };
+        var thumbWidth = new Option<int?>("--thumb-width") { Description = "Cell width in pixels. Default 320." };
+        var thumbHeight = new Option<int?>("--thumb-height") { Description = "Cell height in pixels. Default 16:9 of the width." };
+        var maxRows = new Option<int?>("--max-rows") { Description = "Rows per sheet before a new sheet starts. Default 8." };
+        var from = new Option<string?>("--from") { Description = "Only frames at or after this timestamp." };
+        var to = new Option<string?>("--to") { Description = "Only frames at or before this timestamp." };
+        var noLabels = new Option<bool>("--no-labels") { Description = "Skip the burned-in `#index timestamp` labels (the contact-sheet.json legend still maps cells to frames)." };
+        var name = new Option<string?>("--name") { Description = "Output file name stem under sheets/. Default `sheet`." };
+
+        var command = new Command("sheet", "Tiles a run's frames into labelled contact-sheet JPEG(s) plus a cell legend, so all frames can be reviewed in one or two image reads.")
+        {
+            runId, cols, thumbWidth, thumbHeight, maxRows, from, to, noLabels, name
+        };
+        command.SetAction(async (parseResult, cancellationToken) =>
+        {
+            var request = new ContactSheetRequest(
+                RunId: parseResult.GetValue(runId)!,
+                Columns: parseResult.GetValue(cols),
+                ThumbWidth: parseResult.GetValue(thumbWidth),
+                ThumbHeight: parseResult.GetValue(thumbHeight),
+                MaxRows: parseResult.GetValue(maxRows),
+                From: string.IsNullOrWhiteSpace(parseResult.GetValue(from)) ? null : Timestamp.ParseRequired(parseResult.GetValue(from)!, "from"),
+                To: string.IsNullOrWhiteSpace(parseResult.GetValue(to)) ? null : Timestamp.ParseRequired(parseResult.GetValue(to)!, "to"),
+                Labels: parseResult.GetValue(noLabels) ? false : null,
+                OutputName: parseResult.GetValue(name));
+
+            var isJson = IsJson(parseResult, outputFormat);
+            var verbosity = CliVerbosityHelpers.Resolve(parseResult);
+            var progress = !isJson && CliVerbosityHelpers.ShouldStreamProgress(verbosity)
+                ? new SynchronousProgress<string>(stdout.WriteLine)
+                : new SynchronousProgress<string>(_ => { });
+            ContactSheetResult result;
+            try
+            {
+                result = await CreateContactSheetService().BuildAsync(request, progress, cancellationToken).ConfigureAwait(false);
+            }
+            catch (MissingDependencyException ex)
+            {
+                stderr.WriteLine(ex.ToDisplayString());
+                return 2;
+            }
+            catch (ReplayException ex)
+            {
+                stderr.WriteLine($"Error: {ex.Message}");
+                return 1;
+            }
+
+            if (isJson)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(new { runId = result.Run.Id, artifactDirectory = result.Run.Directory, sheet = BuildSheetJson(result) }, CliJson.Options));
+                return 0;
+            }
+
+            if (CliVerbosityHelpers.ShouldRenderSummary(verbosity))
+            {
+                stdout.WriteLine($"Rendered {result.Manifest.Sheets.Count} sheet(s) for {result.Manifest.FrameCount} frame(s) ({result.Manifest.Columns} columns, {result.Manifest.ThumbWidth}x{result.Manifest.ThumbHeight} cells).");
+                foreach (var page in result.Manifest.Sheets)
+                {
+                    stdout.WriteLine($"  {result.Run.GetPath(page.Path)}  ({page.Cells.Count} frames, {Timestamp.Format(page.FirstTimestampSeconds)} - {Timestamp.Format(page.LastTimestampSeconds)})");
+                }
+                stdout.WriteLine($"  Legend: {result.Run.GetPath(ContactSheetService.ManifestFileName)}");
+            }
+            foreach (var warning in result.Manifest.Warnings)
+            {
+                if (CliVerbosityHelpers.ShouldRender(verbosity, warning.Severity))
+                {
+                    stdout.WriteLine($"[{warning.Severity}] {warning.Code}: {warning.Message}");
+                }
             }
             return 0;
         });
@@ -1680,7 +1760,7 @@ public static class CliApp
         return await RunPipelineAsync(request, stdout, stderr, isJson, verbosity: CliVerbosity.Default, cancellationToken).ConfigureAwait(false);
     }
 
-    private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, TextWriter stderr, bool isJson, CliVerbosity verbosity, CancellationToken cancellationToken)
+    private static async Task<int> RunPipelineAsync(AnalyzeRequest request, TextWriter stdout, TextWriter stderr, bool isJson, CliVerbosity verbosity, CancellationToken cancellationToken, bool buildSheet = false)
     {
         var pipeline = CreatePipeline();
 
@@ -1763,6 +1843,23 @@ public static class CliApp
         }
         stopwatch.Stop();
 
+        // --sheet: tile every frame of the run into labelled grid JPEGs so an agent can review
+        // them in one or two image reads. Non-fatal: a sheet failure is reported, the run stands.
+        ContactSheetResult? sheet = null;
+        string? sheetError = null;
+        if (buildSheet && result.Manifest.Frames.Count > 0)
+        {
+            try
+            {
+                sheet = await CreateContactSheetService().BuildAsync(new ContactSheetRequest(result.Run.Id), progress, cancellationToken).ConfigureAwait(false);
+            }
+            catch (ReplayException ex)
+            {
+                sheetError = ex.Message;
+                stderr.WriteLine($"Warning: contact sheet not built: {ex.Message}");
+            }
+        }
+
         if (isJson)
         {
             // Single-line JSON envelope on stdout: everything an orchestrator needs to pick
@@ -1770,7 +1867,7 @@ public static class CliApp
             // for the artifacts that are present so callers can `File.Exists` / open them
             // directly; relative paths are preserved on `manifestPaths` for use cases that
             // archive the run directory and need portable paths.
-            stdout.WriteLine(JsonSerializer.Serialize(BuildAnalyzeJsonEnvelope(result), CliJson.Options));
+            stdout.WriteLine(JsonSerializer.Serialize(BuildAnalyzeJsonEnvelope(result, sheet: sheet is null ? null : BuildSheetJson(sheet), sheetError: sheetError), CliJson.Options));
             return 0;
         }
 
@@ -1780,11 +1877,43 @@ public static class CliApp
             stdout.WriteLine(BuildPipelineSummaryLine(result, stopwatch.Elapsed));
             stdout.WriteLine($"  Artifacts: {result.Run.Directory}");
             stdout.WriteLine($"  Manifest:  {result.Run.GetPath("manifest.json")}");
+            if (sheet is not null)
+            {
+                foreach (var page in sheet.Manifest.Sheets)
+                {
+                    stdout.WriteLine($"  Sheet:     {sheet.Run.GetPath(page.Path)} ({page.Cells.Count} frames, {page.Columns}x{page.Rows})");
+                }
+                stdout.WriteLine($"  Legend:    {sheet.Run.GetPath(ContactSheetService.ManifestFileName)}");
+            }
         }
 
         RenderWarnings(stdout, result.Manifest.Warnings, verbosity);
         return 0;
     }
+
+    internal static object BuildSheetJson(ContactSheetResult sheet) => new
+    {
+        legendPath = sheet.Run.GetPath(ContactSheetService.ManifestFileName),
+        frameCount = sheet.Manifest.FrameCount,
+        columns = sheet.Manifest.Columns,
+        thumbWidth = sheet.Manifest.ThumbWidth,
+        thumbHeight = sheet.Manifest.ThumbHeight,
+        labels = sheet.Manifest.Labels,
+        sheets = sheet.Manifest.Sheets.Select(page => new
+        {
+            index = page.Index,
+            path = sheet.Run.GetPath(page.Path),
+            relativePath = page.Path,
+            columns = page.Columns,
+            rows = page.Rows,
+            width = page.Width,
+            height = page.Height,
+            firstTimestampSeconds = page.FirstTimestampSeconds,
+            lastTimestampSeconds = page.LastTimestampSeconds,
+            cells = page.Cells
+        }),
+        warnings = sheet.Manifest.Warnings
+    };
 
     /// <summary>
     /// One-line summary printed after a successful analyze/transcribe/frames run. Format:
@@ -1855,7 +1984,7 @@ public static class CliApp
     /// with that documentation. `null` fields are preserved (not omitted) so consumers can
     /// rely on a stable property set.
     /// </summary>
-    internal static object BuildAnalyzeJsonEnvelope(AnalyzeResult result, string? error = null)
+    internal static object BuildAnalyzeJsonEnvelope(AnalyzeResult result, string? error = null, object? sheet = null, string? sheetError = null)
     {
         return new
         {
@@ -1876,7 +2005,9 @@ public static class CliApp
             source = result.Manifest.Source,
             warnings = result.Manifest.Warnings,
             failure = result.Manifest.Failure,
-            error
+            error,
+            sheet,
+            sheetError
         };
     }
 
@@ -1897,6 +2028,13 @@ public static class CliApp
         var runner = new ProcessRunner();
         var store = new ArtifactStore(ResolveRunsRoot());
         return new ClipExtractionService(store, new YtDlpClient(dependencies, runner), new FfmpegClient(dependencies, runner));
+    }
+
+    private static ContactSheetService CreateContactSheetService()
+    {
+        var dependencies = new DependencyResolver();
+        var runner = new ProcessRunner();
+        return new ContactSheetService(new ArtifactStore(ResolveRunsRoot()), new FfmpegContactSheetRenderer(dependencies, runner));
     }
 
     private static FrameCaptureService CreateFrameCaptureService()

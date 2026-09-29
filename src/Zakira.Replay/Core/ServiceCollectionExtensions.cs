@@ -77,6 +77,10 @@ public static class ServiceCollectionExtensions
             provider.GetRequiredService<DependencyResolver>(),
             provider.GetRequiredService<ProcessRunner>()));
 
+        services.AddTransient(provider => new ContactSheetService(
+            provider.GetRequiredService<ArtifactStore>(),
+            new FfmpegContactSheetRenderer(provider.GetRequiredService<DependencyResolver>(), provider.GetRequiredService<ProcessRunner>())));
+
         services.AddTransient<SearchIndexService>();
         services.AddTransient<ChapterBuilder>();
         services.AddTransient<EvidenceAlignmentService>();

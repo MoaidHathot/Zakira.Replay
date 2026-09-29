@@ -43,6 +43,7 @@ public sealed class ReplayTools
     private readonly ConfigStore configStore;
     private readonly ArtifactStore artifactStore;
     private readonly McpFrameJobManager frameJobManager;
+    private readonly ContactSheetService contactSheetService;
 
     public ReplayTools(
         Func<AnalysisPipeline> pipelineFactory,
@@ -56,7 +57,8 @@ public sealed class ReplayTools
         DiagnosticsService diagnostics,
         ConfigStore configStore,
         ArtifactStore artifactStore,
-        McpFrameJobManager frameJobManager)
+        McpFrameJobManager frameJobManager,
+        ContactSheetService contactSheetService)
     {
         this.pipelineFactory = pipelineFactory;
         this.jobManager = jobManager;
@@ -70,6 +72,7 @@ public sealed class ReplayTools
         this.configStore = configStore;
         this.artifactStore = artifactStore;
         this.frameJobManager = frameJobManager;
+        this.contactSheetService = contactSheetService;
     }
 
     /// <summary>
@@ -534,6 +537,58 @@ public sealed class ReplayTools
             warnings = result.Manifest.Warnings,
             manifest = result.Manifest
         };
+    }
+
+    [McpServerTool(Name = "sheet")]
+    [Description("Tiles every frame of a run (analyze frames + ad-hoc captures) into labelled contact-sheet JPEG(s) under sheets/ and writes contact-sheet.json, a legend mapping each cell (#index, row, column) to its frame id, path and timestamp. Review 98 frames in two image reads instead of 98. Pure re-arrangement of existing frames; no model calls.")]
+    public async Task<string> SheetAsync(
+        [Description("Id of an existing run.")] string runId,
+        [Description("Grid columns. Default 6.")] int? columns = null,
+        [Description("Cell width in pixels. Default 320.")] int? thumbWidth = null,
+        [Description("Cell height in pixels. Default 16:9 of the width.")] int? thumbHeight = null,
+        [Description("Rows per sheet before a new sheet starts. Default 8.")] int? maxRows = null,
+        [Description("Only frames at or after this timestamp.")] string? from = null,
+        [Description("Only frames at or before this timestamp.")] string? to = null,
+        [Description("Burn `#index timestamp` labels into each cell. Default true; falls back to unlabelled when ffmpeg lacks drawtext or a font.")] bool? labels = null,
+        [Description("Output file name stem under sheets/. Default `sheet`.")] string? outputName = null,
+        CancellationToken cancellationToken = default)
+    {
+        var request = new ContactSheetRequest(
+            RunId: runId,
+            Columns: columns,
+            ThumbWidth: thumbWidth,
+            ThumbHeight: thumbHeight,
+            MaxRows: maxRows,
+            From: string.IsNullOrWhiteSpace(from) ? null : Timestamp.ParseRequired(from, "from"),
+            To: string.IsNullOrWhiteSpace(to) ? null : Timestamp.ParseRequired(to, "to"),
+            Labels: labels,
+            OutputName: outputName);
+        var result = await contactSheetService.BuildAsync(request, progress: null, cancellationToken).ConfigureAwait(false);
+        return Serialize(new
+        {
+            runId = result.Run.Id,
+            artifactDirectory = result.Run.Directory,
+            legendPath = result.Run.GetPath(ContactSheetService.ManifestFileName),
+            frameCount = result.Manifest.FrameCount,
+            columns = result.Manifest.Columns,
+            thumbWidth = result.Manifest.ThumbWidth,
+            thumbHeight = result.Manifest.ThumbHeight,
+            labels = result.Manifest.Labels,
+            sheets = result.Manifest.Sheets.Select(page => new
+            {
+                index = page.Index,
+                path = result.Run.GetPath(page.Path),
+                relativePath = page.Path,
+                columns = page.Columns,
+                rows = page.Rows,
+                width = page.Width,
+                height = page.Height,
+                firstTimestampSeconds = page.FirstTimestampSeconds,
+                lastTimestampSeconds = page.LastTimestampSeconds,
+                cells = page.Cells
+            }),
+            warnings = result.Manifest.Warnings
+        });
     }
 
     // ---------------------------------------------------------------------------------------

@@ -62,6 +62,9 @@ public static class ReplayWarningCodes
     /// <summary>Info: the short-source auto-download failed; processing continued against the remote URL.</summary>
     public const string MediaAutoDownloadFailed = "MEDIA_AUTO_DOWNLOAD_FAILED";
 
+    /// <summary>Warning: the contact sheet was rendered without burned-in labels (ffmpeg build without drawtext, or no usable font); the legend JSON still maps cells to frames.</summary>
+    public const string ContactSheetLabelsUnavailable = "CONTACT_SHEET_LABELS_UNAVAILABLE";
+
     public const string FramesSceneCapReached = "FRAMES_SCENE_CAP_REACHED";
 
     public const string FramesLikelyUndersampled = "FRAMES_LIKELY_UNDERSAMPLED";

@@ -347,10 +347,30 @@ zakira-replay config set capture.mode auto
 zakira-replay config set capture.browser.seekWaitSeconds 3
 zakira-replay config set auth.directory C:\secrets\zakira-auth
 zakira-replay config set auth.staleThresholdMinutes 120
+zakira-replay config set timeouts.ytDlpMediaUrlSeconds 600
 zakira-replay config get yt-dlp.path
 ```
 
 If the value passed to `config set` is a directory, Zakira.Replay appends the expected executable name.
+
+### Subprocess timeouts
+
+Every yt-dlp / ffmpeg / ffprobe invocation runs under a wall-clock budget. The defaults match the previously hardcoded limits; raise them on slow networks or for very large sources, lower them to fail fast in automation:
+
+| Key | Default | Guards |
+|---|---|---|
+| `timeouts.ytDlpMetadataSeconds` | 300 | `yt-dlp --dump-single-json` metadata probe |
+| `timeouts.ytDlpSubtitlesSeconds` | 600 | caption download |
+| `timeouts.ytDlpMediaUrlSeconds` | 300 | direct media URL resolution (`-g`) |
+| `timeouts.ytDlpDownloadSeconds` | 1800 | full media download (`--allow-media-download`) |
+| `timeouts.ffmpegFrameSeconds` | 180 | each single-frame capture |
+| `timeouts.ffmpegPassSeconds` | 900 | whole-stream passes: scene detection, every-frame, silence detection |
+| `timeouts.ffmpegAudioSeconds` | 600 | audio extraction |
+| `timeouts.ffmpegClipSeconds` | 600 | clip extraction (re-encode fallback gets 2×) |
+| `timeouts.ffprobeSeconds` | 120 | duration probe |
+| `timeouts.dependencyCheckSeconds` | 60 | `doctor`'s `--version` runnability probe |
+
+When a budget is exceeded the process is killed and the error carries the last 20 lines it printed (stderr, falling back to stdout) plus a remediation hint when the output matches a known signature — YouTube bot check → use cookies, HTTP 429 → rate limited, `nsig extraction failed` → install a JavaScript runtime (deno/node), `Unable to extract` → update yt-dlp. The same hint is appended to non-zero-exit failures in CLI output and MCP job errors, so "Process timed out after 00:05:00" is never the whole story.
 
 ## Caption Languages
 

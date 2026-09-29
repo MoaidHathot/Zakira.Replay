@@ -32,6 +32,10 @@ catch (ReplayException ex)
     if (ex is ProcessFailedException processFailed && !string.IsNullOrWhiteSpace(processFailed.StandardError))
     {
         Console.Error.WriteLine(processFailed.StandardError.Trim());
+        if (SubprocessDiagnostics.SuggestHint(processFailed.StandardError) is { } hint)
+        {
+            Console.Error.WriteLine($"Hint: {hint}");
+        }
     }
 
     return 1;

@@ -81,7 +81,12 @@ public class ProcessRunner
             TryKill(process);
             if (timeoutCts?.IsCancellationRequested == true)
             {
-                throw new ReplayException($"Process timed out after {timeout!.Value}: {fileName}");
+                // Let the async stdout/stderr readers drain what the process printed before it
+                // was killed - that output is the only evidence of *why* it stalled (bot check,
+                // HTTP 429, missing JS runtime, ...). WaitForExit() without a timeout is the
+                // documented way to guarantee the redirected-stream handlers have completed.
+                TryDrain(process);
+                throw new ProcessTimeoutException(fileName, argumentList, timeout!.Value, stdout.ToString(), stderr.ToString());
             }
 
             throw;
@@ -102,6 +107,23 @@ public class ProcessRunner
         catch
         {
             // Best-effort cleanup after cancellation.
+        }
+    }
+
+    private static void TryDrain(Process process)
+    {
+        try
+        {
+            // The process was just killed, so this returns promptly; the bounded wait is a guard
+            // against a child that ignores termination while holding the pipes open.
+            if (process.WaitForExit(2000))
+            {
+                process.WaitForExit();
+            }
+        }
+        catch
+        {
+            // Draining is best-effort; the exception below still carries whatever was captured.
         }
     }
 }

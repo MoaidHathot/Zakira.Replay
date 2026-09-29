@@ -89,7 +89,7 @@ public sealed class DiagnosticsService
             string? runnable = null;
             if (status.IsFound)
             {
-                runnable = await TryCheckRunnableAsync(status, processRunner, cancellationToken).ConfigureAwait(false);
+                runnable = await TryCheckRunnableAsync(status, processRunner, TimeoutsConfig.Resolve(config.Timeouts.DependencyCheckSeconds, 60), cancellationToken).ConfigureAwait(false);
             }
 
             reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, string.IsNullOrWhiteSpace(runnable), status.Path, status.Source, status.Message, runnable));
@@ -394,7 +394,7 @@ public sealed class DiagnosticsService
         }
     }
 
-    private static async Task<string?> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, CancellationToken cancellationToken)
+    private static async Task<string?> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, TimeSpan timeout, CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(status.Path) || status.Name is not ("yt-dlp" or "ffmpeg" or "ffprobe"))
         {
@@ -404,8 +404,12 @@ public sealed class DiagnosticsService
         var args = status.Name == "yt-dlp" ? new[] { "--version" } : new[] { "-version" };
         try
         {
-            var result = await runner.RunAsync(status.Path, args, timeout: TimeSpan.FromSeconds(15), cancellationToken: cancellationToken).ConfigureAwait(false);
+            var result = await runner.RunAsync(status.Path, args, timeout: timeout, cancellationToken: cancellationToken).ConfigureAwait(false);
             return result.ExitCode == 0 ? null : FirstLine(result.StandardError + result.StandardOutput);
+        }
+        catch (ProcessTimeoutException)
+        {
+            return $"did not answer `{args[0]}` within {timeout.TotalSeconds:0}s (raise timeouts.dependencyCheckSeconds if this machine starts it slowly; antivirus scanning of a self-extracting yt-dlp.exe is a common cause)";
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {

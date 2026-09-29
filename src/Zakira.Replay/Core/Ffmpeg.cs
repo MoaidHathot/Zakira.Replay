@@ -309,7 +309,7 @@ public sealed class FfmpegClient : IFfmpegClient
         var result = await processRunner.RunAsync(
             ffmpeg,
             [.. args],
-            timeout: TimeSpan.FromMinutes(15),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegPassSeconds, 900),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // showinfo's pts_time is in the OUTPUT stream timeline. With output-side -ss the
@@ -395,7 +395,7 @@ public sealed class FfmpegClient : IFfmpegClient
         var result = await processRunner.RunAsync(
             ffmpeg,
             [.. args],
-            timeout: TimeSpan.FromMinutes(3),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegFrameSeconds, 180),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode == 0 && File.Exists(outputPath))
@@ -454,7 +454,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-y",
                 outputPattern
             ],
-            timeout: TimeSpan.FromMinutes(10),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegPassSeconds, 900),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
@@ -507,7 +507,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-y",
                 outputPattern
             ],
-            timeout: TimeSpan.FromMinutes(15),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegPassSeconds, 900),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         var timestamps = FfmpegOutputPatterns.ShowInfoTimeRegex().Matches(result.StandardError)
@@ -564,7 +564,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-y",
                 outputPath
             ],
-            timeout: TimeSpan.FromMinutes(10),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegAudioSeconds, 600),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         result.EnsureSuccess();
@@ -601,7 +601,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-y",
                 outputPath
             ],
-            timeout: TimeSpan.FromMinutes(10),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegClipSeconds, 600),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0 || !File.Exists(outputPath))
@@ -621,7 +621,7 @@ public sealed class FfmpegClient : IFfmpegClient
                     "-y",
                     outputPath
                 ],
-                timeout: TimeSpan.FromMinutes(20),
+                timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegClipSeconds * 2, 1200),
                 cancellationToken: cancellationToken).ConfigureAwait(false);
             result.EnsureSuccess();
         }
@@ -640,7 +640,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-of", "default=noprint_wrappers=1:nokey=1",
                 mediaSource
             ],
-            timeout: TimeSpan.FromMinutes(2),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfprobeSeconds, 120),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
@@ -670,7 +670,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-f", "null",
                 "-"
             ],
-            timeout: TimeSpan.FromMinutes(15),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegPassSeconds, 900),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
@@ -711,7 +711,7 @@ public sealed class FfmpegClient : IFfmpegClient
                 "-y",
                 outputPath
             ],
-            timeout: TimeSpan.FromMinutes(10),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegAudioSeconds, 600),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         result.EnsureSuccess();

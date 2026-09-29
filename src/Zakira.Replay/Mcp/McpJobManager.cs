@@ -211,14 +211,30 @@ public sealed class McpJob
         McpJobState state;
         lock (gate)
         {
-            Error = ex is ProcessFailedException processFailed && !string.IsNullOrWhiteSpace(processFailed.StandardError)
-                ? ex.Message + Environment.NewLine + processFailed.StandardError.Trim()
-                : ex.Message;
+            Error = DescribeFailure(ex);
             Status = McpJobStatus.Failed;
             CompletedAt = DateTimeOffset.UtcNow;
             state = StateUnsafe();
             onChanged?.Invoke(state);
         }
+    }
+
+    /// <summary>
+    /// Job error text. Subprocess failures append the captured stderr and a remediation hint when
+    /// the output matches a known signature; timeouts already embed their output tail in
+    /// <see cref="Exception.Message"/>.
+    /// </summary>
+    internal static string DescribeFailure(Exception ex)
+    {
+        if (ex is ProcessFailedException processFailed && !string.IsNullOrWhiteSpace(processFailed.StandardError))
+        {
+            var text = ex.Message + Environment.NewLine + processFailed.StandardError.Trim();
+            return SubprocessDiagnostics.SuggestHint(processFailed.StandardError) is { } hint
+                ? text + Environment.NewLine + "Hint: " + hint
+                : text;
+        }
+
+        return ex.Message;
     }
 
     public void MarkFailed(string message)

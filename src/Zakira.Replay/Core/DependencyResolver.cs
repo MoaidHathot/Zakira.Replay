@@ -14,6 +14,9 @@ public sealed class DependencyResolver
         installer = new PortableDependencyInstaller(this.config);
     }
 
+    /// <summary>Subprocess wall-clock budgets from the resolved config (<c>timeouts.*</c>).</summary>
+    public TimeoutsConfig Timeouts => config.Timeouts ?? new TimeoutsConfig();
+
     public DependencyStatus GetYtDlpStatus() => GetExecutableStatus("yt-dlp", "ZAKIRA_REPLAY_YTDLP_PATH", config.Dependencies.YtDlpPath);
 
     public DependencyStatus GetFfmpegStatus() => GetExecutableStatus("ffmpeg", "ZAKIRA_REPLAY_FFMPEG_PATH", config.Dependencies.FfmpegPath);

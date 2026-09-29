@@ -36,7 +36,7 @@ public sealed class YtDlpClient : IYtDlpClient
         var result = await processRunner.RunAsync(
             ytDlp,
             args,
-            timeout: TimeSpan.FromMinutes(5),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpMetadataSeconds, 300),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
@@ -74,7 +74,7 @@ public sealed class YtDlpClient : IYtDlpClient
         await processRunner.RunAsync(
             ytDlp,
             args,
-            timeout: TimeSpan.FromMinutes(10),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpSubtitlesSeconds, 600),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         // yt-dlp can exit non-zero when one of the requested languages is unavailable while still
@@ -179,7 +179,7 @@ public sealed class YtDlpClient : IYtDlpClient
         var result = await processRunner.RunAsync(
             ytDlp,
             args,
-            timeout: TimeSpan.FromMinutes(5),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpMediaUrlSeconds, 300),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)
@@ -210,7 +210,7 @@ public sealed class YtDlpClient : IYtDlpClient
         var result = await processRunner.RunAsync(
             ytDlp,
             args,
-            timeout: TimeSpan.FromMinutes(30),
+            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpDownloadSeconds, 1800),
             cancellationToken: cancellationToken).ConfigureAwait(false);
 
         if (result.ExitCode != 0)

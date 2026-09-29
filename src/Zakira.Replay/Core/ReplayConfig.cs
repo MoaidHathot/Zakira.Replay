@@ -36,6 +36,58 @@ public sealed class ReplayConfig
     /// <c>&lt;cwd&gt;/runs</c>.
     /// </summary>
     public RunsConfig Runs { get; set; } = new();
+
+    /// <summary>
+    /// Wall-clock budgets for the subprocesses the pipeline shells out to. Every value is in
+    /// seconds; the defaults reproduce the previously hardcoded limits.
+    /// </summary>
+    public TimeoutsConfig Timeouts { get; set; } = new();
+}
+
+/// <summary>
+/// Per-stage subprocess timeouts. Raise these when a slow network or a large source makes a
+/// stage legitimately exceed the default (e.g. yt-dlp metadata resolution on a throttled
+/// connection); lower them to fail fast in automation. A timed-out stage surfaces as a
+/// <see cref="ProcessTimeoutException"/> carrying the process' last output lines.
+/// </summary>
+public sealed class TimeoutsConfig
+{
+    /// <summary>yt-dlp <c>--dump-single-json</c> metadata probe. Default 300 s.</summary>
+    public int YtDlpMetadataSeconds { get; set; } = 300;
+
+    /// <summary>yt-dlp subtitle/caption download. Default 600 s.</summary>
+    public int YtDlpSubtitlesSeconds { get; set; } = 600;
+
+    /// <summary>yt-dlp direct media URL resolution (<c>-g</c>). Default 300 s.</summary>
+    public int YtDlpMediaUrlSeconds { get; set; } = 300;
+
+    /// <summary>yt-dlp full media download (<c>--allow-media-download</c> fallback). Default 1800 s.</summary>
+    public int YtDlpDownloadSeconds { get; set; } = 1800;
+
+    /// <summary>ffmpeg single-frame capture at one timestamp (per frame). Default 180 s.</summary>
+    public int FfmpegFrameSeconds { get; set; } = 180;
+
+    /// <summary>ffmpeg whole-stream passes: scene detection, every-frame sampling, silence detection. Default 900 s.</summary>
+    public int FfmpegPassSeconds { get; set; } = 900;
+
+    /// <summary>ffmpeg audio extraction (full track or a range). Default 600 s.</summary>
+    public int FfmpegAudioSeconds { get; set; } = 600;
+
+    /// <summary>ffmpeg clip extraction from a local source; remote sources get twice this budget. Default 600 s.</summary>
+    public int FfmpegClipSeconds { get; set; } = 600;
+
+    /// <summary>ffprobe duration probe. Default 120 s.</summary>
+    public int FfprobeSeconds { get; set; } = 120;
+
+    /// <summary>
+    /// <c>doctor</c>'s <c>--version</c> runnability probe for yt-dlp/ffmpeg/ffprobe. Default 60 s:
+    /// a cold PyInstaller start of yt-dlp.exe on Windows (self-extraction + antivirus scan)
+    /// regularly exceeds the previous 15 s budget and produced false "not runnable" reports.
+    /// </summary>
+    public int DependencyCheckSeconds { get; set; } = 60;
+
+    internal static TimeSpan Resolve(int seconds, int fallbackSeconds)
+        => TimeSpan.FromSeconds(seconds > 0 ? seconds : fallbackSeconds);
 }
 
 /// <summary>
@@ -1456,6 +1508,46 @@ public sealed class ConfigStore
             case "auth.stale-threshold-minutes":
                 config.Auth.StaleThresholdMinutes = ParsePositiveInt(value, key);
                 break;
+            case "timeouts.ytdlpmetadataseconds":
+            case "timeouts.yt-dlp-metadata-seconds":
+                config.Timeouts.YtDlpMetadataSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ytdlpsubtitlesseconds":
+            case "timeouts.yt-dlp-subtitles-seconds":
+                config.Timeouts.YtDlpSubtitlesSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ytdlpmediaurlseconds":
+            case "timeouts.yt-dlp-media-url-seconds":
+                config.Timeouts.YtDlpMediaUrlSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ytdlpdownloadseconds":
+            case "timeouts.yt-dlp-download-seconds":
+                config.Timeouts.YtDlpDownloadSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ffmpegframeseconds":
+            case "timeouts.ffmpeg-frame-seconds":
+                config.Timeouts.FfmpegFrameSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ffmpegpassseconds":
+            case "timeouts.ffmpeg-pass-seconds":
+                config.Timeouts.FfmpegPassSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ffmpegaudioseconds":
+            case "timeouts.ffmpeg-audio-seconds":
+                config.Timeouts.FfmpegAudioSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ffmpegclipseconds":
+            case "timeouts.ffmpeg-clip-seconds":
+                config.Timeouts.FfmpegClipSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.ffprobeseconds":
+            case "timeouts.ffprobe-seconds":
+                config.Timeouts.FfprobeSeconds = ParsePositiveInt(value, key);
+                break;
+            case "timeouts.dependencycheckseconds":
+            case "timeouts.dependency-check-seconds":
+                config.Timeouts.DependencyCheckSeconds = ParsePositiveInt(value, key);
+                break;
             case "diarization.provider":
                 config.Diarization.Provider = DiarizationProviderFactory.Normalize(value);
                 break;
@@ -1598,6 +1690,16 @@ public sealed class ConfigStore
             "capture.browser.debugmaxbodybytes" or "capture.browser.debug-max-body-bytes" => config.Capture.Browser.DebugMaxBodyBytes.ToString(CultureInfo.InvariantCulture),
             "auth.directory" => config.Auth.Directory,
             "auth.stalethresholdminutes" or "auth.stale-threshold-minutes" => config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ytdlpmetadataseconds" or "timeouts.yt-dlp-metadata-seconds" => config.Timeouts.YtDlpMetadataSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ytdlpsubtitlesseconds" or "timeouts.yt-dlp-subtitles-seconds" => config.Timeouts.YtDlpSubtitlesSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ytdlpmediaurlseconds" or "timeouts.yt-dlp-media-url-seconds" => config.Timeouts.YtDlpMediaUrlSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ytdlpdownloadseconds" or "timeouts.yt-dlp-download-seconds" => config.Timeouts.YtDlpDownloadSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ffmpegframeseconds" or "timeouts.ffmpeg-frame-seconds" => config.Timeouts.FfmpegFrameSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ffmpegpassseconds" or "timeouts.ffmpeg-pass-seconds" => config.Timeouts.FfmpegPassSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ffmpegaudioseconds" or "timeouts.ffmpeg-audio-seconds" => config.Timeouts.FfmpegAudioSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ffmpegclipseconds" or "timeouts.ffmpeg-clip-seconds" => config.Timeouts.FfmpegClipSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.ffprobeseconds" or "timeouts.ffprobe-seconds" => config.Timeouts.FfprobeSeconds.ToString(CultureInfo.InvariantCulture),
+            "timeouts.dependencycheckseconds" or "timeouts.dependency-check-seconds" => config.Timeouts.DependencyCheckSeconds.ToString(CultureInfo.InvariantCulture),
             "diarization.provider" => config.Diarization.Provider,
             "diarization.modeldirectory" or "diarization.model-directory" => config.Diarization.ModelDirectory,
             "diarization.segmentationmodelpath" or "diarization.segmentation-model-path" => config.Diarization.SegmentationModelPath,
@@ -1709,6 +1811,16 @@ public sealed class ConfigStore
             ["capture.browser.debugMaxBodyBytes"] = config.Capture.Browser.DebugMaxBodyBytes.ToString(CultureInfo.InvariantCulture),
             ["auth.directory"] = config.Auth.Directory,
             ["auth.staleThresholdMinutes"] = config.Auth.StaleThresholdMinutes.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ytDlpMetadataSeconds"] = config.Timeouts.YtDlpMetadataSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ytDlpSubtitlesSeconds"] = config.Timeouts.YtDlpSubtitlesSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ytDlpMediaUrlSeconds"] = config.Timeouts.YtDlpMediaUrlSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ytDlpDownloadSeconds"] = config.Timeouts.YtDlpDownloadSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ffmpegFrameSeconds"] = config.Timeouts.FfmpegFrameSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ffmpegPassSeconds"] = config.Timeouts.FfmpegPassSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ffmpegAudioSeconds"] = config.Timeouts.FfmpegAudioSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ffmpegClipSeconds"] = config.Timeouts.FfmpegClipSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.ffprobeSeconds"] = config.Timeouts.FfprobeSeconds.ToString(CultureInfo.InvariantCulture),
+            ["timeouts.dependencyCheckSeconds"] = config.Timeouts.DependencyCheckSeconds.ToString(CultureInfo.InvariantCulture),
             ["diarization.provider"] = config.Diarization.Provider,
             ["diarization.modelDirectory"] = config.Diarization.ModelDirectory,
             ["diarization.segmentationModelPath"] = config.Diarization.SegmentationModelPath,

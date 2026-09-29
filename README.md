@@ -612,6 +612,10 @@ Three-layer opt-in resolution (highest priority wins):
 
 When declined, the matching site emits `MEDIA_DOWNLOAD_DECLINED` (error) with the flag name in the message and returns null / empty / throws `ReplayException` (clip). This keeps the agent contract honest: bytes that aren't on the wire are bytes the agent doesn't have to apologise for.
 
+### Short sources are fetched once (`capture.autoDownloadMaxDurationSeconds`)
+
+The last-resort rules above are about sources of *any* length. Short sources are a different trade-off: every frame capture is its own ffmpeg process that re-opens the signed remote URL (one HTTP handshake + range request per still, each a fresh chance for a 403/429/throttle), while a sub-15-minute 720p file is tens of megabytes at most. So when a URL source's duration is at most `capture.autoDownloadMaxDurationSeconds` (default **900**, i.e. 15 minutes) and frames or audio are requested, `analyze` downloads it once (reusing `yt-dlp.info.json`, so no extra extractor pass) and extracts everything from the local file; `frames` does the same for windows and timestamp lists of at least `capture.autoDownloadMinFrames` (default 4) frames, but still seeks the URL for one or two spot frames. The manifest records `MEDIA_AUTO_DOWNLOADED` (info) with the file size; a failed download degrades to the remote URL with `MEDIA_AUTO_DOWNLOAD_FAILED` (info). Set `capture.autoDownloadMaxDurationSeconds` to `0` to disable. `capture.allowMediaDownload` and the two auto-download keys are all settable through `config set`.
+
 ### Microsoft Medius / Build / Ignite — transcripts + frames without playback
 
 Sources whose JS player is Shaka-on-MSE (Microsoft Medius, anything embedded via

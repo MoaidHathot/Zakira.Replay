@@ -360,6 +360,45 @@ public sealed class AnalysisPipeline
             progress?.Report("Using local media path for ffmpeg...");
         }
 
+        // Short sources: fetch the file once and process it locally. Every frame is a separate
+        // ffmpeg process that re-opens the remote URL (one HTTP handshake + range request per
+        // still, each a fresh chance for a 403/429/throttle), while a sub-15-minute 720p file is
+        // tens of megabytes at most. The download reuses the saved yt-dlp dump, so it costs no
+        // extra extractor pass. Failure is non-fatal: processing continues against the URL.
+        if (!isLocalFile && mediaSource is not null && downloadedMediaSource is null)
+        {
+            var captureConfig = new ConfigStore().Load();
+            var plannedFrames = request.FrameStrategy.Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase)
+                ? int.MaxValue
+                : ResolveEffectiveFrameCount(request, info.DurationSeconds, captureConfig.Frames.PerMinute);
+            var wantsWholeStream = request.ExtractAudio || (request.UseSpeechToText && transcript is null);
+            if (AutoDownloadPolicy.ShouldDownload(captureConfig.Capture, info.DurationSeconds, wantsWholeStream ? int.MaxValue : plannedFrames))
+            {
+                state.Stage = RunStages.MediaDownload;
+                progress?.Report($"Source is {Timestamp.Format(info.DurationSeconds ?? 0)} long (<= capture.autoDownloadMaxDurationSeconds); downloading it once for local processing...");
+                var local = await ytDlp.DownloadMediaForProcessingAsync(request, run, infoJsonPath, cancellationToken).ConfigureAwait(false);
+                if (local is not null)
+                {
+                    var size = new FileInfo(local).Length;
+                    downloadedMediaSource = local;
+                    mediaSource = local;
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.MediaAutoDownloaded,
+                        $"Downloaded the source once ({size / (1024.0 * 1024.0):0.#} MB, {Path.GetFileName(local)}) because it is at most {captureConfig.Capture.AutoDownloadMaxDurationSeconds}s long; frames/audio are extracted from the local file instead of per-frame remote seeks. Set capture.autoDownloadMaxDurationSeconds=0 to disable.",
+                        Source: "yt-dlp",
+                        Severity: ReplayWarningSeverities.Info));
+                }
+                else
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.MediaAutoDownloadFailed,
+                        "Short-source auto-download did not produce a file; continuing with the direct media URL.",
+                        Source: "yt-dlp",
+                        Severity: ReplayWarningSeverities.Info));
+                }
+            }
+        }
+
         if (mediaSource is not null && isLocalFile && info.DurationSeconds is null && (request.FrameCount > 0 || request.ExtractAudio || request.UseSpeechToText))
         {
             progress?.Report("Probing local media duration with ffprobe...");

@@ -218,7 +218,36 @@ public sealed class CaptureConfig
     /// </remarks>
     public bool AllowMediaDownload { get; set; }
 
+    /// <summary>
+    /// Sources no longer than this (seconds) are downloaded once up front and processed from the
+    /// local file instead of seeking a signed remote URL. Every frame capture is a separate
+    /// ffmpeg process that re-opens the remote URL, so fifteen frames from a two-minute short
+    /// meant fifteen remote opens (and fifteen chances for a 403/429), while the whole file is a
+    /// few megabytes. Applies to <c>analyze</c> (when frames or audio are requested) and to
+    /// <c>frames</c> windows/timestamp lists of <see cref="AutoDownloadMinFrames"/> or more.
+    /// Independent of <see cref="AllowMediaDownload"/>, which governs the last-resort download for
+    /// sources of any length. Default 900 (15 minutes); set 0 to disable.
+    /// </summary>
+    public int AutoDownloadMaxDurationSeconds { get; set; } = 900;
+
+    /// <summary>Minimum number of requested frames before <c>frames</c> prefers a local download over per-frame remote seeks. Default 4.</summary>
+    public int AutoDownloadMinFrames { get; set; } = 4;
+
     public BrowserCaptureConfig Browser { get; set; } = new();
+}
+
+/// <summary>Decides whether a short remote source should be fetched once and processed locally.</summary>
+public static class AutoDownloadPolicy
+{
+    public static bool ShouldDownload(CaptureConfig capture, double? durationSeconds, int requestedFrames)
+    {
+        if (capture.AutoDownloadMaxDurationSeconds <= 0 || durationSeconds is not { } duration || duration <= 0)
+        {
+            return false;
+        }
+
+        return duration <= capture.AutoDownloadMaxDurationSeconds && requestedFrames >= Math.Max(1, capture.AutoDownloadMinFrames);
+    }
 }
 
 public sealed class BrowserCaptureConfig
@@ -1458,6 +1487,18 @@ public sealed class ConfigStore
             case "capture.mode":
                 config.Capture.Mode = CaptureModes.Normalize(value);
                 break;
+            case "capture.allowmediadownload":
+            case "capture.allow-media-download":
+                config.Capture.AllowMediaDownload = ParseBool(value, key);
+                break;
+            case "capture.autodownloadmaxdurationseconds":
+            case "capture.auto-download-max-duration-seconds":
+                config.Capture.AutoDownloadMaxDurationSeconds = ParseNonNegativeInt(value, key);
+                break;
+            case "capture.autodownloadminframes":
+            case "capture.auto-download-min-frames":
+                config.Capture.AutoDownloadMinFrames = ParsePositiveInt(value, key);
+                break;
             case "capture.browser.playbuttonselector":
             case "capture.browser.play-button-selector":
                 config.Capture.Browser.PlayButtonSelector = NormalizeNonEmpty(value, key);
@@ -1677,6 +1718,9 @@ public sealed class ConfigStore
             "crop.enabled" or "smartcrop.enabled" or "smart-crop.enabled" => config.Crop.Enabled.ToString(),
             "crop.profile" or "smartcrop.profile" or "smart-crop.profile" => config.Crop.Profile,
             "capture.mode" => config.Capture.Mode,
+            "capture.allowmediadownload" or "capture.allow-media-download" => config.Capture.AllowMediaDownload.ToString(),
+            "capture.autodownloadmaxdurationseconds" or "capture.auto-download-max-duration-seconds" => config.Capture.AutoDownloadMaxDurationSeconds.ToString(CultureInfo.InvariantCulture),
+            "capture.autodownloadminframes" or "capture.auto-download-min-frames" => config.Capture.AutoDownloadMinFrames.ToString(CultureInfo.InvariantCulture),
             "capture.browser.playbuttonselector" or "capture.browser.play-button-selector" => config.Capture.Browser.PlayButtonSelector,
             "capture.browser.videoelementselector" or "capture.browser.video-element-selector" => config.Capture.Browser.VideoElementSelector,
             "capture.browser.seekwaitseconds" or "capture.browser.seek-wait-seconds" => config.Capture.Browser.SeekWaitSeconds.ToString(CultureInfo.InvariantCulture),
@@ -1798,6 +1842,9 @@ public sealed class ConfigStore
             ["crop.enabled"] = config.Crop.Enabled.ToString(),
             ["crop.profile"] = config.Crop.Profile,
             ["capture.mode"] = config.Capture.Mode,
+            ["capture.allowMediaDownload"] = config.Capture.AllowMediaDownload.ToString(),
+            ["capture.autoDownloadMaxDurationSeconds"] = config.Capture.AutoDownloadMaxDurationSeconds.ToString(CultureInfo.InvariantCulture),
+            ["capture.autoDownloadMinFrames"] = config.Capture.AutoDownloadMinFrames.ToString(CultureInfo.InvariantCulture),
             ["capture.browser.playButtonSelector"] = config.Capture.Browser.PlayButtonSelector,
             ["capture.browser.videoElementSelector"] = config.Capture.Browser.VideoElementSelector,
             ["capture.browser.seekWaitSeconds"] = config.Capture.Browser.SeekWaitSeconds.ToString(CultureInfo.InvariantCulture),
@@ -1956,6 +2003,16 @@ public sealed class ConfigStore
     private static string? FormatEnvironmentVariableNames(IReadOnlyList<string> names)
     {
         return names.Count == 0 ? null : string.Join(',', names);
+    }
+
+    private static int ParseNonNegativeInt(string value, string key)
+    {
+        if (int.TryParse(value, out var parsed) && parsed >= 0)
+        {
+            return parsed;
+        }
+
+        throw new ReplayException($"Config key {key} requires a non-negative integer value.");
     }
 
     private static int ParsePositiveInt(string value, string key)

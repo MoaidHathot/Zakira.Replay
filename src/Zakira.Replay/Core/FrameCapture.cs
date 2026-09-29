@@ -85,6 +85,38 @@ public sealed class FrameCaptureService : IFrameCaptureService
             ? await ffmpeg.TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false)
             : await TryReadRecordedDurationAsync(run, cancellationToken).ConfigureAwait(false)
                 ?? await ffmpeg.TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false);
+
+        // Short remote source + several frames: one download beats one remote open per frame
+        // (see CaptureConfig.AutoDownloadMaxDurationSeconds). Reuses the run's yt-dlp dump.
+        if (!isLocalFile && !SourceLocator.TryGetLocalFilePath(mediaSource, out _))
+        {
+            var captureConfig = new ConfigStore().Load().Capture;
+            var plannedFrames = request.Timestamps?.Count
+                ?? (NormalizeRangeStrategy(request.RangeStrategy).Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase) ? int.MaxValue : Math.Max(1, request.RangeCount ?? 1));
+            if (AutoDownloadPolicy.ShouldDownload(captureConfig, duration, plannedFrames))
+            {
+                progress?.Report($"Source is {Timestamp.Format(duration ?? 0)} long and {plannedFrames} frame(s) were requested; downloading it once for local seeks...");
+                var local = await ytDlp.DownloadMediaForProcessingAsync(BuildAnalyzeRequest(request), run, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
+                if (local is not null)
+                {
+                    mediaSource = local;
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.MediaAutoDownloaded,
+                        $"Downloaded the source once ({new FileInfo(local).Length / (1024.0 * 1024.0):0.#} MB) for local frame seeks; set capture.autoDownloadMaxDurationSeconds=0 to disable.",
+                        Source: "yt-dlp",
+                        Severity: ReplayWarningSeverities.Info));
+                }
+                else
+                {
+                    warnings.Add(new ReplayWarning(
+                        ReplayWarningCodes.MediaAutoDownloadFailed,
+                        "Short-source auto-download did not produce a file; seeking the remote URL per frame instead.",
+                        Source: "yt-dlp",
+                        Severity: ReplayWarningSeverities.Info));
+                }
+            }
+        }
+
         var ffmpegOptions = new FrameCaptureOptions(request.MaxLongEdgePixels, request.JpegQuality);
 
         IReadOnlyList<FrameArtifact> frames;
@@ -256,6 +288,17 @@ public sealed class FrameCaptureService : IFrameCaptureService
         }
     }
 
+    /// <summary>The pipeline's AnalyzeRequest is the data-transfer shape yt-dlp expects; synthesise a minimal one.</summary>
+    private static AnalyzeRequest BuildAnalyzeRequest(FrameCaptureRequest request) => new(
+        Source: request.Source,
+        VisionInstruction: string.Empty,
+        IncludeTranscript: false,
+        FrameCount: 0,
+        RunId: request.RunId,
+        OcrInstruction: string.Empty,
+        CookiesPath: request.CookiesPath,
+        CookiesFromBrowser: request.CookiesFromBrowser);
+
     /// <summary>Media a previous step downloaded into <c>media/source.*</c> (ignores in-progress parts).</summary>
     internal static string? FindDownloadedMedia(VideoRun run)
     {
@@ -286,17 +329,8 @@ public sealed class FrameCaptureService : IFrameCaptureService
         }
 
         // Mirror ClipExtractionService: try a direct media URL first, then fall back to a
-        // local download. The pipeline's AnalyzeRequest is the data-transfer shape yt-dlp
-        // expects, so we synthesise a minimal one.
-        var analyzeRequest = new AnalyzeRequest(
-            Source: request.Source,
-            VisionInstruction: string.Empty,
-            IncludeTranscript: false,
-            FrameCount: 0,
-            RunId: request.RunId,
-            OcrInstruction: string.Empty,
-            CookiesPath: request.CookiesPath,
-            CookiesFromBrowser: request.CookiesFromBrowser);
+        // local download.
+        var analyzeRequest = BuildAnalyzeRequest(request);
 
         // Next cheapest: the run's saved yt-dlp dump answers -g without a live extraction
         // (YtDlpClient checks its signed-URL expiry and falls back to the URL when stale).

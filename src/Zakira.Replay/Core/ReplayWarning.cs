@@ -52,6 +52,16 @@ public static class ReplayWarningCodes
     /// </summary>
     public const string MediaDownloadDeclined = "MEDIA_DOWNLOAD_DECLINED";
 
+    /// <summary>
+    /// Info: the source was short enough (<c>capture.autoDownloadMaxDurationSeconds</c>) that
+    /// the pipeline fetched it once and processed the local file instead of seeking the signed
+    /// remote URL once per frame. The message names the file and its size.
+    /// </summary>
+    public const string MediaAutoDownloaded = "MEDIA_AUTO_DOWNLOADED";
+
+    /// <summary>Info: the short-source auto-download failed; processing continued against the remote URL.</summary>
+    public const string MediaAutoDownloadFailed = "MEDIA_AUTO_DOWNLOAD_FAILED";
+
     public const string FramesSceneCapReached = "FRAMES_SCENE_CAP_REACHED";
 
     public const string FramesLikelyUndersampled = "FRAMES_LIKELY_UNDERSAMPLED";

@@ -53,8 +53,12 @@ public sealed class FrameCaptureService : IFrameCaptureService
         this.browserCaptureClient = browserCaptureClient;
     }
 
+    /// <summary>True when a browser client was injected (inline-media probe fallback available).</summary>
+    internal bool HasBrowserFallback => browserCaptureClient is not null;
+
     public async Task<FrameCaptureResult> CaptureAsync(FrameCaptureRequest request, IProgress<string>? progress, CancellationToken cancellationToken)
     {
+        request = await ResolveSourceFromRunAsync(request, cancellationToken).ConfigureAwait(false);
         ValidateInputShape(request);
 
         SourceLocator.ThrowIfMissingLocalPathLikeSource(request.Source);
@@ -75,7 +79,12 @@ public sealed class FrameCaptureService : IFrameCaptureService
             return await PersistAsync(request, run, frames: [], warnings, cancellationToken).ConfigureAwait(false);
         }
 
-        var duration = await ffmpeg.TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false);
+        // A remote source's duration is already known when an analyze run lives in this folder
+        // (metadata.json); reading it saves a network round trip through ffprobe.
+        var duration = SourceLocator.TryGetLocalFilePath(mediaSource, out _)
+            ? await ffmpeg.TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false)
+            : await TryReadRecordedDurationAsync(run, cancellationToken).ConfigureAwait(false)
+                ?? await ffmpeg.TryProbeDurationAsync(mediaSource, cancellationToken).ConfigureAwait(false);
         var ffmpegOptions = new FrameCaptureOptions(request.MaxLongEdgePixels, request.JpegQuality);
 
         IReadOnlyList<FrameArtifact> frames;
@@ -164,7 +173,9 @@ public sealed class FrameCaptureService : IFrameCaptureService
     {
         if (string.IsNullOrWhiteSpace(request.Source))
         {
-            throw new ReplayException("Frame capture requires a non-empty `source`.");
+            throw new ReplayException(string.IsNullOrWhiteSpace(request.RunId)
+                ? "Frame capture requires a non-empty `source` (or a `runId` of an existing run)."
+                : $"Frame capture: run '{request.RunId}' has no request.json/manifest.json to take the source from; pass a `source` or an existing analyze run id.");
         }
 
         var hasTimestamps = request.Timestamps is { Count: > 0 };
@@ -203,8 +214,77 @@ public sealed class FrameCaptureService : IFrameCaptureService
         }
     }
 
+    /// <summary>
+    /// <c>frames --run &lt;id&gt;</c>: when no source is given but the run id names an existing run,
+    /// take the source from its <c>request.json</c> (or <c>manifest.json</c>). Everything else the
+    /// run holds - downloaded media, yt-dlp dump, duration - is then picked up by the resolvers.
+    /// </summary>
+    private async Task<FrameCaptureRequest> ResolveSourceFromRunAsync(FrameCaptureRequest request, CancellationToken cancellationToken)
+    {
+        if (!string.IsNullOrWhiteSpace(request.Source) || string.IsNullOrWhiteSpace(request.RunId))
+        {
+            return request;
+        }
+
+        if (!artifactStore.TryLocateRun(request.RunId, out var existing))
+        {
+            return request;
+        }
+
+        var analyzeRequest = await artifactStore.ReadJsonAsync<AnalyzeRequest>(existing, "request.json", cancellationToken).ConfigureAwait(false);
+        var source = analyzeRequest?.Source;
+        if (string.IsNullOrWhiteSpace(source))
+        {
+            var manifest = await artifactStore.ReadJsonAsync<ArtifactManifest>(existing, "manifest.json", cancellationToken).ConfigureAwait(false);
+            source = manifest?.Source;
+        }
+
+        return string.IsNullOrWhiteSpace(source) ? request : request with { Source = source, RunId = existing.Id };
+    }
+
+    /// <summary>Duration recorded by an analyze run (<c>metadata.json</c>) in this folder, if any.</summary>
+    private async Task<double?> TryReadRecordedDurationAsync(VideoRun run, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var info = await artifactStore.ReadJsonAsync<YtDlpInfo>(run, "metadata.json", cancellationToken).ConfigureAwait(false);
+            return info?.DurationSeconds is { } seconds && seconds > 0 ? seconds : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>Media a previous step downloaded into <c>media/source.*</c> (ignores in-progress parts).</summary>
+    internal static string? FindDownloadedMedia(VideoRun run)
+    {
+        var mediaDirectory = run.GetPath("media");
+        if (!Directory.Exists(mediaDirectory))
+        {
+            return null;
+        }
+
+        return Directory.EnumerateFiles(mediaDirectory, "source.*", SearchOption.TopDirectoryOnly)
+            .Where(path => !path.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
+                && !path.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase)
+                && new FileInfo(path).Length > 0)
+            .OrderByDescending(File.GetLastWriteTimeUtc)
+            .FirstOrDefault();
+    }
+
     private async Task<string?> ResolveRemoteMediaAsync(FrameCaptureRequest request, VideoRun run, List<ReplayWarning> warnings, IProgress<string>? progress, CancellationToken cancellationToken)
     {
+        // Cheapest first: an analyze run in this folder may already hold the media on disk
+        // (--allow-media-download / auto-download), which makes every seek local and needs no
+        // network at all.
+        var downloaded = FindDownloadedMedia(run);
+        if (downloaded is not null)
+        {
+            progress?.Report($"Reusing downloaded media from the run: {Path.GetFileName(downloaded)}");
+            return downloaded;
+        }
+
         // Mirror ClipExtractionService: try a direct media URL first, then fall back to a
         // local download. The pipeline's AnalyzeRequest is the data-transfer shape yt-dlp
         // expects, so we synthesise a minimal one.
@@ -218,8 +298,13 @@ public sealed class FrameCaptureService : IFrameCaptureService
             CookiesPath: request.CookiesPath,
             CookiesFromBrowser: request.CookiesFromBrowser);
 
-        progress?.Report("Resolving direct media URL for ffmpeg...");
-        var mediaUrl = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
+        // Next cheapest: the run's saved yt-dlp dump answers -g without a live extraction
+        // (YtDlpClient checks its signed-URL expiry and falls back to the URL when stale).
+        var infoJsonPath = YtDlpInfoJson.Locate(run);
+        progress?.Report(infoJsonPath is null
+            ? "Resolving direct media URL for ffmpeg..."
+            : "Resolving direct media URL for ffmpeg (reusing the run's yt-dlp.info.json)...");
+        var mediaUrl = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, infoJsonPath, cancellationToken).ConfigureAwait(false);
         if (mediaUrl is not null)
         {
             return mediaUrl;

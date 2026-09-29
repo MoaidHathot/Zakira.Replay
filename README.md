@@ -56,6 +56,7 @@ zakira-replay analyze "C:\meetings\team-sync.mp4" --preset meeting --llm-provide
 
 ```bash
 zakira-replay frames "https://build.microsoft.com/en-US/sessions/KEY01" --at 02:34,35:12,01:47:45
+zakira-replay frames --run key01-1ccc2f93 --from 10:00 --to 11:00 --count 12    # reuse a finished run: no re-resolution
 ```
 
 **Extract a clip** between two timestamps:
@@ -127,7 +128,8 @@ zakira-replay info [--output-format json|text]
 zakira-replay version
 zakira-replay analyze <url-or-file> [--preset meeting|lecture|demo|interview|raw] [--vision-instruction <text>] [--ocr-instruction <text>] [--frames <count>] [--frames-per-minute <n>] [--frame-strategy interval|scene|every-frame] [--scene-safety-cap <n>] [--llm-provider github-copilot|openai|azure-openai|ollama|local-whisper] [--ocr-provider copilot|local] [--smart-crop] [--smart-crop-profile auto|teams|zoom|webex|generic|off] [--capture-mode auto|ytdlp|browser] [--auth-profile <name>] [--stt] [--ocr] [--vision] [--diarize] [--num-speakers <n>] [--diarize-threshold <0.0-1.0>] [--caption-languages <list>] [--no-slide-grouping] [--slide-hash-distance <n>] [--run-id <id>] [--cache] [--force] [--output-format json|text]
 zakira-replay transcribe <url-or-file> [--stt] [--audio] [--run-id <id>] [--cache] [--force] [--output-format json|text]
-zakira-replay frames <url-or-file> [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--run-id <id>] [--output-format json|text]
+zakira-replay frames [<url-or-file>] [--run <id>] [--at <ts1,ts2,...> | --from <ts> --to <ts> [--count <n>] [--strategy interval|scene]] [--max-edge <px>] [--quality <1-100>] [--phash] [--scene-safety-cap <n>] [--allow-media-download] [--output-format json|text]
+#   `--run <id>` without a source captures from an existing analyze run: it reuses the run's source, downloaded media (media/source.*), yt-dlp.info.json and recorded duration, so the video is not resolved again.
 zakira-replay clip <url-or-file> --start <timestamp> --end <timestamp> [--run-id <id>] [--output-name <name>] [--output-format json|text]
 zakira-replay runs list [--output-format json|text]
 zakira-replay runs show <run-id> [--output-format json|text]

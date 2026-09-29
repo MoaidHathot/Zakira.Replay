@@ -87,6 +87,9 @@ public static class McpHost
         services.AddSingleton<McpJobManager>(provider => new McpJobManager(
             () => provider.GetRequiredService<AnalysisPipeline>(),
             ArtifactStore.GetMcpJobsDirectory(provider.GetRequiredService<ArtifactStore>().RootDirectory)));
+        services.AddSingleton<McpFrameJobManager>(provider => new McpFrameJobManager(
+            () => provider.GetRequiredService<FrameCaptureService>(),
+            McpFrameJobManager.GetJobsDirectory(provider.GetRequiredService<ArtifactStore>().RootDirectory)));
         return services;
     }
 

@@ -253,7 +253,7 @@ public static class CliApp
 
     private static Command BuildFramesCommand(TextWriter stdout, TextWriter stderr, Option<string> outputFormat)
     {
-        var source = new Argument<string>("source") { Description = "Video URL or local media path." };
+        var source = new Argument<string?>("source") { Description = "Video URL or local media path. Optional when --run names an existing run.", Arity = ArgumentArity.ZeroOrOne };
         var at = new Option<string?>("--at") { Description = "Comma-separated timestamps to capture." };
         var from = new Option<string?>("--from") { Description = "Window start (with --to)." };
         var to = new Option<string?>("--to") { Description = "Window end (with --from)." };
@@ -263,12 +263,12 @@ public static class CliApp
         var quality = new Option<int?>("--quality") { Description = "JPEG quality (1-100)." };
         var phash = new Option<bool>("--phash") { Description = "Compute 64-bit perceptual hashes." };
         var sceneCap = new Option<int?>("--scene-safety-cap") { Description = "Override frames.sceneSafetyCap for this call." };
-        var runId = new Option<string?>("--run-id") { Description = "Optional run id." };
+        var runId = new Option<string?>("--run-id", "--run") { Description = "Run id. Pass an existing analyze run's id (and omit the source) to reuse its downloaded media, yt-dlp dump and duration instead of resolving the video again." };
         var cookies = new Option<string?>("--cookies") { Description = "Path to a Netscape cookies file for yt-dlp." };
         var browserAuth = new Option<string?>("--browser-auth") { Description = "Browser/profile spec for yt-dlp --cookies-from-browser." };
         var framesAllowDownload = new Option<bool>("--allow-media-download") { Description = "Opt in to downloading the source video locally when neither yt-dlp nor the browser inline-media probe can resolve a direct URL. Default off." };
 
-        var command = new Command("frames", "Ad-hoc frame capture. Pass --at OR --from/--to (mutually exclusive).")
+        var command = new Command("frames", "Ad-hoc frame capture. Pass --at OR --from/--to (mutually exclusive). Use --run <id> without a source to capture from an existing run.")
         {
             source, at, from, to, count, strategy, maxEdge, quality, phash, sceneCap, runId, cookies, browserAuth, framesAllowDownload
         };
@@ -282,6 +282,13 @@ public static class CliApp
             if (hasAt && hasWindow)
             {
                 throw new ReplayException("`--at` and `--from`/`--to` are mutually exclusive.");
+            }
+
+            var sourceValue = parseResult.GetValue(source);
+            var runIdValue = parseResult.GetValue(runId);
+            if (string.IsNullOrWhiteSpace(sourceValue) && string.IsNullOrWhiteSpace(runIdValue))
+            {
+                throw new ReplayException("frames requires a source (URL or local path) or --run <id> of an existing run.");
             }
 
             IReadOnlyList<TimeSpan>? timestamps = null;
@@ -305,19 +312,23 @@ public static class CliApp
             {
                 // No --at, no --from/--to: treat as the analyze frames-only path for back-compat.
                 var (analyzeOptions, applyAnalyzeOptions) = BuildAnalyzeOptions();
-                var request = applyAnalyzeOptions(parseResult, parseResult.GetValue(source)!, false, parseResult.GetValue(count) ?? 15, parseResult.GetValue(runId));
+                if (string.IsNullOrWhiteSpace(sourceValue))
+                {
+                    throw new ReplayException("frames without --at/--from/--to runs the analyze frames-only path, which needs a source.");
+                }
+                var request = applyAnalyzeOptions(parseResult, sourceValue, false, parseResult.GetValue(count) ?? 15, runIdValue);
                 _ = analyzeOptions; // not added to command; default values are used
                 return await RunPipelineAsync(request, stdout, stderr, IsJson(parseResult, outputFormat), CliVerbosityHelpers.Resolve(parseResult), cancellationToken).ConfigureAwait(false);
             }
 
             var captureRequest = new FrameCaptureRequest(
-                Source: parseResult.GetValue(source)!,
+                Source: sourceValue ?? string.Empty,
                 Timestamps: timestamps,
                 RangeStart: rangeStart,
                 RangeEnd: rangeEnd,
                 RangeCount: parseResult.GetValue(count),
                 RangeStrategy: parseResult.GetValue(strategy) ?? FrameSelectionStrategies.Interval,
-                RunId: parseResult.GetValue(runId),
+                RunId: runIdValue,
                 MaxLongEdgePixels: parseResult.GetValue(maxEdge),
                 JpegQuality: parseResult.GetValue(quality),
                 ComputePerceptualHash: parseResult.GetValue(phash),

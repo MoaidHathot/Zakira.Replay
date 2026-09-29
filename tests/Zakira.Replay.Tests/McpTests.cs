@@ -610,6 +610,9 @@ internal sealed class McpTestHarness : IAsyncDisposable
         builder.Services.AddSingleton<McpJobManager>(provider => new McpJobManager(
             () => provider.GetRequiredService<AnalysisPipeline>(),
             Path.Combine(Path.GetTempPath(), "Zakira.Replay.Tests", Guid.NewGuid().ToString("N"))));
+        builder.Services.AddSingleton<McpFrameJobManager>(provider => new McpFrameJobManager(
+            () => provider.GetRequiredService<FrameCaptureService>(),
+            Path.Combine(Path.GetTempPath(), "Zakira.Replay.Tests", Guid.NewGuid().ToString("N"))));
         configureServices?.Invoke(builder.Services);
         builder.Services.AddSingleton<ReplayTools>();
         builder.Services.AddSingleton<ReplayResources>();
@@ -641,6 +644,10 @@ internal sealed class McpTestHarness : IAsyncDisposable
                 McpServerTool.Create((Delegate)replayTools.QueueStatusAsync, new() { Name = "queue-status" }),
                 McpServerTool.Create((Delegate)replayTools.ClipAsync, new() { Name = "clip" }),
                 McpServerTool.Create((Delegate)replayTools.FramesAsync, new() { Name = "frames" }),
+                McpServerTool.Create((Delegate)replayTools.FramesStart, new() { Name = "frames-start" }),
+                McpServerTool.Create((Delegate)replayTools.FramesStatus, new() { Name = "frames-status" }),
+                McpServerTool.Create((Delegate)replayTools.FramesResult, new() { Name = "frames-result" }),
+                McpServerTool.Create((Delegate)replayTools.FramesCancel, new() { Name = "frames-cancel" }),
                 McpServerTool.Create((Delegate)replayTools.IndexBuildAsync, new() { Name = "index-build" }),
                 McpServerTool.Create((Delegate)replayTools.IndexQueryAsync, new() { Name = "index-query" }),
                 McpServerTool.Create((Delegate)replayTools.ChaptersBuildAsync, new() { Name = "chapters-build" }),

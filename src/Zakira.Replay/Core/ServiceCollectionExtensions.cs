@@ -63,10 +63,15 @@ public static class ServiceCollectionExtensions
             provider.GetRequiredService<IYtDlpClient>(),
             provider.GetRequiredService<IFfmpegClient>()));
 
+        // Same wiring as the CLI (CliApp.CreateFrameCaptureService): the browser client gives
+        // the MCP `frames` tool the metadata-only inline-media probe for sources yt-dlp can't
+        // resolve (Medius / Microsoft Build, custom MSE players). Without it the MCP path
+        // silently lacked a fallback the CLI had.
         services.AddTransient(provider => new FrameCaptureService(
             provider.GetRequiredService<ArtifactStore>(),
             provider.GetRequiredService<IYtDlpClient>(),
-            provider.GetRequiredService<IFfmpegClient>()));
+            provider.GetRequiredService<IFfmpegClient>(),
+            provider.GetRequiredService<IBrowserVideoCaptureClient>()));
 
         services.AddTransient(provider => new DiscoveryService(
             provider.GetRequiredService<DependencyResolver>(),

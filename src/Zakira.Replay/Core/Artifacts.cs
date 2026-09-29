@@ -136,6 +136,19 @@ public sealed class ArtifactStore
         return File.Exists(run.GetPath("manifest.json"));
     }
 
+    /// <summary>
+    /// Locates a run directory by id regardless of whether it completed: any folder that holds a
+    /// <c>request.json</c> or <c>manifest.json</c> qualifies. Used by <c>frames --run</c>, which
+    /// only needs the source and whatever media/dump the run left behind.
+    /// </summary>
+    public bool TryLocateRun(string requestedRunId, out VideoRun run)
+    {
+        var runId = Slug.Create(requestedRunId, 80);
+        var directory = Path.Combine(RootDirectory, runId);
+        run = new VideoRun(runId, directory);
+        return Directory.Exists(directory) && (File.Exists(run.GetPath("request.json")) || File.Exists(run.GetPath("manifest.json")));
+    }
+
     public bool TryGetCachedRun(string cacheKey, out VideoRun run)
     {
         run = new VideoRun(string.Empty, string.Empty);

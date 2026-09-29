@@ -42,6 +42,7 @@ public sealed class ReplayTools
     private readonly DiagnosticsService diagnostics;
     private readonly ConfigStore configStore;
     private readonly ArtifactStore artifactStore;
+    private readonly McpFrameJobManager frameJobManager;
 
     public ReplayTools(
         Func<AnalysisPipeline> pipelineFactory,
@@ -54,7 +55,8 @@ public sealed class ReplayTools
         DiscoveryService discoveryService,
         DiagnosticsService diagnostics,
         ConfigStore configStore,
-        ArtifactStore artifactStore)
+        ArtifactStore artifactStore,
+        McpFrameJobManager frameJobManager)
     {
         this.pipelineFactory = pipelineFactory;
         this.jobManager = jobManager;
@@ -67,6 +69,7 @@ public sealed class ReplayTools
         this.diagnostics = diagnostics;
         this.configStore = configStore;
         this.artifactStore = artifactStore;
+        this.frameJobManager = frameJobManager;
     }
 
     /// <summary>
@@ -368,22 +371,104 @@ public sealed class ReplayTools
     }
 
     [McpServerTool(Name = "frames")]
-    [Description("Ad-hoc frame capture from a URL or local media file. Pass either `at` (exact timestamps) or `from`/`to`/`count` (a time window). JPEG stills only; the analyze pipeline (slides/OCR/vision/alignment) is skipped for speed.")]
+    [Description("Ad-hoc frame capture from a URL, a local media file, or an existing run (`runId` alone reuses that run's source, downloaded media and yt-dlp dump - seconds instead of a fresh resolution). Pass either `at` (exact timestamps) or `from`/`to`/`count` (a time window). JPEG stills only; the analyze pipeline (slides/OCR/vision/alignment) is skipped for speed. Blocks until done; prefer frames-start + frames-result for remote sources.")]
     public async Task<string> FramesAsync(
-        [Description("Video URL or local media path.")] string source,
+        [Description("Video URL or local media path. Optional when `runId` names an existing run.")] string? source = null,
         [Description("Exact timestamps to capture, comma-separated.")] string? at = null,
         [Description("Window start (inclusive). Required with `to`.")] string? from = null,
         [Description("Window end (inclusive). Required with `from`.")] string? to = null,
         [Description("Frame count inside the window.")] int? count = null,
         [Description("Window strategy: interval (default) or scene.")] string? strategy = null,
-        [Description("Optional run id.")] string? runId = null,
+        [Description("Run id. Pass an existing analyze run's id (with no `source`) to reuse its media.")] string? runId = null,
         [Description("Max long edge in pixels.")] int? maxLongEdgePixels = null,
         [Description("JPEG quality 1-100.")] int? jpegQuality = null,
         [Description("Compute 64-bit perceptual hashes.")] bool computePerceptualHash = false,
         [Description("Scene safety cap.")] int? sceneSafetyCap = null,
         [Description("Cookies file path.")] string? cookies = null,
         [Description("cookies-from-browser spec.")] string? cookiesFromBrowser = null,
+        [Description("Opt in to downloading the source media locally when no direct or inline URL is reachable. Default: capture.allowMediaDownload from config (false).")] bool? allowMediaDownload = null,
         CancellationToken cancellationToken = default)
+    {
+        var request = BuildFrameCaptureRequest(source, at, from, to, count, strategy, runId, maxLongEdgePixels, jpegQuality, computePerceptualHash, sceneSafetyCap, cookies, cookiesFromBrowser, allowMediaDownload);
+        var result = await frameCaptureService.CaptureAsync(request, progress: null, cancellationToken).ConfigureAwait(false);
+        return Serialize(DescribeFrameCapture(result));
+    }
+
+    [McpServerTool(Name = "frames-start")]
+    [Description("Starts an ad-hoc frame capture in the background and returns a job id. Same inputs as `frames`. Poll with frames-status / frames-result; cancel with frames-cancel.")]
+    public string FramesStart(
+        [Description("Video URL or local media path. Optional when `runId` names an existing run.")] string? source = null,
+        [Description("Exact timestamps to capture, comma-separated.")] string? at = null,
+        [Description("Window start (inclusive). Required with `to`.")] string? from = null,
+        [Description("Window end (inclusive). Required with `from`.")] string? to = null,
+        [Description("Frame count inside the window.")] int? count = null,
+        [Description("Window strategy: interval (default) or scene.")] string? strategy = null,
+        [Description("Run id. Pass an existing analyze run's id (with no `source`) to reuse its media.")] string? runId = null,
+        [Description("Max long edge in pixels.")] int? maxLongEdgePixels = null,
+        [Description("JPEG quality 1-100.")] int? jpegQuality = null,
+        [Description("Compute 64-bit perceptual hashes.")] bool computePerceptualHash = false,
+        [Description("Scene safety cap.")] int? sceneSafetyCap = null,
+        [Description("Cookies file path.")] string? cookies = null,
+        [Description("cookies-from-browser spec.")] string? cookiesFromBrowser = null,
+        [Description("Opt in to downloading the source media locally when no direct or inline URL is reachable.")] bool? allowMediaDownload = null)
+    {
+        var request = BuildFrameCaptureRequest(source, at, from, to, count, strategy, runId, maxLongEdgePixels, jpegQuality, computePerceptualHash, sceneSafetyCap, cookies, cookiesFromBrowser, allowMediaDownload);
+        var job = frameJobManager.Create(request);
+        return Serialize(job.Snapshot(includeLogs: false));
+    }
+
+    [McpServerTool(Name = "frames-status")]
+    [Description("Returns a frame-capture job's status and recent log messages.")]
+    public string FramesStatus([Description("Job id returned by frames-start.")] string jobId)
+    {
+        var job = frameJobManager.Get(jobId) ?? throw new ReplayException($"Unknown frame-capture job: {jobId}");
+        return Serialize(job.Snapshot(includeLogs: true));
+    }
+
+    [McpServerTool(Name = "frames-result")]
+    [Description("Returns the final frame-capture job result (frames with absolute paths); reports {status:'running'} while the job is still in progress.")]
+    public string FramesResult([Description("Job id returned by frames-start.")] string jobId)
+    {
+        var job = frameJobManager.Get(jobId) ?? throw new ReplayException($"Unknown frame-capture job: {jobId}");
+        var snapshot = job.Snapshot(includeLogs: false);
+        if (snapshot.Status is not ("succeeded" or "failed" or "cancelled"))
+        {
+            return Serialize(new { jobId, status = snapshot.Status });
+        }
+
+        return Serialize(new
+        {
+            jobId,
+            status = snapshot.Status,
+            error = snapshot.Error,
+            result = job.Result is null ? null : DescribeFrameCapture(job.Result)
+        });
+    }
+
+    [McpServerTool(Name = "frames-cancel")]
+    [Description("Cancels a running frame-capture job. Returns {cancelled:false} if the id is unknown or the job already finished.")]
+    public string FramesCancel([Description("Job id returned by frames-start.")] string jobId)
+    {
+        var job = frameJobManager.Get(jobId);
+        var cancelled = job is not null && job.Status is McpJobStatus.Pending or McpJobStatus.Running && frameJobManager.Cancel(jobId);
+        return Serialize(new { jobId, cancelled });
+    }
+
+    private FrameCaptureRequest BuildFrameCaptureRequest(
+        string? source,
+        string? at,
+        string? from,
+        string? to,
+        int? count,
+        string? strategy,
+        string? runId,
+        int? maxLongEdgePixels,
+        int? jpegQuality,
+        bool computePerceptualHash,
+        int? sceneSafetyCap,
+        string? cookies,
+        string? cookiesFromBrowser,
+        bool? allowMediaDownload)
     {
         IReadOnlyList<TimeSpan>? timestamps = null;
         TimeSpan? rangeStart = null;
@@ -401,8 +486,13 @@ public sealed class ReplayTools
             rangeEnd = Timestamp.ParseRequired(to, "to");
         }
 
-        var request = new FrameCaptureRequest(
-            Source: source,
+        if (string.IsNullOrWhiteSpace(source) && string.IsNullOrWhiteSpace(runId))
+        {
+            throw new ReplayException("frames requires `source` (URL or local path) or `runId` of an existing run.");
+        }
+
+        return new FrameCaptureRequest(
+            Source: source ?? string.Empty,
             Timestamps: timestamps,
             RangeStart: rangeStart,
             RangeEnd: rangeEnd,
@@ -414,9 +504,14 @@ public sealed class ReplayTools
             ComputePerceptualHash: computePerceptualHash,
             SceneSafetyCap: sceneSafetyCap,
             CookiesPath: cookies,
-            CookiesFromBrowser: cookiesFromBrowser);
+            CookiesFromBrowser: cookiesFromBrowser,
+            // Per-call flag wins, then the global capture.allowMediaDownload default (false),
+            // matching the CLI - the MCP tool previously offered no way to opt in at all.
+            AllowMediaDownload: allowMediaDownload ?? configStore.Load().Capture.AllowMediaDownload);
+    }
 
-        var result = await frameCaptureService.CaptureAsync(request, progress: null, cancellationToken).ConfigureAwait(false);
+    private static object DescribeFrameCapture(FrameCaptureResult result)
+    {
         var resolvedFrames = result.Manifest.Frames
             .Select(frame => new
             {
@@ -429,7 +524,7 @@ public sealed class ReplayTools
             })
             .ToArray();
 
-        return Serialize(new
+        return new
         {
             runId = result.Run.Id,
             artifactDirectory = result.Run.Directory,
@@ -438,7 +533,7 @@ public sealed class ReplayTools
             frames = resolvedFrames,
             warnings = result.Manifest.Warnings,
             manifest = result.Manifest
-        });
+        };
     }
 
     // ---------------------------------------------------------------------------------------

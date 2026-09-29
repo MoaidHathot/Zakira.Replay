@@ -601,6 +601,56 @@ public sealed class FramesConfig
     /// to 12 (one frame every five seconds).
     /// </summary>
     public int PerMinute { get; set; } = 12;
+
+    /// <summary>
+    /// Sharpness-aware picking for interval / timestamp captures: <c>auto</c> (default; on when
+    /// the media is a local file - a downloaded or auto-downloaded source, or a local path -
+    /// where the extra candidates cost milliseconds, off for remote URLs where each candidate
+    /// window is another remote read), <c>on</c>, or <c>off</c>. Each capture samples
+    /// <see cref="SharpnessCandidates"/> frames across ±<see cref="SharpnessWindowSeconds"/> and
+    /// keeps the one with the highest variance of Laplacian; motion-blurred instants lose to the
+    /// crisp frame a second away. Scene and every-frame strategies are unaffected.
+    /// </summary>
+    public string Sharpness { get; set; } = SharpnessModes.Auto;
+
+    /// <summary>Half-width of the candidate window in seconds. Default 1.0.</summary>
+    public double SharpnessWindowSeconds { get; set; } = 1.0;
+
+    /// <summary>Candidates per capture (spread evenly across the window). Default 3.</summary>
+    public int SharpnessCandidates { get; set; } = 3;
+}
+
+public static class SharpnessModes
+{
+    public const string Auto = "auto";
+    public const string On = "on";
+    public const string Off = "off";
+
+    public static string Normalize(string? value)
+    {
+        var normalized = (value ?? Auto).Trim().ToLowerInvariant();
+        return normalized switch
+        {
+            "" or Auto => Auto,
+            On or "true" or "1" or "yes" => On,
+            Off or "false" or "0" or "no" => Off,
+            _ => throw new ReplayException($"Unknown frames.sharpness value '{value}'. Use auto, on, or off.")
+        };
+    }
+
+    /// <summary>Resolves the selection to apply for a capture, or null when disabled.</summary>
+    public static SharpnessSelection? Resolve(FramesConfig frames, bool mediaIsLocal)
+    {
+        var mode = Normalize(frames.Sharpness);
+        if (mode == Off || (mode == Auto && !mediaIsLocal))
+        {
+            return null;
+        }
+
+        return new SharpnessSelection(
+            WindowSeconds: frames.SharpnessWindowSeconds > 0 ? frames.SharpnessWindowSeconds : 1.0,
+            Candidates: frames.SharpnessCandidates >= 2 ? frames.SharpnessCandidates : 3);
+    }
 }
 
 public sealed class SlidesConfig
@@ -1352,6 +1402,17 @@ public sealed class ConfigStore
             case "frames.per-minute":
                 config.Frames.PerMinute = ParseFramesPerMinute(value, key);
                 break;
+            case "frames.sharpness":
+                config.Frames.Sharpness = SharpnessModes.Normalize(value);
+                break;
+            case "frames.sharpnesswindowseconds":
+            case "frames.sharpness-window-seconds":
+                config.Frames.SharpnessWindowSeconds = ParsePositiveDouble(value, key);
+                break;
+            case "frames.sharpnesscandidates":
+            case "frames.sharpness-candidates":
+                config.Frames.SharpnessCandidates = ParsePositiveInt(value, key);
+                break;
             case "ocr.provider":
                 config.Ocr.Provider = OcrProviderFactory.Normalize(value);
                 break;
@@ -1691,6 +1752,9 @@ public sealed class ConfigStore
             "slides.hashdistance" or "slides.hash-distance" => config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
             "frames.scenesafetycap" or "frames.scene-safety-cap" => config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture),
             "frames.perminute" or "frames.per-minute" => config.Frames.PerMinute.ToString(CultureInfo.InvariantCulture),
+            "frames.sharpness" => config.Frames.Sharpness,
+            "frames.sharpnesswindowseconds" or "frames.sharpness-window-seconds" => config.Frames.SharpnessWindowSeconds.ToString(CultureInfo.InvariantCulture),
+            "frames.sharpnesscandidates" or "frames.sharpness-candidates" => config.Frames.SharpnessCandidates.ToString(CultureInfo.InvariantCulture),
             "ocr.provider" => config.Ocr.Provider,
             "ocr.local.modeldirectory" or "ocr.local.model-directory" => config.Ocr.Local.ModelDirectory,
             "ocr.local.detectionmodelpath" or "ocr.local.detection-model-path" or "ocr.local.detmodelpath" or "ocr.local.det-model-path" => config.Ocr.Local.DetectionModelPath,
@@ -1815,6 +1879,9 @@ public sealed class ConfigStore
             ["slides.hashDistance"] = config.Slides.HashDistance.ToString(CultureInfo.InvariantCulture),
             ["frames.sceneSafetyCap"] = config.Frames.SceneSafetyCap.ToString(CultureInfo.InvariantCulture),
             ["frames.perMinute"] = config.Frames.PerMinute.ToString(CultureInfo.InvariantCulture),
+            ["frames.sharpness"] = config.Frames.Sharpness,
+            ["frames.sharpnessWindowSeconds"] = config.Frames.SharpnessWindowSeconds.ToString(CultureInfo.InvariantCulture),
+            ["frames.sharpnessCandidates"] = config.Frames.SharpnessCandidates.ToString(CultureInfo.InvariantCulture),
             ["ocr.provider"] = config.Ocr.Provider,
             ["ocr.local.modelDirectory"] = config.Ocr.Local.ModelDirectory,
             ["ocr.local.detectionModelPath"] = config.Ocr.Local.DetectionModelPath,

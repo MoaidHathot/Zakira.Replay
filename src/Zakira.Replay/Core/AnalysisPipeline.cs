@@ -169,6 +169,18 @@ public sealed class AnalysisPipeline
         }
     }
 
+    /// <summary>
+    /// Capture options for the interval strategy: sharpness-aware picking per
+    /// <c>frames.sharpness</c> (auto = only when the media is a local file, where the extra
+    /// candidates cost milliseconds rather than remote reads).
+    /// </summary>
+    private static FrameCaptureOptions BuildFrameCaptureOptions(string mediaSource)
+    {
+        var frames = new ConfigStore().Load().Frames;
+        var mediaIsLocal = SourceLocator.TryGetLocalFilePath(mediaSource, out _);
+        return new FrameCaptureOptions(Sharpness: SharpnessModes.Resolve(frames, mediaIsLocal));
+    }
+
     private static IEnumerable<Exception> EnumerateCauses(Exception exception)
     {
         for (var current = exception; current is not null; current = current.InnerException)
@@ -605,7 +617,7 @@ public sealed class AnalysisPipeline
                     : $"Extracting {requestedFrameCount} frame(s) with ffmpeg...");
                 try
                 {
-                    frames = await ffmpeg.ExtractFramesAsync(mediaSource, run, requestedFrameCount, info.DurationSeconds, request.FrameStrategy, sceneSafetyCap, cancellationToken).ConfigureAwait(false);
+                    frames = await ffmpeg.ExtractFramesAsync(mediaSource, run, requestedFrameCount, info.DurationSeconds, request.FrameStrategy, sceneSafetyCap, BuildFrameCaptureOptions(mediaSource), cancellationToken).ConfigureAwait(false);
                 }
                 catch (ReplayException ex) when (!isLocalFile)
                 {
@@ -645,7 +657,7 @@ public sealed class AnalysisPipeline
                     }
                     else
                     {
-                        frames = await ffmpeg.ExtractFramesAsync(fallbackMedia, run, requestedFrameCount, info.DurationSeconds, request.FrameStrategy, sceneSafetyCap, cancellationToken).ConfigureAwait(false);
+                        frames = await ffmpeg.ExtractFramesAsync(fallbackMedia, run, requestedFrameCount, info.DurationSeconds, request.FrameStrategy, sceneSafetyCap, BuildFrameCaptureOptions(fallbackMedia), cancellationToken).ConfigureAwait(false);
                     }
                 }
 

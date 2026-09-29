@@ -445,6 +445,10 @@ For long videos, `--frames 30` with the `interval` strategy means a frame every 
 - `--frames-per-minute <n>` (CLI), `framesPerMinute` (MCP/batch). Scales the count by duration; `--frames` becomes the floor: `effective = max(framesPerMinute * durationMinutes, --frames)`. Ignored for `scene` and `every-frame`.
 - `--scene-safety-cap <n>` (CLI), `sceneSafetyCap` (MCP/batch), or `frames.sceneSafetyCap` (config) raises the upper bound on scene-strategy extraction. The default 5000 is generous for typical talks and slide-heavy demos. **Avoid `scene` strategy on long HLS sources** (Microsoft Build / Medius); ffmpeg has to decode every frame to detect cuts, pulling the entire stream.
 
+### Sharpness-aware picking (`frames.sharpness`)
+
+Interval and timestamp captures do not have to land on the exact instant. With `frames.sharpness` = `auto` (default: on when the media is a local file — a local path or a downloaded/auto-downloaded source, where extra candidates cost milliseconds; off for remote URLs where each candidate window is another remote read), `on`, or `off`, every capture samples `frames.sharpnessCandidates` (default 3) frames across ±`frames.sharpnessWindowSeconds` (default 1.0) and keeps the one with the highest variance of Laplacian — motion-blurred instants lose to the crisp frame a second away, which matters for cooking and hands-on videos. All candidates plus their scoring buffers come out of one ffmpeg process per frame, so the process count is unchanged. Chosen frames record `sharpnessScore` and, when the pick moved off the interval instant, `requestedTimestampSeconds`; ties within 5% keep the exact instant. Scene and every-frame strategies are unaffected.
+
 If a run looks undersampled (fewer than 1 frame per 5 minutes for the `interval` strategy without `--frames-per-minute` and with `frames.perMinute=0` in config), Zakira.Replay emits a `FRAMES_LIKELY_UNDERSAMPLED` warning naming the actual ratio. When the scene safety cap is reached, it emits `FRAMES_SCENE_CAP_REACHED`. Both are facts; orchestrators can branch on the codes.
 
 ## Structured OCR/Vision

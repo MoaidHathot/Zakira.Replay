@@ -8,6 +8,14 @@ public interface IFfmpegClient
     Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, CancellationToken cancellationToken);
 
     /// <summary>
+    /// Same as <see cref="ExtractFramesAsync(string, VideoRun, int, double?, string, int, CancellationToken)"/>
+    /// with capture options (sharpness-aware picking, size, quality) applied to the interval
+    /// strategy. Default implementation ignores the options so existing fakes keep compiling.
+    /// </summary>
+    Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(string mediaSource, VideoRun run, int count, double? durationSeconds, string strategy, int sceneSafetyCap, FrameCaptureOptions options, CancellationToken cancellationToken)
+        => ExtractFramesAsync(mediaSource, run, count, durationSeconds, strategy, sceneSafetyCap, cancellationToken);
+
+    /// <summary>
     /// Extracts one JPEG per supplied timestamp using ffmpeg input-side seeking. Used by
     /// ad-hoc <see cref="FrameCaptureService"/> requests (e.g. agents grabbing a handful of
     /// frames at known moments). Each output is named <c>frame-NNN-MM-SS.jpg</c> and lands in
@@ -65,7 +73,73 @@ public interface IFfmpegClient
 /// <param name="JpegQuality">When set, controls JPEG quality on a 1 (worst) - 100 (best) scale
 /// mapped to ffmpeg's <c>-q:v</c> qscale (2..31, lower = better). Defaults to qscale 2
 /// (high quality) when null.</param>
-public sealed record FrameCaptureOptions(int? MaxLongEdgePixels = null, int? JpegQuality = null);
+public sealed record FrameCaptureOptions(int? MaxLongEdgePixels = null, int? JpegQuality = null, SharpnessSelection? Sharpness = null);
+
+/// <summary>
+/// Sharpness-aware picking for interval/timestamp captures: instead of the single frame at
+/// <c>t</c>, capture <see cref="Candidates"/> frames spread over <c>[t - WindowSeconds,
+/// t + WindowSeconds]</c>, score each with the variance of its Laplacian (motion blur and
+/// defocus flatten it) and keep the sharpest. Cooking and hands-on videos are all motion; the
+/// exact interval instant is often a smear while the frame a second away is crisp.
+/// All candidates and their grayscale scoring buffers come out of one ffmpeg process.
+/// </summary>
+public sealed record SharpnessSelection(double WindowSeconds = 1.0, int Candidates = 3)
+{
+    public static SharpnessSelection Default { get; } = new();
+}
+
+/// <summary>Variance-of-Laplacian focus measure over an 8-bit grayscale buffer.</summary>
+public static class SharpnessScore
+{
+    public const int ScoreWidth = 160;
+    public const int ScoreHeight = 90;
+
+    public static double VarianceOfLaplacian(ReadOnlySpan<byte> gray, int width, int height)
+    {
+        if (width < 3 || height < 3 || gray.Length < width * height)
+        {
+            return 0;
+        }
+
+        double sum = 0;
+        double sumSquares = 0;
+        long count = 0;
+        for (var y = 1; y < height - 1; y++)
+        {
+            var row = y * width;
+            for (var x = 1; x < width - 1; x++)
+            {
+                var index = row + x;
+                var laplacian = 4 * gray[index] - gray[index - 1] - gray[index + 1] - gray[index - width] - gray[index + width];
+                sum += laplacian;
+                sumSquares += (double)laplacian * laplacian;
+                count++;
+            }
+        }
+
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        var mean = sum / count;
+        return sumSquares / count - mean * mean;
+    }
+
+    /// <summary>Scores each consecutive <paramref name="width"/>×<paramref name="height"/> frame in a raw gray stream.</summary>
+    public static double[] ScoreFrames(ReadOnlySpan<byte> rawGray, int width, int height)
+    {
+        var frameSize = width * height;
+        var frames = frameSize == 0 ? 0 : rawGray.Length / frameSize;
+        var scores = new double[frames];
+        for (var i = 0; i < frames; i++)
+        {
+            scores[i] = VarianceOfLaplacian(rawGray.Slice(i * frameSize, frameSize), width, height);
+        }
+
+        return scores;
+    }
+}
 
 /// <summary>
 /// A contiguous span of audio considered silence by ffmpeg's <c>silencedetect</c> filter.
@@ -193,6 +267,16 @@ public sealed class FfmpegClient : IFfmpegClient
         }
     }
 
+    public Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(
+        string mediaSource,
+        VideoRun run,
+        int count,
+        double? durationSeconds,
+        string strategy,
+        int sceneSafetyCap,
+        CancellationToken cancellationToken)
+        => ExtractFramesAsync(mediaSource, run, count, durationSeconds, strategy, sceneSafetyCap, new FrameCaptureOptions(), cancellationToken);
+
     public async Task<IReadOnlyList<FrameArtifact>> ExtractFramesAsync(
         string mediaSource,
         VideoRun run,
@@ -200,6 +284,7 @@ public sealed class FfmpegClient : IFfmpegClient
         double? durationSeconds,
         string strategy,
         int sceneSafetyCap,
+        FrameCaptureOptions options,
         CancellationToken cancellationToken)
     {
         if (count <= 0 && !strategy.Equals(FrameSelectionStrategies.Scene, StringComparison.OrdinalIgnoreCase))
@@ -229,7 +314,7 @@ public sealed class FfmpegClient : IFfmpegClient
             timestamps.Add(TimeSpan.FromSeconds(duration.Value * i / (count + 1)));
         }
 
-        return await ExtractFramesAtAsync(mediaSource, run, timestamps, new FrameCaptureOptions(), cancellationToken).ConfigureAwait(false);
+        return await ExtractFramesAtAsync(mediaSource, run, timestamps, options, cancellationToken).ConfigureAwait(false);
     }
 
     public async Task<IReadOnlyList<FrameArtifact>> ExtractFramesAtAsync(
@@ -360,6 +445,18 @@ public sealed class FfmpegClient : IFfmpegClient
         FrameCaptureOptions options,
         CancellationToken cancellationToken)
     {
+        if (options.Sharpness is { Candidates: > 1, WindowSeconds: > 0 } sharpness)
+        {
+            var sharpest = await CaptureSharpestFrameAsync(mediaSource, run, timestamp, frameIndex, fileNamePrefix, idPrefix, options, sharpness, cancellationToken).ConfigureAwait(false);
+            if (sharpest is not null)
+            {
+                return sharpest;
+            }
+
+            // Fall through to the plain single-frame capture when the candidate pass produced
+            // nothing (e.g. the window runs past the end of the stream).
+        }
+
         var ffmpeg = dependencies.RequireFfmpeg("extracting frames from video media");
         var seconds = Math.Max(0, timestamp.TotalSeconds);
         var label = Timestamp.Format(seconds);
@@ -404,6 +501,126 @@ public sealed class FfmpegClient : IFfmpegClient
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// One ffmpeg process per frame, two outputs: the candidate JPEGs sampled at a fixed rate
+    /// across <c>[t - w, t + w]</c>, and a 160x90 grayscale raw stream of the same candidates
+    /// for scoring. The sharpest candidate is moved to the frame's final path; the rest are
+    /// deleted. The returned artifact carries the candidate's own timestamp.
+    /// </summary>
+    private async Task<FrameArtifact?> CaptureSharpestFrameAsync(
+        string mediaSource,
+        VideoRun run,
+        TimeSpan timestamp,
+        int frameIndex,
+        string fileNamePrefix,
+        string idPrefix,
+        FrameCaptureOptions options,
+        SharpnessSelection sharpness,
+        CancellationToken cancellationToken)
+    {
+        var ffmpeg = dependencies.RequireFfmpeg("extracting frames from video media");
+        var candidates = Math.Clamp(sharpness.Candidates, 2, 15);
+        var window = Math.Clamp(sharpness.WindowSeconds, 0.1, 10);
+        var center = Math.Max(0, timestamp.TotalSeconds);
+        var start = Math.Max(0, center - window);
+        var span = (center + window) - start;
+        var fps = (candidates - 1) / span;
+
+        var framesDirectory = run.GetPath("frames");
+        var workDirectory = Path.Combine(framesDirectory, $".sharp-{frameIndex:000}-{Guid.NewGuid():N}"[..Math.Min(60, $".sharp-{frameIndex:000}-{Guid.NewGuid():N}".Length)]);
+        Directory.CreateDirectory(workDirectory);
+        var candidatePattern = Path.Combine(workDirectory, "cand-%02d.jpg");
+        var grayPath = Path.Combine(workDirectory, "cand.gray");
+
+        try
+        {
+            var inputOptions = await GetInputOptionsAsync(ffmpeg, mediaSource, cancellationToken).ConfigureAwait(false);
+            var fpsFilter = $"fps={fps.ToString("0.####", CultureInfo.InvariantCulture)}:start_time=0:round=near";
+            var jpegFilter = fpsFilter + GetScaleFilterSuffix(options);
+            var grayFilter = $"{fpsFilter},scale={SharpnessScore.ScoreWidth}:{SharpnessScore.ScoreHeight}:flags=bilinear,format=gray";
+            List<string> args =
+            [
+                "-hide_banner",
+                "-loglevel", "error",
+                .. inputOptions,
+                "-ss", start.ToString("0.###", CultureInfo.InvariantCulture),
+                "-i", mediaSource,
+                "-t", (span + 0.5 / Math.Max(fps, 0.01)).ToString("0.###", CultureInfo.InvariantCulture),
+                "-vf", jpegFilter,
+                "-frames:v", candidates.ToString(CultureInfo.InvariantCulture),
+                "-q:v", MapJpegQualityToQscale(options.JpegQuality).ToString(CultureInfo.InvariantCulture),
+                "-y", candidatePattern,
+                "-vf", grayFilter,
+                "-frames:v", candidates.ToString(CultureInfo.InvariantCulture),
+                "-f", "rawvideo",
+                "-y", grayPath
+            ];
+
+            var result = await processRunner.RunAsync(
+                ffmpeg,
+                [.. args],
+                timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.FfmpegFrameSeconds, 180),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            var produced = Directory.Exists(workDirectory)
+                ? Directory.GetFiles(workDirectory, "cand-*.jpg").OrderBy(path => path, StringComparer.Ordinal).ToArray()
+                : [];
+            if (result.ExitCode != 0 || produced.Length == 0)
+            {
+                return null;
+            }
+
+            var scores = File.Exists(grayPath)
+                ? SharpnessScore.ScoreFrames(await File.ReadAllBytesAsync(grayPath, cancellationToken).ConfigureAwait(false), SharpnessScore.ScoreWidth, SharpnessScore.ScoreHeight)
+                : [];
+            var best = 0;
+            for (var i = 1; i < produced.Length && i < scores.Length; i++)
+            {
+                if (scores[i] > scores[best])
+                {
+                    best = i;
+                }
+            }
+
+            // Prefer the exact interval instant when candidates are indistinguishable (all
+            // within 5%): keeps the classic sampling positions for static content.
+            if (scores.Length >= produced.Length && produced.Length > 0)
+            {
+                var centerIndex = Math.Min(produced.Length - 1, (int)Math.Round((center - start) * fps));
+                if (centerIndex != best && scores[best] > 0 && scores[centerIndex] >= scores[best] * 0.95)
+                {
+                    best = centerIndex;
+                }
+            }
+
+            var chosenSeconds = Math.Round(start + best / fps, 3);
+            var label = Timestamp.Format(chosenSeconds);
+            var fileSafeLabel = label.Replace(':', '-').Replace('.', '-');
+            var relativePath = Path.Combine("frames", $"{fileNamePrefix}-{frameIndex:000}-{fileSafeLabel}.jpg");
+            var outputPath = run.GetPath(relativePath);
+            File.Move(produced[best], outputPath, overwrite: true);
+            return new FrameArtifact($"{idPrefix}-{frameIndex:000}", relativePath.Replace('\\', '/'), chosenSeconds, label)
+            {
+                SharpnessScore = scores.Length > best ? Math.Round(scores[best], 2) : null,
+                RequestedTimestampSeconds = Math.Abs(chosenSeconds - center) < 0.0005 ? null : center
+            };
+        }
+        finally
+        {
+            try
+            {
+                if (Directory.Exists(workDirectory))
+                {
+                    Directory.Delete(workDirectory, recursive: true);
+                }
+            }
+            catch
+            {
+                // Best-effort cleanup.
+            }
+        }
     }
 
     private static string GetScaleFilterSuffix(FrameCaptureOptions options)

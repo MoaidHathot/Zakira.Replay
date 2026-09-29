@@ -117,7 +117,10 @@ public sealed class FrameCaptureService : IFrameCaptureService
             }
         }
 
-        var ffmpegOptions = new FrameCaptureOptions(request.MaxLongEdgePixels, request.JpegQuality);
+        var ffmpegOptions = new FrameCaptureOptions(
+            request.MaxLongEdgePixels,
+            request.JpegQuality,
+            Sharpness: SharpnessModes.Resolve(new ConfigStore().Load().Frames, SourceLocator.TryGetLocalFilePath(mediaSource, out _)));
 
         IReadOnlyList<FrameArtifact> frames;
         if (request.Timestamps is { Count: > 0 })

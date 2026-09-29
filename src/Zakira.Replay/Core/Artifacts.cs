@@ -364,7 +364,14 @@ public sealed record FrameArtifact(
     int? Width = null,
     int? Height = null,
     FrameCropBox? Crop = null,
-    string? OriginalPath = null);
+    string? OriginalPath = null)
+{
+    /// <summary>Variance-of-Laplacian focus measure of the chosen frame when sharpness-aware picking ran (higher is sharper).</summary>
+    public double? SharpnessScore { get; init; }
+
+    /// <summary>The interval instant this frame stands for when sharpness-aware picking moved the capture off it; null when the frame sits exactly at the requested time.</summary>
+    public double? RequestedTimestampSeconds { get; init; }
+}
 
 /// <summary>
 /// Rectangular crop applied to a frame during preprocessing (e.g. smart-crop of meeting-platform

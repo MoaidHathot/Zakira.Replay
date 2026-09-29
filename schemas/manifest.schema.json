@@ -202,6 +202,8 @@
         "timestampSeconds": { "type": "number", "minimum": 0 },
         "timestampLabel": { "type": "string", "minLength": 1 },
         "perceptualHash": { "type": ["string", "null"] },
+        "sharpnessScore": { "type": ["number", "null"], "minimum": 0, "description": "Variance-of-Laplacian focus measure when sharpness-aware picking ran (higher is sharper)." },
+        "requestedTimestampSeconds": { "type": ["number", "null"], "minimum": 0, "description": "The interval instant this frame stands for when sharpness-aware picking moved the capture off it." },
         "width": { "type": ["integer", "null"], "minimum": 0 },
         "height": { "type": ["integer", "null"], "minimum": 0 },
         "originalPath": {

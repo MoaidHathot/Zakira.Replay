@@ -225,6 +225,16 @@ public sealed class AnalysisPipeline
         }
         state.Info = info;
         await artifactStore.WriteJsonAsync(run, "metadata.json", info, cancellationToken).ConfigureAwait(false);
+
+        // Persist the verbatim yt-dlp dump so the caption, media-URL and download steps reuse it
+        // through --load-info-json: one extractor pass per run instead of three (each of which
+        // was a fresh opportunity for a YouTube bot check or rate limit).
+        string? infoJsonPath = null;
+        if (!string.IsNullOrWhiteSpace(info.RawJson))
+        {
+            await artifactStore.WriteTextAsync(run, YtDlpInfoJson.FileName, info.RawJson + Environment.NewLine, cancellationToken).ConfigureAwait(false);
+            infoJsonPath = run.GetPath(YtDlpInfoJson.FileName);
+        }
         state.Stage = RunStages.Captions;
 
         TranscriptArtifact? transcript = null;
@@ -262,10 +272,16 @@ public sealed class AnalysisPipeline
             {
                 transcript = await SidecarSubtitleFinder.TryConvertAsync(localPath, run, cancellationToken).ConfigureAwait(false);
             }
+            else if (infoJsonPath is not null && !info.AdvertisesCaptions)
+            {
+                // The extractor already told us there are no caption tracks; a second yt-dlp
+                // pass would only repeat the extraction and come back empty.
+                progress?.Report("Source advertises no captions; skipping the subtitle download pass.");
+            }
             else
             {
                 var resolvedLanguages = ResolveSubtitleLanguages(request.CaptionLanguages, info);
-                transcript = await ytDlp.DownloadBestSubtitleAsync(request, run, resolvedLanguages, cancellationToken).ConfigureAwait(false);
+                transcript = await ytDlp.DownloadBestSubtitleAsync(request, run, resolvedLanguages, infoJsonPath, cancellationToken).ConfigureAwait(false);
             }
             if (transcript is null)
             {
@@ -317,7 +333,7 @@ public sealed class AnalysisPipeline
             }
 
             progress?.Report("Downloading media locally with yt-dlp for ffmpeg fallback (--allow-media-download was set)...");
-            downloadedMediaSource = await ytDlp.DownloadMediaForProcessingAsync(request, run, cancellationToken).ConfigureAwait(false);
+            downloadedMediaSource = await ytDlp.DownloadMediaForProcessingAsync(request, run, infoJsonPath, cancellationToken).ConfigureAwait(false);
             return downloadedMediaSource;
         }
 
@@ -325,7 +341,7 @@ public sealed class AnalysisPipeline
         {
             state.Stage = RunStages.MediaUrl;
             progress?.Report(isLocalFile ? "Using local media path for ffmpeg..." : "Resolving direct media URL for ffmpeg...");
-            mediaSource = await ytDlp.GetBestMediaUrlAsync(request, cancellationToken).ConfigureAwait(false);
+            mediaSource = await ytDlp.GetBestMediaUrlAsync(request, infoJsonPath, cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
             {
                 // Info, not warning: yt-dlp not finding a direct URL is the EXPECTED outcome for

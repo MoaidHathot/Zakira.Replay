@@ -34,7 +34,7 @@ public sealed class ClipExtractionService
                 CookiesPath: request.CookiesPath,
                 CookiesFromBrowser: request.CookiesFromBrowser);
             progress?.Report("Resolving direct media URL for ffmpeg...");
-            mediaSource = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, cancellationToken).ConfigureAwait(false);
+            mediaSource = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
             {
                 // Clip extraction inherently needs to re-encode a byte range — no inline
@@ -52,7 +52,7 @@ public sealed class ClipExtractionService
                     "Could not resolve a direct media URL; downloading media locally for clipping (--allow-media-download was set).",
                     Source: "yt-dlp",
                     Severity: ReplayWarningSeverities.Info));
-                mediaSource = await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
+                mediaSource = await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
             }
         }
 

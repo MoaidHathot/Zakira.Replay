@@ -15,6 +15,144 @@ public interface IYtDlpClient
     Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken);
 
     Task<string?> DownloadMediaForProcessingAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken);
+
+    /// <summary>
+    /// Same as <see cref="DownloadBestSubtitleAsync(AnalyzeRequest, VideoRun, IReadOnlyList{string}, CancellationToken)"/>
+    /// but reuses a saved <c>--dump-single-json</c> dump (<paramref name="infoJsonPath"/>) via
+    /// <c>--load-info-json</c> so yt-dlp does not run its extractor a second time. Falls back to
+    /// the URL path when the dump is missing, stale, or rejected.
+    /// </summary>
+    Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, string? infoJsonPath, CancellationToken cancellationToken)
+        => DownloadBestSubtitleAsync(request, run, subtitleLanguages, cancellationToken);
+
+    /// <summary>Direct media URL resolution that reuses a saved info dump when available (see <see cref="DownloadBestSubtitleAsync(AnalyzeRequest, VideoRun, IReadOnlyList{string}, string?, CancellationToken)"/>).</summary>
+    Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, string? infoJsonPath, CancellationToken cancellationToken)
+        => GetBestMediaUrlAsync(request, cancellationToken);
+
+    /// <summary>Media download that reuses a saved info dump when available.</summary>
+    Task<string?> DownloadMediaForProcessingAsync(AnalyzeRequest request, VideoRun run, string? infoJsonPath, CancellationToken cancellationToken)
+        => DownloadMediaForProcessingAsync(request, run, cancellationToken);
+}
+
+/// <summary>
+/// Helpers around the saved <c>yt-dlp --dump-single-json</c> dump (<c>yt-dlp.info.json</c> in the
+/// run directory). The dump carries every signed format URL and caption URL yt-dlp resolved, so
+/// later steps can hand it back with <c>--load-info-json</c> instead of re-running the extractor
+/// (three full extractions per analyze before this - and each one a fresh chance for a
+/// YouTube bot check or rate limit).
+/// </summary>
+public static partial class YtDlpInfoJson
+{
+    public const string FileName = "yt-dlp.info.json";
+
+    /// <summary>Safety margin before the earliest signed-URL expiry at which the dump is considered stale.</summary>
+    public static readonly TimeSpan ExpiryMargin = TimeSpan.FromMinutes(2);
+
+    /// <summary>Returns the dump path for a run when the file exists, otherwise null.</summary>
+    public static string? Locate(VideoRun run)
+    {
+        var path = run.GetPath(FileName);
+        return File.Exists(path) ? path : null;
+    }
+
+    /// <summary>
+    /// True when the dump can still be handed to <c>--load-info-json</c>: it parses, and none of
+    /// the signed URLs it carries (<c>expire=</c> query parameter on googlevideo / timedtext
+    /// URLs) has passed. Dumps without any expiry information are treated as fresh.
+    /// </summary>
+    public static bool IsFresh(string path, DateTimeOffset? now = null)
+    {
+        try
+        {
+            using var document = JsonDocument.Parse(File.ReadAllText(path));
+            var earliest = EarliestExpiry(document.RootElement);
+            return earliest is null || (now ?? DateTimeOffset.UtcNow) + ExpiryMargin < earliest.Value;
+        }
+        catch (Exception ex) when (ex is JsonException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>Earliest <c>expire=</c> timestamp found on format/caption URLs, or null when none carries one.</summary>
+    public static DateTimeOffset? EarliestExpiry(JsonElement root)
+    {
+        DateTimeOffset? earliest = null;
+        void Consider(string? url)
+        {
+            if (TryParseExpiry(url) is { } expiry && (earliest is null || expiry < earliest.Value))
+            {
+                earliest = expiry;
+            }
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            return null;
+        }
+
+        if (root.TryGetProperty("url", out var topUrl) && topUrl.ValueKind == JsonValueKind.String)
+        {
+            Consider(topUrl.GetString());
+        }
+
+        if (root.TryGetProperty("formats", out var formats) && formats.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var format in formats.EnumerateArray())
+            {
+                if (format.ValueKind == JsonValueKind.Object && format.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String)
+                {
+                    Consider(url.GetString());
+                }
+            }
+        }
+
+        foreach (var captionsKey in new[] { "subtitles", "automatic_captions" })
+        {
+            if (!root.TryGetProperty(captionsKey, out var captions) || captions.ValueKind != JsonValueKind.Object)
+            {
+                continue;
+            }
+
+            foreach (var language in captions.EnumerateObject())
+            {
+                if (language.Value.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (var track in language.Value.EnumerateArray())
+                {
+                    if (track.ValueKind == JsonValueKind.Object && track.TryGetProperty("url", out var url) && url.ValueKind == JsonValueKind.String)
+                    {
+                        Consider(url.GetString());
+                    }
+                }
+            }
+        }
+
+        return earliest;
+    }
+
+    internal static DateTimeOffset? TryParseExpiry(string? url)
+    {
+        if (string.IsNullOrEmpty(url))
+        {
+            return null;
+        }
+
+        var match = ExpiryRegex().Match(url);
+        if (!match.Success || !long.TryParse(match.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var seconds))
+        {
+            return null;
+        }
+
+        // Guard against nonsense values (some CDNs use "expire" for a relative TTL).
+        return seconds is > 1_000_000_000 and < 100_000_000_000 ? DateTimeOffset.FromUnixTimeSeconds(seconds) : null;
+    }
+
+    [GeneratedRegex(@"[?&/](?:expire|expires|exp)[=/](\d{9,12})(?:[&/]|$)", RegexOptions.IgnoreCase)]
+    private static partial Regex ExpiryRegex();
 }
 
 public sealed class YtDlpClient : IYtDlpClient
@@ -47,7 +185,15 @@ public sealed class YtDlpClient : IYtDlpClient
         try
         {
             var info = JsonSerializer.Deserialize<YtDlpInfo>(result.StandardOutput, YtDlpJson.Options);
-            return info ?? throw new ReplayException("yt-dlp returned empty metadata.");
+            if (info is null)
+            {
+                throw new ReplayException("yt-dlp returned empty metadata.");
+            }
+
+            // Keep the verbatim dump: the pipeline persists it as yt-dlp.info.json so the
+            // subtitle / media-URL / download steps can reuse it via --load-info-json.
+            info.RawJson = result.StandardOutput.Trim();
+            return info;
         }
         catch (JsonException ex)
         {
@@ -55,28 +201,53 @@ public sealed class YtDlpClient : IYtDlpClient
         }
     }
 
-    public async Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken)
+    public Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, CancellationToken cancellationToken)
+        => DownloadBestSubtitleAsync(request, run, subtitleLanguages, infoJsonPath: null, cancellationToken);
+
+    public async Task<TranscriptArtifact?> DownloadBestSubtitleAsync(AnalyzeRequest request, VideoRun run, IReadOnlyList<string> subtitleLanguages, string? infoJsonPath, CancellationToken cancellationToken)
     {
         var ytDlp = dependencies.RequireYtDlp("extracting existing subtitles/captions");
         var languageSpec = FormatSubtitleLanguageSpec(subtitleLanguages);
         var outputTemplate = Path.Combine(run.Directory, "captions", "subtitle.%(ext)s");
-        var args = CreateBaseArguments(request);
-        args.AddRange([
-            "--skip-download",
-            "--write-subs",
-            "--write-auto-subs",
-            "--sub-langs", languageSpec,
-            "--sub-format", "vtt/srt/best",
-            "--no-playlist",
-            "-o", outputTemplate,
-            request.Source
-        ]);
-        await processRunner.RunAsync(
-            ytDlp,
-            args,
-            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpSubtitlesSeconds, 600),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
 
+        var usableInfoJson = ResolveUsableInfoJson(infoJsonPath);
+        foreach (var useInfoJson in usableInfoJson is null ? [false] : new[] { true, false })
+        {
+            var args = CreateBaseArguments(request);
+            args.AddRange([
+                "--skip-download",
+                "--write-subs",
+                "--write-auto-subs",
+                "--sub-langs", languageSpec,
+                "--sub-format", "vtt/srt/best"
+            ]);
+            if (!useInfoJson)
+            {
+                args.Add("--no-playlist");
+            }
+            args.AddRange(["-o", outputTemplate]);
+            args.AddRange(useInfoJson ? ["--load-info-json", usableInfoJson!] : [request.Source]);
+            await processRunner.RunAsync(
+                ytDlp,
+                args,
+                timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpSubtitlesSeconds, 600),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            var transcript = await TryBuildTranscriptFromCaptionsDirectoryAsync(run, cancellationToken).ConfigureAwait(false);
+            if (transcript is not null)
+            {
+                return transcript;
+            }
+
+            // Nothing landed from the saved dump: retry once with a live extraction in case the
+            // dump was rejected (yt-dlp version skew) or its caption URLs expired.
+        }
+
+        return null;
+    }
+
+    private static async Task<TranscriptArtifact?> TryBuildTranscriptFromCaptionsDirectoryAsync(VideoRun run, CancellationToken cancellationToken)
+    {
         // yt-dlp can exit non-zero when one of the requested languages is unavailable while still
         // writing the available languages' subtitle files. Trust the filesystem: if a .vtt/.srt
         // landed in captions/, use it.
@@ -103,6 +274,17 @@ public sealed class YtDlpClient : IYtDlpClient
         await File.WriteAllTextAsync(markdownPath, SubtitleConverter.ToMarkdown(segments), cancellationToken).ConfigureAwait(false);
 
         return new TranscriptArtifact(subtitle, markdownPath, "yt-dlp-subtitle", segments);
+    }
+
+    /// <summary>A saved dump is only handed to yt-dlp when it exists and its signed URLs have not expired.</summary>
+    private static string? ResolveUsableInfoJson(string? infoJsonPath)
+    {
+        if (string.IsNullOrWhiteSpace(infoJsonPath) || !File.Exists(infoJsonPath))
+        {
+            return null;
+        }
+
+        return YtDlpInfoJson.IsFresh(infoJsonPath) ? infoJsonPath : null;
     }
 
     private static string FormatSubtitleLanguageSpec(IReadOnlyList<string> subtitleLanguages)
@@ -167,62 +349,93 @@ public sealed class YtDlpClient : IYtDlpClient
         + "/best[protocol=https][vcodec!=none]"
         + "/bv*+ba/b";
 
-    public async Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken)
+    public Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, CancellationToken cancellationToken)
+        => GetBestMediaUrlAsync(request, infoJsonPath: null, cancellationToken);
+
+    public async Task<string?> GetBestMediaUrlAsync(AnalyzeRequest request, string? infoJsonPath, CancellationToken cancellationToken)
     {
         var ytDlp = dependencies.RequireYtDlp("resolving direct media URL for ffmpeg");
-        var args = CreateBaseArguments(request);
-        args.AddRange([
-            "--no-playlist",
-            "-f", DirectMediaUrlFormatSelector,
-            "-g", request.Source
-        ]);
-        var result = await processRunner.RunAsync(
-            ytDlp,
-            args,
-            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpMediaUrlSeconds, 300),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        if (result.ExitCode != 0)
+        var usableInfoJson = ResolveUsableInfoJson(infoJsonPath);
+        foreach (var useInfoJson in usableInfoJson is null ? [false] : new[] { true, false })
         {
-            return null;
+            var args = CreateBaseArguments(request);
+            if (!useInfoJson)
+            {
+                args.Add("--no-playlist");
+            }
+            args.AddRange(["-f", DirectMediaUrlFormatSelector, "-g"]);
+            args.AddRange(useInfoJson ? ["--load-info-json", usableInfoJson!] : [request.Source]);
+            var result = await processRunner.RunAsync(
+                ytDlp,
+                args,
+                timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpMediaUrlSeconds, 300),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0)
+            {
+                // With the saved dump: fall through to a live extraction. Without it: no URL.
+                continue;
+            }
+
+            var url = result.StandardOutput
+                .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(url))
+            {
+                return url;
+            }
         }
 
-        return result.StandardOutput
-            .Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .FirstOrDefault();
+        return null;
     }
 
-    public async Task<string?> DownloadMediaForProcessingAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken)
+    public Task<string?> DownloadMediaForProcessingAsync(AnalyzeRequest request, VideoRun run, CancellationToken cancellationToken)
+        => DownloadMediaForProcessingAsync(request, run, infoJsonPath: null, cancellationToken);
+
+    public async Task<string?> DownloadMediaForProcessingAsync(AnalyzeRequest request, VideoRun run, string? infoJsonPath, CancellationToken cancellationToken)
     {
         var ytDlp = dependencies.RequireYtDlp("downloading media for local ffmpeg processing");
         var mediaDirectory = run.GetPath("media");
         Directory.CreateDirectory(mediaDirectory);
 
         var outputTemplate = Path.Combine(mediaDirectory, "source.%(ext)s");
-        var args = CreateBaseArguments(request);
-        args.AddRange([
-            "--no-playlist",
-            "-f", "best[height<=720][ext=mp4]/best[height<=720]/best[ext=mp4]/best",
-            "--merge-output-format", "mp4",
-            "-o", outputTemplate,
-            request.Source
-        ]);
-        var result = await processRunner.RunAsync(
-            ytDlp,
-            args,
-            timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpDownloadSeconds, 1800),
-            cancellationToken: cancellationToken).ConfigureAwait(false);
-
-        if (result.ExitCode != 0)
+        var usableInfoJson = ResolveUsableInfoJson(infoJsonPath);
+        foreach (var useInfoJson in usableInfoJson is null ? [false] : new[] { true, false })
         {
-            return null;
+            var args = CreateBaseArguments(request);
+            if (!useInfoJson)
+            {
+                args.Add("--no-playlist");
+            }
+            args.AddRange([
+                "-f", "best[height<=720][ext=mp4]/best[height<=720]/best[ext=mp4]/best",
+                "--merge-output-format", "mp4",
+                "-o", outputTemplate
+            ]);
+            args.AddRange(useInfoJson ? ["--load-info-json", usableInfoJson!] : [request.Source]);
+            var result = await processRunner.RunAsync(
+                ytDlp,
+                args,
+                timeout: TimeoutsConfig.Resolve(dependencies.Timeouts.YtDlpDownloadSeconds, 1800),
+                cancellationToken: cancellationToken).ConfigureAwait(false);
+
+            if (result.ExitCode != 0)
+            {
+                continue;
+            }
+
+            var downloaded = Directory.EnumerateFiles(mediaDirectory, "source.*", SearchOption.TopDirectoryOnly)
+                .Where(path => !path.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
+                    && !path.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase))
+                .OrderByDescending(File.GetLastWriteTimeUtc)
+                .FirstOrDefault();
+            if (downloaded is not null)
+            {
+                return downloaded;
+            }
         }
 
-        return Directory.EnumerateFiles(mediaDirectory, "source.*", SearchOption.TopDirectoryOnly)
-            .Where(path => !path.EndsWith(".part", StringComparison.OrdinalIgnoreCase)
-                && !path.EndsWith(".ytdl", StringComparison.OrdinalIgnoreCase))
-            .OrderByDescending(File.GetLastWriteTimeUtc)
-            .FirstOrDefault();
+        return null;
     }
 
     private static List<string> CreateBaseArguments(AnalyzeRequest request)
@@ -307,6 +520,28 @@ public sealed class YtDlpInfo
 
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }
+
+    /// <summary>
+    /// Verbatim <c>--dump-single-json</c> output this instance was parsed from. Not serialized
+    /// into <c>metadata.json</c>; the pipeline persists it as <see cref="YtDlpInfoJson.FileName"/>
+    /// so later yt-dlp steps can <c>--load-info-json</c> it. Null for local files and for the
+    /// synthetic info used by the browser fallback.
+    /// </summary>
+    [JsonIgnore]
+    public string? RawJson { get; set; }
+
+    /// <summary>
+    /// True when the extractor advertised at least one manual or automatic caption track. When
+    /// this is false on a real yt-dlp dump there is nothing for the subtitle step to download and
+    /// the extraction can be skipped entirely.
+    /// </summary>
+    [JsonIgnore]
+    public bool AdvertisesCaptions =>
+        (Subtitles is { Count: > 0 } && Subtitles.Values.Any(HasTracks))
+        || (AutomaticCaptions is { Count: > 0 } && AutomaticCaptions.Values.Any(HasTracks));
+
+    private static bool HasTracks(JsonElement element)
+        => element.ValueKind == JsonValueKind.Array ? element.GetArrayLength() > 0 : element.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined);
 }
 
 public sealed class AvailableSubtitleLanguage

@@ -219,7 +219,7 @@ public sealed class FrameCaptureService : IFrameCaptureService
             CookiesFromBrowser: request.CookiesFromBrowser);
 
         progress?.Report("Resolving direct media URL for ffmpeg...");
-        var mediaUrl = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, cancellationToken).ConfigureAwait(false);
+        var mediaUrl = await ytDlp.GetBestMediaUrlAsync(analyzeRequest, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
         if (mediaUrl is not null)
         {
             return mediaUrl;
@@ -254,7 +254,7 @@ public sealed class FrameCaptureService : IFrameCaptureService
             "Could not resolve a direct media URL; downloading media locally for frame capture (--allow-media-download was set).",
             Source: "yt-dlp",
             Severity: ReplayWarningSeverities.Info));
-        return await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, cancellationToken).ConfigureAwait(false);
+        return await ytDlp.DownloadMediaForProcessingAsync(analyzeRequest, run, YtDlpInfoJson.Locate(run), cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>

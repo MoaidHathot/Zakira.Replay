@@ -163,7 +163,7 @@ public sealed class TranscriptQualityTests
             00:00:07.000 --> 00:00:09.000
             Alice: let's get started
             """);
-        Assert.Equal(["Alice", "Bob", "Alice"], labelled.Select(segment => segment.SpeakerDisplayName).ToArray());
+        Assert.Equal(["Alice", "Bob", "Alice"], labelled.Select(segment => segment.SpeakerDisplayName ?? string.Empty).ToArray());
         Assert.Equal("welcome to the demo", labelled[0].Text);
     }
 

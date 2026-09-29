@@ -48,8 +48,8 @@ public sealed class SourceDetailsTests
         Assert.Equal(2, details.Chapters!.Count);
         Assert.Equal(("Mixing", 12.5, "00:12"), (details.Chapters[1].Title, details.Chapters[1].StartSeconds, details.Chapters[1].StartLabel));
         // Pinned uploader comment first, then the uploader's other comment, then by likes; the reply is excluded.
-        Assert.Equal(["c2", "c4", "c1"], details.Comments!.Select(c => c.Id).ToArray());
-        Assert.True(details.Comments[0].IsPinned);
+        Assert.Equal(["c2", "c4", "c1"], details.Comments!.Select(c => c.Id ?? string.Empty).ToArray());
+        Assert.True(details.Comments![0].IsPinned);
         Assert.True(details.Comments[0].AuthorIsUploader);
         Assert.Equal(DateTimeOffset.FromUnixTimeSeconds(1777500000).ToString("yyyy-MM-dd'T'HH:mm:ss'Z'"), details.Comments[0].PublishedAt);
         Assert.Equal("comments/comments.json", details.CommentsPath);

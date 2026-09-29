@@ -35,20 +35,27 @@ public sealed class AnalysisPipeline
 
         var cacheKey = request.UseCache ? AnalysisCache.CreateKey(request) : null;
 
+        // Only completed manifests are reusable: a partial/failed manifest left behind by an
+        // earlier attempt must not short-circuit the retry.
         if (!request.Force && !string.IsNullOrWhiteSpace(request.RunId) && artifactStore.TryGetExistingRun(request.RunId, out var existingRun))
         {
             var existingManifest = await artifactStore.ReadJsonAsync<ArtifactManifest>(existingRun, "manifest.json", cancellationToken).ConfigureAwait(false);
-            if (existingManifest is not null)
+            if (existingManifest is { IsCompleted: true })
             {
                 progress?.Report($"Reusing existing run: {existingRun.Directory}");
                 return new AnalyzeResult(existingRun, existingManifest, Reused: true);
+            }
+
+            if (existingManifest is not null)
+            {
+                progress?.Report($"Existing run {existingRun.Id} has status '{existingManifest.Status}' (failed at {existingManifest.Failure?.Stage ?? "unknown stage"}); re-running.");
             }
         }
 
         if (!request.Force && request.UseCache && string.IsNullOrWhiteSpace(request.RunId) && cacheKey is not null && artifactStore.TryGetCachedRun(cacheKey, out var cachedRun))
         {
             var cachedManifest = await artifactStore.ReadJsonAsync<ArtifactManifest>(cachedRun, "manifest.json", cancellationToken).ConfigureAwait(false);
-            if (cachedManifest is not null)
+            if (cachedManifest is { IsCompleted: true })
             {
                 progress?.Report($"Reusing cached run: {cachedRun.Directory}");
                 return new AnalyzeResult(cachedRun, cachedManifest, Reused: true);
@@ -58,13 +65,155 @@ public sealed class AnalysisPipeline
         var run = artifactStore.CreateRun(request.Source, request.RunId);
         var warnings = new List<ReplayWarning>();
         var timings = new RunTimings();
+        var state = new RunProgressState();
+
+        progress?.Report($"Run directory: {run.Directory}");
+        await artifactStore.WriteJsonAsync(run, "request.json", request, cancellationToken).ConfigureAwait(false);
+
+        try
+        {
+            return await AnalyzeCoreAsync(request, run, cacheKey, isLocalFile, localPath, warnings, timings, state, progress, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex) when (ex is not AnalysisPartialException)
+        {
+            // Whatever reached disk before the failing stage is still valuable (three of the
+            // user-reported "failed" runs had a usable transcript.md + metadata.json). Describe it
+            // in manifest.json with status partial/failed and the failing stage, then surface the
+            // failure with the manifest attached so CLI/MCP callers can return it.
+            var manifest = await TryWriteFailureManifestAsync(request, run, warnings, timings, state, ex, progress).ConfigureAwait(false);
+            if (manifest is null || ex is OperationCanceledException || ex is MissingDependencyException)
+            {
+                throw;
+            }
+
+            throw new AnalysisPartialException(BuildPartialFailureMessage(run, manifest, ex), ex, run, manifest);
+        }
+    }
+
+    /// <summary>
+    /// Mutable view of what the pipeline has produced so far, maintained by
+    /// <see cref="AnalyzeCoreAsync"/> so a failure manifest can be written from outside it.
+    /// </summary>
+    private sealed class RunProgressState
+    {
+        public string Stage { get; set; } = RunStages.Probe;
+        public YtDlpInfo? Info { get; set; }
+        public TranscriptArtifact? Transcript { get; set; }
+        public IReadOnlyList<FrameArtifact> Frames { get; set; } = [];
+        public string? AudioPath { get; set; }
+        public string? OcrPath { get; set; }
+        public string? VisionPath { get; set; }
+    }
+
+    private async Task<ArtifactManifest?> TryWriteFailureManifestAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        List<ReplayWarning> warnings,
+        RunTimings timings,
+        RunProgressState state,
+        Exception cause,
+        IProgress<string>? progress)
+    {
+        try
+        {
+            var cancelled = cause is OperationCanceledException;
+            var hasUsableArtifacts = state.Transcript is not null || state.Frames.Count > 0 || state.AudioPath is not null;
+            // Wrapped causes (e.g. the metadata-probe guidance around a ProcessFailedException)
+            // still expose the subprocess evidence: walk the chain for the most specific one.
+            var subprocess = EnumerateCauses(cause).FirstOrDefault(e => e is ProcessTimeoutException or ProcessFailedException);
+            var failure = new RunFailure(
+                Stage: state.Stage,
+                Message: cancelled ? "The run was cancelled before it completed." : cause.Message,
+                ExceptionType: (subprocess ?? cause).GetType().Name,
+                Hint: subprocess is ProcessTimeoutException timeout ? timeout.Hint
+                    : subprocess is ProcessFailedException failed ? SubprocessDiagnostics.SuggestHint(failed.StandardError)
+                    : null,
+                OutputTail: subprocess is ProcessTimeoutException t && t.OutputTail.Length > 0 ? t.OutputTail
+                    : subprocess is ProcessFailedException f && !string.IsNullOrWhiteSpace(f.StandardError) ? ProcessTimeoutException.Tail(f.StandardError)
+                    : null,
+                Cancelled: cancelled);
+
+            var info = state.Info;
+            var manifest = new ArtifactManifest(
+                SchemaVersion: ManifestSchemaVersion,
+                Source: request.Source,
+                VisionInstruction: request.VisionInstruction,
+                OcrInstruction: request.OcrInstruction,
+                CreatedAt: DateTimeOffset.UtcNow,
+                RunId: run.Id,
+                Title: info?.Title,
+                WebpageUrl: info?.WebpageUrl,
+                Duration: info?.DurationSeconds is { } seconds ? Timestamp.Format(seconds) : null,
+                AudioPath: state.AudioPath,
+                TranscriptPath: state.Transcript is null ? null : Path.GetRelativePath(run.Directory, state.Transcript.MarkdownPath).Replace('\\', '/'),
+                OcrPath: state.OcrPath,
+                VisionPath: state.VisionPath,
+                EvidencePath: null,
+                Frames: state.Frames,
+                Warnings: warnings,
+                Timings: timings.ToArtifact(),
+                Status: hasUsableArtifacts ? RunStatuses.Partial : RunStatuses.Failed,
+                Failure: failure);
+
+            // The caller's token may already be cancelled; the manifest write must not be.
+            await artifactStore.WriteJsonAsync(run, "manifest.json", manifest, CancellationToken.None).ConfigureAwait(false);
+            progress?.Report($"Wrote manifest.json with status '{manifest.Status}' (failed during '{state.Stage}').");
+            return manifest;
+        }
+        catch (Exception writeFailure)
+        {
+            progress?.Report($"Could not write the failure manifest: {writeFailure.Message}");
+            return null;
+        }
+    }
+
+    private static IEnumerable<Exception> EnumerateCauses(Exception exception)
+    {
+        for (var current = exception; current is not null; current = current.InnerException)
+        {
+            yield return current;
+        }
+    }
+
+    private static string BuildPartialFailureMessage(VideoRun run, ArtifactManifest manifest, Exception cause)
+    {
+        var kept = new List<string>();
+        if (manifest.TranscriptPath is not null)
+        {
+            kept.Add($"transcript ({manifest.TranscriptPath})");
+        }
+        if (manifest.Frames.Count > 0)
+        {
+            kept.Add($"{manifest.Frames.Count} frame(s)");
+        }
+        if (manifest.AudioPath is not null)
+        {
+            kept.Add("audio");
+        }
+
+        var keptText = kept.Count == 0 ? "no usable artifacts" : string.Join(", ", kept);
+        return $"Analysis stopped during stage '{manifest.Failure?.Stage}': {cause.Message}{Environment.NewLine}" +
+               $"Kept: {keptText}. manifest.json has status '{manifest.Status}' at {run.Directory}.";
+    }
+
+    internal const string ManifestSchemaVersion = "0.9";
+
+    private async Task<AnalyzeResult> AnalyzeCoreAsync(
+        AnalyzeRequest request,
+        VideoRun run,
+        string? cacheKey,
+        bool isLocalFile,
+        string localPath,
+        List<ReplayWarning> warnings,
+        RunTimings timings,
+        RunProgressState state,
+        IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
         ILlmProvider? llm = null;
         string? audioPath = null;
         string? ocrPath = null;
         string? visionPath = null;
-
-        progress?.Report($"Run directory: {run.Directory}");
-        await artifactStore.WriteJsonAsync(run, "request.json", request, cancellationToken).ConfigureAwait(false);
 
         YtDlpInfo info;
         using (timings.Measure(RunTimingStages.Probe))
@@ -74,7 +223,9 @@ public sealed class AnalysisPipeline
                 : await ResolveUrlMetadataAsync(request, warnings, progress, cancellationToken).ConfigureAwait(false);
             info.AvailableSubtitleLanguages = BuildAvailableSubtitleLanguages(info);
         }
+        state.Info = info;
         await artifactStore.WriteJsonAsync(run, "metadata.json", info, cancellationToken).ConfigureAwait(false);
+        state.Stage = RunStages.Captions;
 
         TranscriptArtifact? transcript = null;
         ReplayWarning? missingTranscriptWarning = null;
@@ -101,6 +252,7 @@ public sealed class AnalysisPipeline
             await artifactStore.WriteJsonAsync(run, "transcript/normalization.json", transcriptNormalization.Report, cancellationToken).ConfigureAwait(false);
             await File.WriteAllTextAsync(transcript.MarkdownPath, TranscriptNormalizer.ToMarkdown(transcriptNormalization.Segments), cancellationToken).ConfigureAwait(false);
             transcript = transcript with { Segments = transcriptNormalization.Segments };
+            state.Transcript = transcript;
         }
 
         if (request.IncludeTranscript)
@@ -171,6 +323,7 @@ public sealed class AnalysisPipeline
 
         if (!isLocalFile && (request.FrameCount > 0 || request.ExtractAudio || request.UseSpeechToText))
         {
+            state.Stage = RunStages.MediaUrl;
             progress?.Report(isLocalFile ? "Using local media path for ffmpeg..." : "Resolving direct media URL for ffmpeg...");
             mediaSource = await ytDlp.GetBestMediaUrlAsync(request, cancellationToken).ConfigureAwait(false);
             if (mediaSource is null)
@@ -200,6 +353,7 @@ public sealed class AnalysisPipeline
 
         if (mediaSource is not null && (request.ExtractAudio || (request.UseSpeechToText && transcript is null)))
         {
+            state.Stage = RunStages.Audio;
             progress?.Report("Extracting audio with ffmpeg...");
             try
             {
@@ -226,10 +380,12 @@ public sealed class AnalysisPipeline
                     audioPath = await ffmpeg.ExtractAudioAsync(fallbackMedia, run, cancellationToken).ConfigureAwait(false);
                 }
             }
+            state.AudioPath = audioPath;
         }
 
         if (request.UseSpeechToText && transcript is null)
         {
+            state.Stage = RunStages.Stt;
             using var sttScope = timings.Measure(RunTimingStages.Stt);
             if (audioPath is null)
             {
@@ -297,6 +453,7 @@ public sealed class AnalysisPipeline
 
         if (request.UseDiarization)
         {
+            state.Stage = RunStages.Diarization;
             using var diarizationScope = timings.Measure(RunTimingStages.Diarization);
             var diarization = await TryRunDiarizationAsync(request, run, audioPath, transcript, warnings, progress, cancellationToken).ConfigureAwait(false);
             if (diarization is { Count: > 0 } && transcript?.Segments is { Count: > 0 } segmentsToAttribute)
@@ -307,6 +464,7 @@ public sealed class AnalysisPipeline
                 // late normalization pass rewrote transcript.md from the un-annotated segments.
                 var attributed = DiarizationMerger.Merge(segmentsToAttribute, diarization);
                 transcript = transcript with { Segments = attributed };
+                state.Transcript = transcript;
                 await File.WriteAllTextAsync(transcript.MarkdownPath, TranscriptNormalizer.ToMarkdown(attributed), cancellationToken).ConfigureAwait(false);
                 progress?.Report($"Diarization attributed {diarization.Count} speaker segment(s) across {diarization.Select(s => s.SpeakerId).Distinct().Count()} speaker(s).");
             }
@@ -322,6 +480,7 @@ public sealed class AnalysisPipeline
         SessionMetadata? sessionMetadata = null;
         if (requestedFrameCount > 0 || isSceneStrategy)
         {
+            state.Stage = RunStages.Frames;
             using var framesScope = timings.Measure(RunTimingStages.Frames);
             // STT-fallback decision: enable browser-side media URL collection only when we
             // need audio AND none has been resolved yet (i.e. the StorageState / yt-dlp paths
@@ -445,6 +604,8 @@ public sealed class AnalysisPipeline
         }
         // Suppress unused-variable warning when browserCaptureAttempted is purely diagnostic.
         _ = browserCaptureAttempted;
+        state.Frames = frames;
+        state.Stage = RunStages.BrowserCaptions;
 
         if (browserDiscoveredCaptions.Count > 0)
         {
@@ -478,15 +639,20 @@ public sealed class AnalysisPipeline
 
         if (frames.Count > 0)
         {
+            state.Stage = RunStages.SmartCrop;
             frames = ApplySmartCrop(frames, run, request, warnings, progress);
+            state.Frames = frames;
         }
 
         if (frames.Count > 0)
         {
+            state.Stage = RunStages.Hashes;
             progress?.Report("Computing perceptual hashes for frames...");
             frames = await ComputeFrameHashesAsync(frames, run, warnings, cancellationToken).ConfigureAwait(false);
+            state.Frames = frames;
         }
 
+        state.Stage = RunStages.Slides;
         var slideOptions = ResolveSlideGroupingOptions(request);
         IReadOnlyList<SlideArtifact> slides;
         using (timings.Measure(RunTimingStages.Slides))
@@ -524,6 +690,7 @@ public sealed class AnalysisPipeline
         var ocrResults = new List<OcrFrameResult>();
         if (effectiveUseOcr && primarySlides.Length > 0)
         {
+            state.Stage = RunStages.Ocr;
             using var ocrScope = timings.Measure(RunTimingStages.Ocr);
             var ocrProviderName = OcrProviderFactory.Normalize(request.OcrProvider);
             IOcrProvider? ocrProvider = null;
@@ -579,6 +746,7 @@ public sealed class AnalysisPipeline
                     {
                         ocrPath = "ocr/combined.md";
                         await artifactStore.WriteTextAsync(run, ocrPath, FormatOcr(ocrResults), cancellationToken).ConfigureAwait(false);
+                        state.OcrPath = ocrPath;
                     }
                 }
             }
@@ -591,6 +759,7 @@ public sealed class AnalysisPipeline
         var visionResults = new List<VisionFrameResult>();
         if (request.UseVision && primarySlides.Length > 0)
         {
+            state.Stage = RunStages.Vision;
             using var visionScope = timings.Measure(RunTimingStages.Vision);
             var visionProviderName = VisionProviderFactory.Normalize(request.VisionProvider);
             IVisionProvider? visionProvider = null;
@@ -677,6 +846,7 @@ public sealed class AnalysisPipeline
 
                     visionPath = "vision/combined.md";
                     await artifactStore.WriteTextAsync(run, visionPath, FormatVision(visionResults), cancellationToken).ConfigureAwait(false);
+                    state.VisionPath = visionPath;
                 }
             }
             finally
@@ -704,6 +874,7 @@ public sealed class AnalysisPipeline
             Warnings: warnings);
 
         var evidenceMarkdown = BuildEvidenceIndexMarkdown(request, info, audioPath, transcript, frames, ocrPath, visionPath, warnings);
+        state.Stage = RunStages.Evidence;
         using (timings.Measure(RunTimingStages.Evidence))
         {
             await artifactStore.WriteTextAsync(run, "evidence.md", evidenceMarkdown, cancellationToken).ConfigureAwait(false);
@@ -715,8 +886,9 @@ public sealed class AnalysisPipeline
             }
         }
 
+        state.Stage = RunStages.ManifestWrite;
         var manifest = new ArtifactManifest(
-            SchemaVersion: "0.8",
+            SchemaVersion: ManifestSchemaVersion,
             Source: request.Source,
             VisionInstruction: request.VisionInstruction,
             OcrInstruction: request.OcrInstruction,
@@ -1974,18 +2146,28 @@ public sealed class AnalysisPipeline
             var allowFallback = captureModeHint == CaptureModes.Browser || captureModeHint == CaptureModes.Auto;
             if (!allowFallback)
             {
+                // A missing yt-dlp is not a "this site needs browser capture" problem: keep the
+                // dedicated exception so the CLI renders the install guidance and exits with 2.
+                if (ex is MissingDependencyException)
+                {
+                    throw;
+                }
+
                 // yt-dlp couldn't resolve the URL and the caller didn't permit a browser
                 // fallback, so the run can't proceed. Surface an actionable error instead of
                 // letting the raw ProcessFailedException (a wall of yt-dlp stderr) bubble up:
                 // the most common cause is a JS-rendered / auth-gated player (SharePoint Stream,
                 // Microsoft Medius, Teams, custom portals) that yt-dlp can't reach but browser
                 // capture can. Preserve the original exception as InnerException for diagnostics.
+                var hint = ex is ProcessFailedException failed ? SubprocessDiagnostics.SuggestHint(failed.StandardError) : null;
                 throw new ReplayException(
                     $"yt-dlp could not resolve metadata for '{request.Source}'. " +
                     $"If this is a JS-rendered or auth-gated player (SharePoint Stream, Microsoft " +
                     $"Medius, Teams, or a custom enterprise portal), retry with `--capture-mode browser` " +
                     $"(add `--auth-profile <name>` or run `auth init-edge-profile` first for sign-in-gated " +
-                    $"sources). Original yt-dlp error: {ex.Message.Trim()}",
+                    $"sources). Original yt-dlp error: {ex.Message.Trim()}" +
+                    (ex is ProcessFailedException { StandardError: { Length: > 0 } stderr } ? $"{Environment.NewLine}{ProcessTimeoutException.Tail(stderr, 5)}" : string.Empty) +
+                    (hint is null ? string.Empty : $"{Environment.NewLine}Hint: {hint}"),
                     ex);
             }
 

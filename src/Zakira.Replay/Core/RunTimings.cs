@@ -156,3 +156,28 @@ public static class RunTimingStages
     public const string Evidence = "evidence";
     public const string ManifestWrite = "manifest-write";
 }
+
+/// <summary>
+/// Stage names recorded in <c>manifest.failure.stage</c> when a run stops early. Superset of
+/// <see cref="RunTimingStages"/>: it adds the steps that are not timed on their own but are
+/// common failure points (media URL resolution, media download, browser captions, hashing).
+/// </summary>
+public static class RunStages
+{
+    public const string Probe = RunTimingStages.Probe;
+    public const string Captions = RunTimingStages.Captions;
+    public const string MediaUrl = "media-url";
+    public const string MediaDownload = "media-download";
+    public const string Audio = RunTimingStages.Audio;
+    public const string Stt = RunTimingStages.Stt;
+    public const string Diarization = RunTimingStages.Diarization;
+    public const string Frames = RunTimingStages.Frames;
+    public const string BrowserCaptions = "browser-captions";
+    public const string SmartCrop = RunTimingStages.SmartCrop;
+    public const string Hashes = "hashes";
+    public const string Slides = RunTimingStages.Slides;
+    public const string Ocr = RunTimingStages.Ocr;
+    public const string Vision = RunTimingStages.Vision;
+    public const string Evidence = RunTimingStages.Evidence;
+    public const string ManifestWrite = RunTimingStages.ManifestWrite;
+}

@@ -277,7 +277,37 @@ public sealed record ArtifactManifest(
     IReadOnlyList<ReplayWarning> Warnings,
     RunTimingsArtifact? Timings = null,
     IReadOnlyList<SecondaryTranscriptArtifact>? SecondaryTranscripts = null,
-    SessionMetadata? SessionMetadata = null);
+    SessionMetadata? SessionMetadata = null,
+    string Status = RunStatuses.Completed,
+    RunFailure? Failure = null)
+{
+    /// <summary>True when every stage ran; the artifact set is complete (warnings may still be present).</summary>
+    [JsonIgnore]
+    public bool IsCompleted => string.Equals(Status, RunStatuses.Completed, StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(Status);
+}
+
+/// <summary>
+/// Outcome of a run as recorded in <c>manifest.status</c>. A pipeline exception no longer means
+/// "no manifest": whatever was produced before the failing stage is described by a manifest
+/// with status <see cref="Partial"/> (something usable exists - transcript, frames or audio) or
+/// <see cref="Failed"/> (nothing beyond request/metadata), and <c>manifest.failure</c> names the
+/// stage and cause. Only <see cref="Completed"/> manifests are reused by run-id/cache lookups.
+/// </summary>
+public static class RunStatuses
+{
+    public const string Completed = "completed";
+    public const string Partial = "partial";
+    public const string Failed = "failed";
+}
+
+/// <summary>Why and where a run stopped early. <see cref="OutputTail"/> carries the last lines a timed-out subprocess printed.</summary>
+public sealed record RunFailure(
+    string Stage,
+    string Message,
+    string ExceptionType,
+    string? Hint = null,
+    string? OutputTail = null,
+    bool Cancelled = false);
 
 public sealed record FrameArtifact(
     string Id,

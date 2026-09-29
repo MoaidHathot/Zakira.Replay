@@ -108,6 +108,16 @@ public sealed class BatchRunner
                         // item that was actively yanked.
                         throw;
                     }
+                    catch (AnalysisPartialException partial)
+                    {
+                        // Still a failed item, but point at the run directory holding the
+                        // partial manifest (transcript/frames that were produced).
+                        resultSlots[index] = new BatchItemResult(item.Source, false, partial.Run.Id, partial.Run.Directory, partial.Message);
+                        if (!manifest.ContinueOnError)
+                        {
+                            stopCts.Cancel();
+                        }
+                    }
                     catch (Exception ex)
                     {
                         resultSlots[index] = new BatchItemResult(item.Source, false, null, null, ex.Message);

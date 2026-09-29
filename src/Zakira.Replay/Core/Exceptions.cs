@@ -69,6 +69,32 @@ public sealed class ProcessFailedException : ReplayException
 }
 
 /// <summary>
+/// Thrown when the analysis pipeline failed part-way but a manifest describing the artifacts
+/// produced so far was written (<c>manifest.status</c> is <c>partial</c> or <c>failed</c>).
+/// Callers keep failure semantics (non-zero exit, failed/partial job) while still getting the
+/// run directory and manifest - the transcript, frames and metadata that exist are reachable
+/// without browsing the filesystem. <see cref="Exception.InnerException"/> is the original cause.
+/// </summary>
+public sealed class AnalysisPartialException : ReplayException
+{
+    public AnalysisPartialException(string message, Exception cause, VideoRun run, ArtifactManifest manifest)
+        : base(message, cause)
+    {
+        Run = run;
+        Manifest = manifest;
+    }
+
+    public VideoRun Run { get; }
+
+    public ArtifactManifest Manifest { get; }
+
+    /// <summary>True when something usable (transcript, frames or audio) survived.</summary>
+    public bool HasUsableArtifacts => string.Equals(Manifest.Status, RunStatuses.Partial, StringComparison.OrdinalIgnoreCase);
+
+    public AnalyzeResult ToResult() => new(Run, Manifest);
+}
+
+/// <summary>
 /// Thrown when a subprocess exceeded its wall-clock budget and was killed. Unlike a plain
 /// "timed out" message this carries everything the process printed before it was stopped, so
 /// the caller can tell a YouTube bot-check / HTTP 429 / missing-JS-runtime stall apart from a

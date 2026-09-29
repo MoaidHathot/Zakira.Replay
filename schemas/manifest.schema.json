@@ -11,12 +11,11 @@
     "ocrInstruction",
     "createdAt",
     "runId",
-    "evidencePath",
     "frames",
     "warnings"
   ],
   "properties": {
-    "schemaVersion": { "type": "string", "const": "0.8" },
+    "schemaVersion": { "type": "string", "enum": ["0.8", "0.9"] },
     "source": { "type": "string", "minLength": 1 },
     "visionInstruction": { "type": "string" },
     "ocrInstruction": { "type": "string" },
@@ -72,9 +71,34 @@
         { "type": "null" },
         { "$ref": "#/$defs/sessionMetadata" }
       ]
+    },
+    "status": {
+      "description": "Run outcome. completed: every stage ran (warnings may still be present). partial: the pipeline stopped early but something usable exists (transcript, frames or audio). failed: the pipeline stopped early with nothing beyond request/metadata. Absent in manifests written before 0.9 (treat as completed). Only completed manifests are reused by run-id/cache lookups.",
+      "type": "string",
+      "enum": ["completed", "partial", "failed"]
+    },
+    "failure": {
+      "description": "Why and where the run stopped early. Null/absent for completed runs.",
+      "anyOf": [
+        { "type": "null" },
+        { "$ref": "#/$defs/runFailure" }
+      ]
     }
   },
   "$defs": {
+    "runFailure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["stage", "message", "exceptionType"],
+      "properties": {
+        "stage": { "type": "string", "minLength": 1, "description": "Pipeline stage that was running: probe, captions, media-url, media-download, audio, stt, diarization, frames, browser-captions, smart-crop, hashes, slides, ocr, vision, evidence, manifest-write." },
+        "message": { "type": "string" },
+        "exceptionType": { "type": "string" },
+        "hint": { "type": ["string", "null"], "description": "Remediation hint when the failure matches a known signature (bot check, HTTP 429, missing JS runtime, stale yt-dlp)." },
+        "outputTail": { "type": ["string", "null"], "description": "Last lines a failed or timed-out subprocess printed." },
+        "cancelled": { "type": "boolean" }
+      }
+    },
     "sessionMetadata": {
       "type": "object",
       "additionalProperties": false,

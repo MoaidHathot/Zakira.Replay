@@ -132,7 +132,7 @@ public sealed class ReplayTools
         while (!cancellationToken.IsCancellationRequested)
         {
             var snapshot = job.Snapshot(includeLogs: true);
-            if (snapshot.Status is "succeeded" or "failed" or "cancelled")
+            if (snapshot.Status is "succeeded" or "failed" or "cancelled" or "partial")
             {
                 return Serialize(snapshot);
             }
@@ -211,7 +211,7 @@ public sealed class ReplayTools
     {
         var job = jobManager.Get(jobId) ?? throw new McpException($"Unknown jobId: {jobId}");
         var snapshot = job.Snapshot(includeLogs: true);
-        if (snapshot.Status is not ("succeeded" or "failed" or "cancelled"))
+        if (snapshot.Status is not ("succeeded" or "failed" or "cancelled" or "partial"))
         {
             return Serialize(new
             {

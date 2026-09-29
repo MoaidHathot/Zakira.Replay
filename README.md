@@ -1302,7 +1302,7 @@ MCP exposes both a blocking compatibility tool and non-blocking job tools (all `
 - `analyze`: starts analysis and waits for completion. Use only for short videos.
 - `analyze-start`: starts analysis in the background and returns a `jobId`.
 - `analyze-status`: returns status and recent logs.
-- `analyze-result`: returns the completed manifest and artifact directory.
+- `analyze-result`: returns the completed manifest and artifact directory. When the pipeline stopped early the job status is `partial` (something usable was produced) or `failed`, and the snapshot still carries `runId`, `artifactDirectory` and the `manifest` (with `status` + `failure`) next to `error` — the transcript and frames that exist are returned, not hidden behind a bare error string.
 - `analyze-cancel`: cancels a running job.
 - `clip` / `frames`: extracts a timestamped video clip / ad-hoc stills.
 - `index-build`: builds a local search index over a completed run. Optional `backend` values are `json`, `sqlite`, and `sqlite-onnx`; pass `onnxModel`, `onnxModelKind`, `onnxModelPath`, and `onnxTokenizerPath` to control the embedding model for `sqlite-onnx`.
@@ -1356,7 +1356,7 @@ Each analyzed video run writes a folder under `runs/` containing:
 
 - `request.json`: original source, instruction, transcript flag, frame count, and optional run ID.
 - `metadata.json`: source metadata resolved from the URL or local file, including `availableSubtitleLanguages` when the source advertises any.
-- `manifest.json`: stable index of produced artifacts, structured warnings, and per-stage wall-clock timings under `timings.totalSeconds` + `timings.stages.{probe,captions,audio,stt,diarization,frames,slides,ocr,vision,evidence,...}`.
+- `manifest.json`: stable index of produced artifacts, structured warnings, and per-stage wall-clock timings under `timings.totalSeconds` + `timings.stages.{probe,captions,audio,stt,diarization,frames,slides,ocr,vision,evidence,...}`. `status` is `completed`, `partial` (the pipeline stopped early but a transcript, frames or audio exist) or `failed`; early stops also carry `failure.{stage,message,exceptionType,hint,outputTail,cancelled}`, so a run that died resolving media still tells you where its transcript is. Only `completed` manifests are reused by run-id/cache lookups; the CLI exits non-zero for partial/failed runs but prints (or, with `--output-format json`, emits) the artifact locations.
 - `evidence.json`: structured evidence for downstream agents/orchestrators, including per-slide grouping, per-speaker registry, and structured warnings.
 - `transcript.md`: normalized timestamped transcript when captions or sidecar subtitles are available; `[Speaker Name]` prefixes are inserted when the source carries speaker tags.
 - `transcript/raw.md` and `transcript/raw.json`: raw parsed transcript before normalization.

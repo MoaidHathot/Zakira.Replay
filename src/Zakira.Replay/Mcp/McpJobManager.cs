@@ -211,8 +211,22 @@ public sealed class McpJob
         McpJobState state;
         lock (gate)
         {
-            Error = DescribeFailure(ex);
-            Status = McpJobStatus.Failed;
+            if (ex is AnalysisPartialException partial)
+            {
+                // Keep the failure visible (status partial/failed + error) but attach the run
+                // directory and manifest so analyze-result returns the transcript/frames that
+                // were produced instead of forcing the agent to browse the filesystem.
+                Result = partial.ToResult();
+                Status = partial.HasUsableArtifacts ? McpJobStatus.Partial : McpJobStatus.Failed;
+                Error = DescribeFailure(partial.InnerException ?? partial) + Environment.NewLine +
+                    $"Stopped during stage '{partial.Manifest.Failure?.Stage}'. manifest.json status: {partial.Manifest.Status}.";
+            }
+            else
+            {
+                Error = DescribeFailure(ex);
+                Status = McpJobStatus.Failed;
+            }
+
             CompletedAt = DateTimeOffset.UtcNow;
             state = StateUnsafe();
             onChanged?.Invoke(state);
@@ -335,7 +349,14 @@ public enum McpJobStatus
     Running,
     Succeeded,
     Failed,
-    Cancelled
+    Cancelled,
+
+    /// <summary>
+    /// The pipeline stopped early but left usable artifacts (transcript, frames or audio); the
+    /// snapshot carries both <c>error</c> and the partial <c>manifest</c> (status <c>partial</c>).
+    /// Terminal, like <see cref="Failed"/>.
+    /// </summary>
+    Partial
 }
 
 public sealed record McpJobSnapshot(

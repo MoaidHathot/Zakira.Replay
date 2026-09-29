@@ -1713,6 +1713,38 @@ public static class CliApp
             stderr.WriteLine("Error: operation cancelled.");
             return 130;
         }
+        catch (AnalysisPartialException ex)
+        {
+            // Failure exit code, but the partial run is described on the normal output channel:
+            // JSON callers get the same envelope shape (status partial/failed + failure block),
+            // text callers get the artifact locations so nothing has to be found by browsing.
+            stderr.WriteLine($"Error: {ex.Message}");
+            if (isJson)
+            {
+                stdout.WriteLine(JsonSerializer.Serialize(BuildAnalyzeJsonEnvelope(ex.ToResult(), ex.InnerException?.Message ?? ex.Message), CliJson.Options));
+            }
+            else if (verbosity != CliVerbosity.Quiet)
+            {
+                stdout.WriteLine();
+                stdout.WriteLine($"Run status: {ex.Manifest.Status} (stopped during '{ex.Manifest.Failure?.Stage}')");
+                stdout.WriteLine($"  Artifacts: {ex.Run.Directory}");
+                stdout.WriteLine($"  Manifest:  {ex.Run.GetPath("manifest.json")}");
+                if (ex.Manifest.TranscriptPath is not null)
+                {
+                    stdout.WriteLine($"  Transcript: {ex.Run.GetPath(ex.Manifest.TranscriptPath)}");
+                }
+                if (ex.Manifest.Frames.Count > 0)
+                {
+                    stdout.WriteLine($"  Frames: {ex.Manifest.Frames.Count}");
+                }
+                if (ex.Manifest.Failure?.Hint is { } hint)
+                {
+                    stdout.WriteLine($"  Hint: {hint}");
+                }
+            }
+
+            return 1;
+        }
         catch (ReplayException ex)
         {
             stderr.WriteLine($"Error: {ex.Message}");
@@ -1812,11 +1844,12 @@ public static class CliApp
     /// with that documentation. `null` fields are preserved (not omitted) so consumers can
     /// rely on a stable property set.
     /// </summary>
-    internal static object BuildAnalyzeJsonEnvelope(AnalyzeResult result)
+    internal static object BuildAnalyzeJsonEnvelope(AnalyzeResult result, string? error = null)
     {
         return new
         {
             runId = result.Run.Id,
+            status = result.Manifest.Status,
             reused = result.Reused,
             artifactDirectory = result.Run.Directory,
             manifestPath = result.Run.GetPath("manifest.json"),
@@ -1830,7 +1863,9 @@ public static class CliApp
             webpageUrl = result.Manifest.WebpageUrl,
             duration = result.Manifest.Duration,
             source = result.Manifest.Source,
-            warnings = result.Manifest.Warnings
+            warnings = result.Manifest.Warnings,
+            failure = result.Manifest.Failure,
+            error
         };
     }
 

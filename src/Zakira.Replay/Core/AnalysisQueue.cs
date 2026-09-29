@@ -114,7 +114,7 @@ public sealed class AnalysisQueue
                 else
                 {
                     job.Error = outcome.Error ?? "Unknown queue job failure.";
-                    job.AttemptHistory.Add(new AnalysisQueueJobAttempt(job.Attempts, job.StartedAt ?? completedAt, completedAt, AnalysisQueueJobStatuses.Failed, null, null, job.Error));
+                    job.AttemptHistory.Add(new AnalysisQueueJobAttempt(job.Attempts, job.StartedAt ?? completedAt, completedAt, AnalysisQueueJobStatuses.Failed, outcome.PartialRun?.Id, outcome.PartialRun?.Directory, job.Error));
                     if (job.Attempts < job.MaxAttempts)
                     {
                         job.Status = AnalysisQueueJobStatuses.Pending;
@@ -156,6 +156,12 @@ public sealed class AnalysisQueue
         {
             var result = await pipelineFactory().AnalyzeAsync(job.Request, progress: null, cancellationToken).ConfigureAwait(false);
             return new AnalysisQueueJobOutcome(job, result, null);
+        }
+        catch (AnalysisPartialException partial)
+        {
+            // Failure semantics are kept (the attempt is recorded as failed and retried), but the
+            // run directory that holds the partial manifest is surfaced on the attempt.
+            return new AnalysisQueueJobOutcome(job, null, partial.Message, partial.Run);
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
@@ -229,7 +235,7 @@ public sealed class AnalysisQueue
         }
     }
 
-    private sealed record AnalysisQueueJobOutcome(AnalysisQueueJob Job, AnalyzeResult? Result, string? Error);
+    private sealed record AnalysisQueueJobOutcome(AnalysisQueueJob Job, AnalyzeResult? Result, string? Error, VideoRun? PartialRun = null);
 }
 
 public sealed class AnalysisQueueState

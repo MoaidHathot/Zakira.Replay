@@ -7,6 +7,147 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.17.0] — Partial runs, one yt-dlp pass, contact sheets, transcript quality
+
+Driven by a field report from agents running Replay against cooking videos and YouTube Shorts.
+Every item was verified against the code and against the run artifacts under `runs/` before
+being changed; several of the fixes are for bugs the report had not spotted. Manifest schema
+moves to 0.9 (additive) and `transcript/normalization.json` to 0.2 (additive).
+
+### Fixed
+
+- **Job snapshots, queues, indexes and batch folders ignored `runs.directory`.** They resolved
+  their root with `config: null`, so only the env var was honoured and `<cwd>/runs/.mcp/jobs`
+  appeared in whatever directory the MCP server was started from (README already described
+  the intended behaviour). Every sidecar directory now follows the configured runs root.
+- **Subprocess timeouts threw away the evidence.** `ProcessRunner` discarded the stdout/stderr it
+  had captured and threw a bare `Process timed out after 00:05:00`. It now drains the pipes after
+  the kill and throws `ProcessTimeoutException`, whose message embeds the last 20 output lines
+  and a remediation hint for known signatures (YouTube bot check → cookies, HTTP 429 → rate
+  limited, `nsig extraction failed` / `n challenge` → install deno or node, `Unable to extract`
+  → update yt-dlp). The same hint is appended to non-zero-exit failures in CLI output and MCP
+  job errors.
+- **`transcript.md` was written raw and only normalized after the frame stage**, so every run
+  that died resolving media shipped the rolling YouTube captions with each phrase two or three
+  times. Normalization now happens as soon as a transcript exists (captions, STT, browser
+  captions), and diarization attributes the in-memory segments instead of a markdown round trip
+  that the late normalization pass silently discarded.
+- **Phantom speakers from auto-captions.** Prose containing a colon (`yogurt has two
+  ingredients: milk and`) and bracketed sound annotations (`[snorts]`) were promoted to speakers,
+  polluting `evidence.speakers[]` and blocking normalizer merges (speaker changes are hard
+  boundaries). New `SpeakerLabelHeuristics`: labels must be name-shaped (1–4 capitalised words,
+  `SPEAKER_01`, `@1`), sound annotations stay in the text, and `Name: text` is trusted only when
+  some label recurs in the document. Shared with the markdown re-parser used by STT/diarization.
+- **Words lost at every transcript merge boundary.** The normalizer tokenised
+  case-insensitively but located the append point with a case-sensitive ASCII regex, so any
+  capitalised word inside an overlap shifted the index: `I spent 3 weeks` became `I 3 weeks`,
+  `Today` became `oday`, `American` became `merican`. Non-Latin captions produced no tokens and
+  never merged at all. The regex is now `[\p{L}\p{N}]+` and the cut keeps opening punctuation.
+- **`ResolveUrlMetadataAsync` swallowed `MissingDependencyException`** into "retry with
+  `--capture-mode browser`" (wrong guidance, lost exit code 2). It now rethrows it and appends
+  the yt-dlp stderr tail + hint to its wrapped error.
+- **`capture.allowMediaDownload` was documented but not settable** through `config set`.
+- **MCP `frames` had no `allowMediaDownload` switch and no browser fallback** (DI omitted the
+  browser client the CLI wired in), so Medius/Build sources that worked from the CLI failed
+  over MCP.
+
+### Added
+
+- **Partial manifests.** A pipeline exception no longer means "no `manifest.json`".
+  `manifest.status` is `completed` | `partial` (a transcript, frames or audio exist) | `failed`,
+  and early stops carry `manifest.failure.{stage, message, exceptionType, hint, outputTail,
+  cancelled}` with stage names from `RunStages` (`probe`, `captions`, `media-url`,
+  `media-download`, `audio`, `stt`, `diarization`, `frames`, `browser-captions`, `smart-crop`,
+  `hashes`, `slides`, `ocr`, `vision`, `evidence`, `manifest-write`). Only `completed`
+  manifests are reused by run-id/cache lookups. MCP jobs gain a terminal `partial` status whose
+  snapshot carries `runId`, `artifactDirectory`, `manifest` and `error` together; the CLI exits 1
+  but prints (text) or emits (`--output-format json`: `status`, `failure`, `error`) the
+  artifact locations. Batch items and queue attempts record the run directory of a partial
+  failure. `evidencePath` is no longer `required` in the manifest schema.
+- **`timeouts.*` config section.** Every yt-dlp/ffmpeg/ffprobe budget was hardcoded; they are
+  now `timeouts.ytDlpMetadataSeconds` (300), `ytDlpSubtitlesSeconds` (600),
+  `ytDlpMediaUrlSeconds` (300), `ytDlpDownloadSeconds` (1800), `ffmpegFrameSeconds` (180),
+  `ffmpegPassSeconds` (900), `ffmpegAudioSeconds` (600), `ffmpegClipSeconds` (600, re-encode
+  fallback gets 2×), `ffprobeSeconds` (120) and `dependencyCheckSeconds` (60 — up from a
+  hardcoded 15 s that produced false "not runnable" reports for a cold self-extracting
+  `yt-dlp.exe` under antivirus scanning).
+- **One yt-dlp extractor pass per run.** The metadata probe's verbatim dump is persisted as
+  `yt-dlp.info.json` and handed to the caption, direct-URL and download steps with
+  `--load-info-json`, instead of three separate extractions (each a fresh chance for a bot
+  check or 429). Signed URLs carry `expire=`; a stale dump is skipped and the step falls back to
+  a live extraction (yt-dlp itself re-extracts when caption URLs have expired — verified with
+  2026.08.19). The subtitle pass is skipped when the dump advertises no caption tracks.
+  `frames` and `clip` reuse a dump found in their run folder.
+- **`frames --run <id>` / MCP `runId` without `source`.** Captures from an existing run reuse its
+  source, `media/source.*` when downloaded, the yt-dlp dump for `-g`, and the recorded duration
+  instead of a remote ffprobe — seconds instead of a fresh resolution. New MCP tools
+  `frames-start` / `frames-status` / `frames-result` / `frames-cancel` (persisted under
+  `<runs>/.mcp/frame-jobs`, restart-safe) so remote captures no longer hold the MCP request open.
+- **Short sources are fetched once.** `capture.autoDownloadMaxDurationSeconds` (default 900; 0
+  disables) and `capture.autoDownloadMinFrames` (default 4): a URL source no longer than the
+  threshold is downloaded once (reusing the dump) before audio/frames, and every seek is local.
+  Every frame capture was a separate ffmpeg process re-opening the signed remote URL, so 15
+  frames from a 2-minute Short meant 15 remote opens. New info warnings `MEDIA_AUTO_DOWNLOADED`
+  (with size) and `MEDIA_AUTO_DOWNLOAD_FAILED` (falls back to the URL).
+- **Contact sheets.** `zakira-replay sheet <run-id>`, `analyze --sheet` and the MCP `sheet` tool
+  tile every frame of a run (analyze frames + ad-hoc captures, de-duplicated, chronological) into
+  grid JPEGs under `sheets/` with a burned-in `#index timestamp` label per cell, plus
+  `contact-sheet.json` mapping each cell to frame id, path and timestamp — 98 frames reviewed in
+  two image reads. One ffmpeg pass per sheet (concat → scale/pad → sendcmd+drawtext → tile).
+  Without `drawtext` or a font the sheet renders unlabelled with
+  `CONTACT_SHEET_LABELS_UNAVAILABLE`; the legend stays authoritative. Options: `--cols`,
+  `--thumb-width`, `--thumb-height`, `--max-rows`, `--from`/`--to`, `--no-labels`, `--name`.
+- **Doctor: versions, staleness, JS runtime, real diagnoses.** yt-dlp/ffmpeg/ffprobe rows show
+  their version; a yt-dlp release older than 60 days gets an update hint (dated versions; YouTube
+  breaks old releases within weeks); a new `js-runtime` row reports deno/node/bun on PATH
+  (yt-dlp needs one for YouTube's player challenges); a found-but-not-runnable binary keeps the
+  first three output lines and maps known signatures to a fix — e.g. a `yt-dlp.exe` blocked by
+  an application-control policy (`Failed to load Python DLL … An Application Control policy has
+  blocked this file`) → use `pip install yt-dlp` and set `yt-dlp.path`. JSON output gains
+  `version` and `advice` per dependency.
+- **`manifest.sourceDetails`** (URL sources): `description`, `uploader`/`channel`, ISO
+  `uploadDate`, view/like/comment counts, `tags`, `categories`, creator `chapters[]` (`title`,
+  `startSeconds`, `startLabel`), and — with `--comments top|all` (CLI) / `comments` (MCP
+  `analyze`, `analyze-start`) — up to 20 top-level comments ordered pinned → uploader-authored →
+  likes, text capped at 2000 characters, full capture in `comments/comments.json`. Comments are
+  fetched by the metadata probe (`--write-comments` + a capped `youtube:max_comments` preset),
+  so opting in costs no extra extractor pass.
+- **Sharpness-aware interval picking.** `frames.sharpness` = `auto` (default: on for local
+  media — local paths and downloaded/auto-downloaded sources — off for remote URLs), `on`, or
+  `off`; `frames.sharpnessWindowSeconds` (1.0) and `frames.sharpnessCandidates` (3). Each
+  interval/timestamp capture samples the candidates across ±window in the same ffmpeg process
+  (JPEGs plus a 160×90 grayscale scoring stream) and keeps the highest variance of Laplacian;
+  ties within 5% keep the exact instant. `FrameArtifact` gains `sharpnessScore` and
+  `requestedTimestampSeconds` (manifest, evidence and frame-capture schemas updated).
+- **`ocr/steps.json` + `ocr/steps.md`** (`manifest.ocrStepsPath`): the deduplicated on-screen
+  text timeline — each distinct OCR line once with first/last seen, occurrence count and frame
+  ids; near-duplicates across frames are folded even with OCR noise (token Jaccard, character
+  similarity, containment) and a reappearing overlay more than 90 s later is a new entry. For
+  narration-free videos whose instructions are overlays this is the transcript.
+
+### Changed
+
+- **Rolling captions are re-segmented at sentence ends.** With merges working, a continuous
+  monologue collapsed into one segment spanning the whole video; the normalizer now opens a new
+  segment at a sentence end once a segment exceeds ~8 s (hard cap 20 s without punctuation),
+  carrying the trailing words of the cue into it. A 13-minute monologue: 725 raw cues → 97
+  sentence-aligned segments with no lost or duplicated words (previously 41 segments with
+  truncations and two phantom speakers). `transcript/normalization.json` gains `splitCount`
+  (schema 0.2).
+- **Test suite isolation.** Tests now pin `ZAKIRA_REPLAY_CONFIG_PATH` to a scratch file for the
+  whole run; previously any test resolving the runs root through config wrote batch/queue/job
+  artifacts into the developer's real configured runs directory.
+
+### Notes for orchestrators
+
+- Check `manifest.status` before treating a run as complete; a `partial` run's `transcript.md`
+  is normalized and usable even when frames never happened.
+- `capture.autoDownloadMaxDurationSeconds` defaults to on (15 min). It changes bandwidth
+  behaviour for short sources; set it to `0` to keep the previous per-frame remote seeks.
+- Strict validators need the updated `schemas/` — manifest 0.9 adds `status`, `failure`,
+  `sourceDetails`, `ocrStepsPath` and per-frame `sharpnessScore` / `requestedTimestampSeconds`,
+  and drops `evidencePath` from `required`.
+
 ## [0.16.0] — Frames from YouTube again: bounded range requests for remote inputs
 
 Frame capture from yt-dlp direct URLs (YouTube in particular) had silently degraded to zero

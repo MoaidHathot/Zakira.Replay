@@ -50,7 +50,7 @@ public sealed class ArtifactStore
     /// <summary>
     /// Resolves the runs root for callers that don't have a DI-provided <see cref="ArtifactStore"/>
     /// at hand (CLI helper commands, static path resolution). Loads the user config best-effort so
-    /// <c>runs.directory</c> is honoured here too: before 0.16.1 this helper passed
+    /// <c>runs.directory</c> is honoured here too: before 0.17.0 this helper passed
     /// <c>config: null</c>, which made every sidecar directory it fed (<c>.mcp/jobs</c>,
     /// <c>.queue</c>, <c>.indexes</c>, batch folders) land under <c>&lt;cwd&gt;/runs</c> while the
     /// pipeline itself wrote to the configured root.

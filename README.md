@@ -1497,6 +1497,23 @@ dotnet test Zakira.Replay.slnx
 
 The ffmpeg integration test generates a tiny fixture at runtime and skips automatically when `ffmpeg` or `ffprobe` is unavailable.
 
+### Publishing to NuGet.org
+
+Publishing a **GitHub Release** runs [the publish workflow](.github/workflows/publish-nuget.yml) on the tagged commit. It runs CI on Windows, Linux and macOS, then publishes the resulting `.nupkg` and `.snupkg` using [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing). Only the publish job can request a short-lived key; no NuGet API key is stored in GitHub.
+
+**One-time setup:** In GitHub → Settings → Environments, use `nuget.org`, allow deployment tags matching `v*`, and set its Actions variable `NUGET_USER` to the NuGet **profile name** that creates the policy (`MoaidHathot` for this package). In [NuGet.org → Trusted Publishing](https://www.nuget.org/account/trustedpublishing), add a GitHub Actions policy with these values:
+
+| Field | Value |
+|---|---|
+| Package owner | `MoaidHathot` |
+| Package scope | Push new versions of existing packages; package pattern `Zakira.Replay` |
+| GitHub repository owner | `MoaidHathot` |
+| GitHub repository | `Zakira.Replay` |
+| Workflow file | `publish-nuget.yml` (filename only) |
+| Environment | `nuget.org` |
+
+**For each release:** Update `VersionPrefix` in `Directory.Build.props`, the package release notes, and `CHANGELOG.md`. Publish a GitHub Release from that commit with the tag `v<package-version>` (for example, `v0.17.1` for package `0.17.1`). Pushing the commit or tag alone does not publish. A mismatched tag fails before NuGet login; after a transient push failure, re-run the failed job to retry the same artifacts.
+
 ## License
 
 Zakira.Replay is released under the [MIT License](LICENSE).

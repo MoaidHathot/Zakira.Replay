@@ -87,17 +87,22 @@ public sealed class DiagnosticsService
         var reports = new List<DoctorDependencyReport>();
         foreach (var status in dependencies.GetAllStatuses())
         {
-            string? runnable = null;
+            string? error = null;
             string? version = null;
-            if (status.IsFound)
+            if (status.Path is not null && status.Name is ("yt-dlp" or "ffmpeg" or "ffprobe"))
             {
-                (runnable, version) = await TryCheckRunnableAsync(status, processRunner, checkTimeout, cancellationToken).ConfigureAwait(false);
+                (error, version) = await DependencyVersionProbe.RunAsync(status.Name, status.Path, processRunner, checkTimeout, cancellationToken).ConfigureAwait(false);
             }
 
-            var advice = runnable is not null
-                ? DoctorAdvice.ForRunnableError(status.Name, runnable)
+            var advice = error is not null
+                ? DoctorAdvice.ForRunnableError(status.Name, error)
                 : status.Name == "yt-dlp" ? DoctorAdvice.ForYtDlpVersion(version, DateTimeOffset.UtcNow) : null;
-            reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, string.IsNullOrWhiteSpace(runnable), status.Path, status.Source, status.Message, runnable, version, advice));
+            if (status.Name == "yt-dlp" && !status.IsFound && status.Source is null && config.Dependencies.AutoDownload)
+            {
+                advice = "Auto-download is enabled: the first operation that needs yt-dlp will install it. To check it now, run `zakira-replay deps install yt-dlp` and re-run doctor.";
+            }
+
+            reports.Add(new DoctorDependencyReport(status.Name, status.IsFound, status.IsFound && error is null, status.Path, status.Source, status.Message, error, version, advice));
         }
 
         reports.Add(await BuildJsRuntimeReportAsync(checkTimeout, cancellationToken).ConfigureAwait(false));
@@ -128,24 +133,7 @@ public sealed class DiagnosticsService
                 continue;
             }
 
-            string? version = null;
-            string? error = null;
-            try
-            {
-                var result = await processRunner.RunAsync(path, ["--version"], timeout: checkTimeout, cancellationToken: cancellationToken).ConfigureAwait(false);
-                if (result.ExitCode == 0)
-                {
-                    version = FirstLine(result.StandardOutput + result.StandardError);
-                }
-                else
-                {
-                    error = FirstLines(result.StandardError + result.StandardOutput, 3);
-                }
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                error = ex.Message;
-            }
+            var (error, version) = await DependencyVersionProbe.RunAsync(runtime, path, processRunner, checkTimeout, cancellationToken).ConfigureAwait(false);
 
             return new DoctorDependencyReport(
                 "js-runtime",
@@ -459,47 +447,6 @@ public sealed class DiagnosticsService
                 RunnableError: "daemon unreachable");
         }
     }
-
-    private static async Task<(string? Error, string? Version)> TryCheckRunnableAsync(DependencyStatus status, ProcessRunner runner, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        if (string.IsNullOrWhiteSpace(status.Path) || status.Name is not ("yt-dlp" or "ffmpeg" or "ffprobe"))
-        {
-            return (null, null);
-        }
-
-        var args = status.Name == "yt-dlp" ? new[] { "--version" } : new[] { "-version" };
-        try
-        {
-            var result = await runner.RunAsync(status.Path, args, timeout: timeout, cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (result.ExitCode == 0)
-            {
-                return (null, DoctorAdvice.ParseVersionLine(status.Name, FirstLine(result.StandardOutput + result.StandardError)));
-            }
-
-            // Keep a few lines: the diagnosis is often on the second one ("[PYI-110600:ERROR]
-            // Failed to load Python DLL" / "An Application Control policy has blocked this file").
-            return (FirstLines(result.StandardError + result.StandardOutput, 3), null);
-        }
-        catch (ProcessTimeoutException)
-        {
-            return ($"did not answer `{args[0]}` within {timeout.TotalSeconds:0}s (raise timeouts.dependencyCheckSeconds if this machine starts it slowly; antivirus scanning of a self-extracting yt-dlp.exe is a common cause)", null);
-        }
-        catch (Exception ex) when (ex is not OperationCanceledException)
-        {
-            return (ex.Message, null);
-        }
-    }
-
-    private static string FirstLine(string value)
-    {
-        return value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "unknown error";
-    }
-
-    private static string FirstLines(string value, int count)
-    {
-        var lines = value.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).Take(count).ToArray();
-        return lines.Length == 0 ? "unknown error" : string.Join(" | ", lines);
-    }
 }
 
 /// <summary>
@@ -603,13 +550,13 @@ public static class DoctorAdvice
             || error.Contains("AppLocker", StringComparison.OrdinalIgnoreCase))
         {
             return dependencyName == "yt-dlp"
-                ? "An application-control policy blocks the self-extracting yt-dlp.exe (PyInstaller unpacks a Python DLL under %TEMP% and the policy refuses to load it). Use a Python-based install instead - `pip install yt-dlp` and point `yt-dlp.path` at the resulting yt-dlp.exe in Python's Scripts folder - or have the policy allow-list the yt-dlp extraction directory."
+                ? "An application-control policy blocked yt-dlp or one of its DLLs. For a single-file build, run `zakira-replay deps install yt-dlp --force` and clear any yt-dlp path override to use the Windows directory build. If that build is also blocked, ask your administrator for an approved installation."
                 : "An application-control policy blocks this executable. Install it through a channel your policy trusts (winget/MSI) and point the matching *.path config key at it.";
         }
 
-        if (error.Contains("Failed to load Python DLL", StringComparison.OrdinalIgnoreCase))
+        if (dependencyName == "yt-dlp" && error.Contains("Failed to load Python DLL", StringComparison.OrdinalIgnoreCase))
         {
-            return "yt-dlp.exe could not unpack its embedded Python runtime (blocked or read-only %TEMP%). Try `pip install yt-dlp` and set `yt-dlp.path` to the Scripts\\yt-dlp.exe it installs.";
+            return "yt-dlp could not load its bundled Python runtime. Run `zakira-replay deps install yt-dlp --force` to install the complete Windows directory build; clear any yt-dlp path override to use it.";
         }
 
         if (error.Contains("did not answer", StringComparison.OrdinalIgnoreCase))

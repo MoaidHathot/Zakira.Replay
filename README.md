@@ -222,6 +222,30 @@ Zakira.Replay resolves dependency paths in this order:
 
 Portable installs are opt-in. Run `zakira-replay deps install media` to install portable `yt-dlp`, `ffmpeg`, and `ffprobe` into the configured portable directory, `zakira-replay deps install onnx` to download the ONNX search model files, `zakira-replay deps install ocr [--language <pack>]` to download a RapidOCR PP-OCRv5 language pack for the local OCR provider (default `latin`; other packs: `chinese`, `english`, `korean`, `cyrillic`, `arabic`, `devanagari`, `greek`, `telugu`, `tamil`), `zakira-replay deps install whisper-model [--whisper-model <size>]` to download a Whisper ggml model for the `--llm-provider local-whisper` STT path, or `zakira-replay deps install diarization` to download the pyannote-segmentation-3.0 and 3D-Speaker ONNX models used by the `--diarize` flag. `zakira-replay deps install` defaults to `media`; use `all` to install media tools, ONNX search models, the configured OCR language pack, the default Whisper model, and the diarization models.
 
+### Shared Windows config for yt-dlp
+
+Leave `ytDlpPath` unset to use Replay's portable installer. This `Zakira.Replay.json` works across user profiles without a separate Python or uv installation:
+
+```json
+{
+  "dependencies": {
+    "autoDownload": true,
+    "portableDirectory": "%LOCALAPPDATA%\\Zakira.Replay\\portable"
+  }
+}
+```
+
+The first operation that needs a missing yt-dlp installs the [official Windows directory build](https://github.com/yt-dlp/yt-dlp#release-files) for the OS architecture (x64, ARM64, or x86). Its executable and bundled Python runtime stay together under `<portableDirectory>\yt-dlp\`. Replay runs `--version` there before reporting a successful install. `doctor` only checks what is installed; to verify a fresh machine before analyzing a video, run:
+
+```powershell
+zakira-replay deps install yt-dlp
+zakira-replay doctor
+```
+
+The same install command migrates a legacy `<portableDirectory>\yt-dlp.exe`: the new directory build takes precedence and the old file is left intact. Use `deps install yt-dlp --force` to update or repair the directory build. Its DLLs no longer need to load from `%TEMP%\_MEI…`; application control must still permit the executable and DLLs in the install directory.
+
+If you prefer a separately managed executable, `dependencies.ytDlpPath` (CLI key `yt-dlp.path`) can contain a literal such as `"%APPDATA%\\tools\\yt-dlp.exe"`. `config set`/`get` preserve `%VAR%` references; Replay expands them when locating the executable. An explicit missing path is reported rather than silently replaced by an automatic download.
+
 ### What `doctor` checks
 
 `zakira-replay doctor` runs each binary's `--version` (budget: `timeouts.dependencyCheckSeconds`, default 60 s — a cold self-extracting `yt-dlp.exe` under antivirus scanning regularly exceeded the old 15 s and produced false "not runnable" reports) and reports:
@@ -229,7 +253,7 @@ Portable installs are opt-in. Run `zakira-replay deps install media` to install 
 - the **version** of yt-dlp / ffmpeg / ffprobe next to each `ok` row;
 - **yt-dlp staleness**: releases are dated (`2026.08.19`); one older than 60 days gets an update hint, because YouTube changes break older releases within weeks (missing formats, bot checks, `-g` stalls) — the most common real-world cause of "yt-dlp timed out";
 - a **`js-runtime`** row: current yt-dlp needs deno (recommended), node or bun on `PATH` to solve YouTube's player challenges; missing means degraded YouTube support and the row says how to install one;
-- **why** a found binary does not start: the first three lines of its output plus a concrete fix for known signatures, e.g. a `yt-dlp.exe` blocked by an application-control policy (`Failed to load Python DLL … An Application Control policy has blocked this file`) → use `pip install yt-dlp` and point `yt-dlp.path` at it.
+- **why** a found binary does not start: the exit code and first three lines of a failed probe's output, plus a next step for known signatures. For a blocked single-file `yt-dlp.exe`, install the Windows directory build as above. If that build is also blocked, use an installation approved by your administrator.
 
 `--output-format json` carries the same data as `version` / `advice` fields per dependency.
 

@@ -139,6 +139,9 @@ public sealed class ProcessTimeoutTests
     public async Task YtDlpAndFfmpegClientsUseConfiguredTimeouts()
     {
         using var temp = new TestTempDirectory();
+        using var ytDlpOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_YTDLP_PATH", null);
+        using var ffmpegOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_FFMPEG_PATH", null);
+        using var ffprobeOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_FFPROBE_PATH", null);
         var fakeYtDlp = temp.GetPath("fake-yt-dlp.exe");
         var fakeFfmpeg = temp.GetPath("fake-ffmpeg.exe");
         var fakeFfprobe = temp.GetPath("fake-ffprobe.exe");

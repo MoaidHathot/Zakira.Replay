@@ -17,46 +17,19 @@ public sealed class DependencyResolver
     /// <summary>Subprocess wall-clock budgets from the resolved config (<c>timeouts.*</c>).</summary>
     public TimeoutsConfig Timeouts => config.Timeouts ?? new TimeoutsConfig();
 
-    public DependencyStatus GetYtDlpStatus() => GetExecutableStatus("yt-dlp", "ZAKIRA_REPLAY_YTDLP_PATH", config.Dependencies.YtDlpPath);
+    public DependencyStatus GetYtDlpStatus() => GetExecutableStatus("yt-dlp", config.Dependencies.YtDlpPath, "ZAKIRA_REPLAY_YTDLP_PATH");
 
-    public DependencyStatus GetFfmpegStatus() => GetExecutableStatus("ffmpeg", "ZAKIRA_REPLAY_FFMPEG_PATH", config.Dependencies.FfmpegPath);
+    public DependencyStatus GetFfmpegStatus() => GetExecutableStatus("ffmpeg", config.Dependencies.FfmpegPath, "ZAKIRA_REPLAY_FFMPEG_PATH");
 
-    public DependencyStatus GetFfprobeStatus() => GetExecutableStatus("ffprobe", "ZAKIRA_REPLAY_FFPROBE_PATH", config.Dependencies.FfprobePath);
+    public DependencyStatus GetFfprobeStatus() => GetExecutableStatus("ffprobe", config.Dependencies.FfprobePath, "ZAKIRA_REPLAY_FFPROBE_PATH");
 
-    public DependencyStatus GetCopilotCliStatus()
-    {
-        // Primary env var follows the ZAKIRA_REPLAY_* convention; also honour the SDK's own
-        // COPILOT_CLI_PATH so users who already set it keep working. Both are checked before the
-        // config path / portable dir / PATH ladder in GetExecutableStatus.
-        foreach (var envVarName in new[] { "ZAKIRA_REPLAY_COPILOT_CLI_PATH", "COPILOT_CLI_PATH" })
-        {
-            var configured = Environment.GetEnvironmentVariable(envVarName);
-            if (!string.IsNullOrWhiteSpace(configured))
-            {
-                return File.Exists(configured)
-                    ? DependencyStatus.Found("copilot", configured, envVarName)
-                    : DependencyStatus.Missing("copilot", $"{envVarName} is set but does not exist: {configured}", envVarName);
-            }
-        }
-
-        return GetExecutableStatus("copilot", "ZAKIRA_REPLAY_COPILOT_CLI_PATH", config.Dependencies.CopilotCliPath);
-    }
+    public DependencyStatus GetCopilotCliStatus() => GetExecutableStatus("copilot", config.Dependencies.CopilotCliPath, "ZAKIRA_REPLAY_COPILOT_CLI_PATH", "COPILOT_CLI_PATH");
 
     public DependencyStatus GetEdgeStatus()
     {
-        var configured = Environment.GetEnvironmentVariable("ZAKIRA_REPLAY_EDGE_PATH");
-        if (!string.IsNullOrWhiteSpace(configured))
+        if (GetExplicitStatus("edge", config.Dependencies.EdgePath, "ZAKIRA_REPLAY_EDGE_PATH") is { } status)
         {
-            return File.Exists(configured)
-                ? DependencyStatus.Found("edge", configured, "ZAKIRA_REPLAY_EDGE_PATH")
-                : DependencyStatus.Missing("edge", $"ZAKIRA_REPLAY_EDGE_PATH is set but does not exist: {configured}", "ZAKIRA_REPLAY_EDGE_PATH");
-        }
-
-        if (!string.IsNullOrWhiteSpace(config.Dependencies.EdgePath))
-        {
-            return File.Exists(config.Dependencies.EdgePath)
-                ? DependencyStatus.Found("edge", config.Dependencies.EdgePath, "config:edge.path")
-                : DependencyStatus.Missing("edge", $"configured edge.path does not exist: {config.Dependencies.EdgePath}", "config:edge.path");
+            return status;
         }
 
         foreach (var path in GetKnownEdgePaths())
@@ -103,7 +76,9 @@ public sealed class DependencyResolver
             return status.Path;
         }
 
-        if (config.Dependencies.AutoDownload && SupportsPortableDownload(dependency) && !IsExplicitMissing(status))
+        // A missing explicit path carries the config key or env var as its source. Only
+        // a miss after searching both portable and PATH is eligible for a download.
+        if (config.Dependencies.AutoDownload && SupportsPortableDownload(dependency) && status.Source is null)
         {
             installer.InstallAsync([dependency], force: false, progress: null, CancellationToken.None).GetAwaiter().GetResult();
             status = dependency switch
@@ -124,21 +99,34 @@ public sealed class DependencyResolver
         throw new MissingDependencyException(dependency, requiredFor, envVarName);
     }
 
-    private DependencyStatus GetExecutableStatus(string executableName, string envVarName, string? configuredPath)
+    private static DependencyStatus? GetExplicitStatus(string executableName, string? configuredPath, params string[] envVarNames)
     {
-        var configured = Environment.GetEnvironmentVariable(envVarName);
-        if (!string.IsNullOrWhiteSpace(configured))
+        foreach (var envVarName in envVarNames)
         {
-            return File.Exists(configured)
-                ? DependencyStatus.Found(executableName, configured, envVarName)
-                : DependencyStatus.Missing(executableName, $"{envVarName} is set but does not exist: {configured}", envVarName);
+            var value = Environment.GetEnvironmentVariable(envVarName);
+            if (!string.IsNullOrWhiteSpace(value))
+            {
+                return CheckPath(value, envVarName, $"{envVarName} is set but does not exist");
+            }
         }
 
-        if (!string.IsNullOrWhiteSpace(configuredPath))
+        return string.IsNullOrWhiteSpace(configuredPath) ? null
+            : CheckPath(configuredPath, $"config:{executableName}.path", $"configured {executableName}.path does not exist");
+
+        DependencyStatus CheckPath(string value, string source, string missingMessage)
         {
-            return File.Exists(configuredPath)
-                ? DependencyStatus.Found(executableName, configuredPath, $"config:{executableName}.path")
-                : DependencyStatus.Missing(executableName, $"configured {executableName}.path does not exist: {configuredPath}", $"config:{executableName}.path");
+            var path = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
+            return File.Exists(path)
+                ? DependencyStatus.Found(executableName, Path.GetFullPath(path), source)
+                : DependencyStatus.Missing(executableName, $"{missingMessage}: {path}", source);
+        }
+    }
+
+    private DependencyStatus GetExecutableStatus(string executableName, string? configuredPath, params string[] envVarNames)
+    {
+        if (GetExplicitStatus(executableName, configuredPath, envVarNames) is { } status)
+        {
+            return status;
         }
 
         var portablePath = installer.GetPortableExecutablePath(executableName);
@@ -151,13 +139,6 @@ public sealed class DependencyResolver
         return found is null
             ? DependencyStatus.Missing(executableName, $"{executableName} was not found in the portable directory or on PATH.", null)
             : DependencyStatus.Found(executableName, found, null);
-    }
-
-    private static bool IsExplicitMissing(DependencyStatus status)
-    {
-        return !string.IsNullOrWhiteSpace(status.Source)
-            && (status.Source.StartsWith("ZAKIRA_REPLAY_", StringComparison.OrdinalIgnoreCase)
-                || status.Source.StartsWith("config:", StringComparison.OrdinalIgnoreCase));
     }
 
     private static bool SupportsPortableDownload(string dependency)

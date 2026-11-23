@@ -7,6 +7,13 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.17.1] — Portable yt-dlp on Windows and shared dependency paths
+
+### Fixed
+
+- Shared Windows configs can use `%VAR%` in dependency executable paths. `config set` preserves the references in those paths and `dependencies.portableDirectory`; resolution expands them on the machine running Replay.
+- Windows installs the official yt-dlp directory ZIP for the OS architecture and verifies `--version` from the installed directory before reporting success. Python is bundled alongside the executable. To migrate a legacy single-file build, run `zakira-replay deps install yt-dlp`; `doctor` remains read-only.
+
 ## [0.17.0] — Partial runs, one yt-dlp pass, contact sheets, transcript quality
 
 Driven by a field report from agents running Replay against cooking videos and YouTube Shorts.

@@ -35,10 +35,10 @@ public sealed class PortableDependencyInstaller
     public const string DiarizationSegmentationFile = "pyannote-segmentation-3-0.onnx";
     public const string DiarizationEmbeddingFile = "3dspeaker_speech_eres2net_base_sv_zh-cn_3dspeaker_16k.onnx";
 
-    private const string YtDlpWindowsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp.exe";
-    private const string YtDlpLinuxX64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux";
-    private const string YtDlpLinuxArm64Url = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_linux_aarch64";
-    private const string YtDlpMacOsUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp_macos";
+    private const string YtDlpReleaseUrl = "https://github.com/yt-dlp/yt-dlp/releases/latest/download/";
+    private const string YtDlpLinuxX64Url = YtDlpReleaseUrl + "yt-dlp_linux";
+    private const string YtDlpLinuxArm64Url = YtDlpReleaseUrl + "yt-dlp_linux_aarch64";
+    private const string YtDlpMacOsUrl = YtDlpReleaseUrl + "yt-dlp_macos";
     private const string FfmpegWindowsX64Url = "https://github.com/BtbN/FFmpeg-Builds/releases/latest/download/ffmpeg-master-latest-win64-gpl.zip";
 
     // GitHub Copilot CLI (native, self-contained "copilot"/"copilot.exe"). Published per-platform on
@@ -71,11 +71,16 @@ public sealed class PortableDependencyInstaller
 
     private readonly ReplayConfig config;
     private readonly HttpClient httpClient;
+    private readonly ProcessRunner processRunner;
 
     public PortableDependencyInstaller(ReplayConfig? config = null, HttpClient? httpClient = null)
+        : this(config, httpClient, new ProcessRunner()) { }
+
+    internal PortableDependencyInstaller(ReplayConfig? config, HttpClient? httpClient, ProcessRunner processRunner)
     {
         this.config = config ?? new ConfigStore().Load();
         this.httpClient = httpClient ?? new HttpClient();
+        this.processRunner = processRunner;
         if (!this.httpClient.DefaultRequestHeaders.UserAgent.Any())
         {
             this.httpClient.DefaultRequestHeaders.UserAgent.ParseAdd($"Zakira.Replay/{ReplayVersion.Current}");
@@ -92,7 +97,18 @@ public sealed class PortableDependencyInstaller
 
     public string GetPortableExecutablePath(string executableName)
     {
-        return Path.Combine(Layout.PortableDirectory, GetExecutableFileName(executableName));
+        var portable = GetPortableDirectory(config);
+        var fileName = GetExecutableFileName(executableName);
+        var flatPath = Path.Combine(portable, fileName);
+        if (OperatingSystem.IsWindows() && fileName == "yt-dlp.exe" && GetWindowsYtDlpAsset(RuntimeInformation.OSArchitecture) is { } asset)
+        {
+            // Prefer the complete directory build; a pre-existing 0.17 single-file install
+            // remains usable until the next explicit install. Neither lookup nor doctor migrates it.
+            var bundledPath = Path.Combine(portable, YtDlp, asset.Executable);
+            return File.Exists(bundledPath) || !File.Exists(flatPath) ? bundledPath : flatPath;
+        }
+
+        return flatPath;
     }
 
     public string GetOnnxModelPath()
@@ -345,11 +361,90 @@ public sealed class PortableDependencyInstaller
 
     private async Task<PortableDependencyInstallItem> InstallYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        var url = GetYtDlpUrl();
+        if (OperatingSystem.IsWindows())
+        {
+            return await InstallWindowsYtDlpAsync(force, progress, cancellationToken).ConfigureAwait(false);
+        }
+
+        var url = GetUnixYtDlpUrl();
         var path = GetPortableExecutablePath(YtDlp);
         var installed = await DownloadFileAsync(url, path, force, progress, cancellationToken).ConfigureAwait(false);
         SetExecutableBit(path);
         return new PortableDependencyInstallItem(YtDlp, path, installed, url, installed ? "downloaded" : "already exists");
+    }
+
+    private async Task<PortableDependencyInstallItem> InstallWindowsYtDlpAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        // yt-dlp runs out of process: even an emulated Replay should download the native OS build.
+        var asset = GetWindowsYtDlpAsset(RuntimeInformation.OSArchitecture)
+            ?? throw new ReplayException($"Portable yt-dlp download is not supported on Windows {RuntimeInformation.OSArchitecture}. Configure yt-dlp.path with a compatible executable.");
+        var url = YtDlpReleaseUrl + asset.Archive;
+        var portable = GetPortableDirectory(config);
+        var destination = Path.Combine(portable, YtDlp);
+        var path = Path.Combine(destination, asset.Executable);
+        if (!force && File.Exists(path))
+        {
+            var existingVersion = await VerifyVersionAsync().ConfigureAwait(false);
+            return new PortableDependencyInstallItem(YtDlp, path, false, url, $"already exists ({existingVersion})");
+        }
+
+        var work = Directory.CreateDirectory(Path.Combine(portable, $".yt-dlp-{Guid.NewGuid():N}")).FullName;
+        var archive = Path.Combine(work, asset.Archive);
+        var bundle = Path.Combine(work, "bundle");
+        var backup = work + ".previous";
+        try
+        {
+            await DownloadFileAsync(url, archive, force: true, progress, cancellationToken).ConfigureAwait(false);
+            await ZipFile.ExtractToDirectoryAsync(archive, bundle, cancellationToken).ConfigureAwait(false);
+            if (!File.Exists(Path.Combine(bundle, asset.Executable)))
+            {
+                throw new ReplayException($"Downloaded {asset.Archive} did not contain {asset.Executable}.");
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            var replacing = Directory.Exists(destination);
+            if (replacing)
+            {
+                Directory.Move(destination, backup);
+            }
+
+            // Probe from the final path: application control can make a different decision in
+            // a staging directory. Restore the entire previous bundle if activation or probing fails.
+            var activated = false;
+            string version;
+            try
+            {
+                Directory.Move(bundle, destination);
+                activated = true;
+                version = await VerifyVersionAsync().ConfigureAwait(false);
+            }
+            catch
+            {
+                if (activated) Directory.Move(destination, bundle);
+                if (replacing) Directory.Move(backup, destination);
+                throw;
+            }
+
+            if (replacing) Directory.Delete(backup, recursive: true);
+            return new PortableDependencyInstallItem(YtDlp, path, true, url, $"downloaded ({version})");
+        }
+        finally
+        {
+            Directory.Delete(work, recursive: true);
+        }
+
+        async Task<string> VerifyVersionAsync()
+        {
+            var timeout = TimeoutsConfig.Resolve(config.Timeouts.DependencyCheckSeconds, 60);
+            var (error, version) = await DependencyVersionProbe.RunAsync(YtDlp, path, processRunner, timeout, cancellationToken).ConfigureAwait(false);
+            if (error is not null)
+            {
+                var advice = DoctorAdvice.ForRunnableError(YtDlp, error) ?? "To replace the bundle, run `zakira-replay deps install yt-dlp --force`.";
+                throw new ReplayException($"Portable yt-dlp at '{path}' failed `--version`: {error}. {advice}");
+            }
+
+            return version!;
+        }
     }
 
     private async Task<IReadOnlyList<PortableDependencyInstallItem>> InstallFfmpegAsync(bool force, IProgress<string>? progress, CancellationToken cancellationToken)
@@ -685,13 +780,17 @@ public sealed class PortableDependencyInstaller
         throw new ReplayException($"Downloaded Copilot CLI archive did not contain {executableName}.");
     }
 
-    private static string GetYtDlpUrl()
-    {
-        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+    internal static (string Archive, string Executable)? GetWindowsYtDlpAsset(Architecture architecture) =>
+        architecture switch
         {
-            return YtDlpWindowsUrl;
-        }
+            Architecture.X64 => ("yt-dlp_win.zip", "yt-dlp.exe"),
+            Architecture.Arm64 => ("yt-dlp_win_arm64.zip", "yt-dlp_arm64.exe"),
+            Architecture.X86 => ("yt-dlp_win_x86.zip", "yt-dlp_x86.exe"),
+            _ => null
+        };
 
+    private static string GetUnixYtDlpUrl()
+    {
         if (RuntimeInformation.IsOSPlatform(OSPlatform.Linux))
         {
             return RuntimeInformation.ProcessArchitecture == Architecture.Arm64 ? YtDlpLinuxArm64Url : YtDlpLinuxX64Url;

@@ -32,3 +32,18 @@ internal static class TestEnvironment
         Environment.SetEnvironmentVariable(Core.ArtifactStore.RunsDirectoryEnvironmentVariable, null);
     }
 }
+
+internal sealed class ScopedEnvironmentVariable : IDisposable
+{
+    private readonly string name;
+    private readonly string? previous;
+
+    public ScopedEnvironmentVariable(string name, string? value)
+    {
+        this.name = name;
+        previous = Environment.GetEnvironmentVariable(name);
+        Environment.SetEnvironmentVariable(name, value);
+    }
+
+    public void Dispose() => Environment.SetEnvironmentVariable(name, previous);
+}

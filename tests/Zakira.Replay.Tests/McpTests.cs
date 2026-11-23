@@ -273,8 +273,9 @@ public sealed class McpTests
         {
             var portable = temp.GetPath("portable");
             Directory.CreateDirectory(portable);
-            // Pre-create the binary so the installer takes the "already exists" path (no network).
-            var binaryName = OperatingSystem.IsWindows() ? "yt-dlp.exe" : "yt-dlp";
+            // Use a presence-only target to exercise the cached-install MCP envelope offline.
+            // A dummy yt-dlp.exe would (correctly) fail the Windows runnable check.
+            var binaryName = OperatingSystem.IsWindows() ? "copilot.exe" : "copilot";
             File.WriteAllBytes(Path.Combine(portable, binaryName), [1]);
 
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_CONFIG_PATH", temp.GetPath("Zakira.Replay.json"));
@@ -283,14 +284,14 @@ public sealed class McpTests
 
             var payload = await harness.CallAndParseAsync("deps-install", new Dictionary<string, object?>
             {
-                ["targets"] = "yt-dlp",
+                ["targets"] = "copilot-cli",
                 ["force"] = false
             });
 
             var items = payload.RootElement.GetProperty("items").EnumerateArray().ToArray();
-            var ytDlp = items.Single(i => i.GetProperty("name").GetString() == "yt-dlp");
-            Assert.False(ytDlp.GetProperty("installed").GetBoolean());
-            Assert.EndsWith(binaryName, ytDlp.GetProperty("path").GetString()!, StringComparison.OrdinalIgnoreCase);
+            var item = items.Single(i => i.GetProperty("name").GetString() == "copilot");
+            Assert.False(item.GetProperty("installed").GetBoolean());
+            Assert.EndsWith(binaryName, item.GetProperty("path").GetString()!, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {

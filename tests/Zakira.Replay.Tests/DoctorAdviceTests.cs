@@ -44,11 +44,12 @@ public sealed class DoctorAdviceTests
         var blocked = DoctorAdvice.ForRunnableError("yt-dlp", "[PYI-58304:ERROR] Failed to load Python DLL 'C:\\Users\\x\\AppData\\Local\\Temp\\_MEI1113842\\python310.dll'. | LoadLibrary: An Application Control policy has blocked this file.");
         Assert.NotNull(blocked);
         Assert.Contains("application-control policy", blocked, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("pip install yt-dlp", blocked);
+        Assert.Contains("deps install yt-dlp --force", blocked);
+        Assert.Contains("approved installation", blocked);
 
         var dll = DoctorAdvice.ForRunnableError("yt-dlp", "[PYI-1:ERROR] Failed to load Python DLL 'x.dll'.");
         Assert.NotNull(dll);
-        Assert.Contains("pip install yt-dlp", dll);
+        Assert.Contains("complete Windows directory build", dll);
 
         var slow = DoctorAdvice.ForRunnableError("yt-dlp", "did not answer `--version` within 60s (...)");
         Assert.NotNull(slow);
@@ -106,5 +107,25 @@ public sealed class DoctorAdviceTests
         {
             Assert.False(string.IsNullOrWhiteSpace(ffmpeg.Version), "a runnable ffmpeg must report its version");
         }
+    }
+
+    [Fact]
+    public async Task FreshAutoDownloadConfigReportsMissingYtDlpWithoutInstallingIt()
+    {
+        using var temp = new TestTempDirectory();
+        var portable = temp.GetPath("portable");
+        using var portableOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", portable);
+        using var ytDlpOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_YTDLP_PATH", null);
+        using var path = new ScopedEnvironmentVariable("PATH", temp.Path);
+        var store = new ConfigStore(temp.GetPath("config.json"));
+        await store.SetAsync("dependencies.autoDownload", "true", CancellationToken.None);
+
+        var report = await new DiagnosticsService(store).BuildDoctorReportAsync(CancellationToken.None);
+
+        var ytDlp = Assert.Single(report.Dependencies, d => d.Name == "yt-dlp");
+        Assert.False(ytDlp.IsFound);
+        Assert.False(ytDlp.IsRunnable);
+        Assert.Contains("deps install yt-dlp", ytDlp.Advice);
+        Assert.False(Directory.Exists(portable));
     }
 }

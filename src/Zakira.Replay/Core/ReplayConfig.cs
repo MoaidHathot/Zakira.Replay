@@ -80,7 +80,7 @@ public sealed class TimeoutsConfig
     public int FfprobeSeconds { get; set; } = 120;
 
     /// <summary>
-    /// <c>doctor</c>'s <c>--version</c> runnability probe for yt-dlp/ffmpeg/ffprobe. Default 60 s:
+    /// Version probe used by <c>doctor</c> and the Windows yt-dlp installer. Default 60 s:
     /// a cold PyInstaller start of yt-dlp.exe on Windows (self-extraction + antivirus scan)
     /// regularly exceeds the previous 15 s budget and produced false "not runnable" reports.
     /// </summary>
@@ -1157,7 +1157,7 @@ public sealed class ConfigStore
         switch (NormalizeKey(key))
         {
             case "yt-dlp.path":
-                config.Dependencies.YtDlpPath = NormalizeExecutablePath(value, "yt-dlp.exe");
+                config.Dependencies.YtDlpPath = NormalizeDependencyPath(value, "yt-dlp.exe");
                 break;
             case "dependencies.autodownload":
             case "dependencies.auto-download":
@@ -1166,7 +1166,7 @@ public sealed class ConfigStore
             case "dependencies.portabledirectory":
             case "dependencies.portable-directory":
             case "dependencies.directory":
-                config.Dependencies.PortableDirectory = NormalizeDirectoryPath(value);
+                config.Dependencies.PortableDirectory = NormalizeDependencyPath(value);
                 break;
             case "runs.directory":
             case "runs.dir":
@@ -1178,17 +1178,17 @@ public sealed class ConfigStore
                 config.Runs.Directory = NormalizePathPreservingEnvVars(value, key);
                 break;
             case "ffmpeg.path":
-                config.Dependencies.FfmpegPath = NormalizeExecutablePath(value, "ffmpeg.exe");
+                config.Dependencies.FfmpegPath = NormalizeDependencyPath(value, "ffmpeg.exe");
                 break;
             case "ffprobe.path":
-                config.Dependencies.FfprobePath = NormalizeExecutablePath(value, "ffprobe.exe");
+                config.Dependencies.FfprobePath = NormalizeDependencyPath(value, "ffprobe.exe");
                 break;
             case "edge.path":
-                config.Dependencies.EdgePath = NormalizeExecutablePath(value, "msedge.exe");
+                config.Dependencies.EdgePath = NormalizeDependencyPath(value, "msedge.exe");
                 break;
             case "copilot-cli.path":
             case "copilot.path":
-                config.Dependencies.CopilotCliPath = NormalizeExecutablePath(value, "copilot.exe");
+                config.Dependencies.CopilotCliPath = NormalizeDependencyPath(value, "copilot.exe");
                 break;
             case "search.onnx.modelpath":
             case "search.onnx.model-path":
@@ -1953,16 +1953,17 @@ public sealed class ConfigStore
         return key.Trim().ToLowerInvariant().Replace('_', '-');
     }
 
-    private static string NormalizeExecutablePath(string value, string executableName)
+    private static string NormalizeDependencyPath(string value, string? executableName = null)
     {
-        var expanded = Environment.ExpandEnvironmentVariables(value.Trim().Trim('"'));
-        var fullPath = Path.GetFullPath(expanded);
-        if (Directory.Exists(fullPath))
-        {
-            fullPath = Path.Combine(fullPath, executableName);
-        }
-
-        return fullPath;
+        var path = value.Trim().Trim('"');
+        // Anchor ordinary relative paths at set time as before. A %VAR% may only be
+        // defined on the machine that consumes this config; don't prepend this machine's cwd.
+        var firstPercent = path.IndexOf('%');
+        var hasVariable = firstPercent >= 0 && path.LastIndexOf('%') > firstPercent + 1;
+        var stored = hasVariable ? path : Path.GetFullPath(path);
+        return executableName is not null && Directory.Exists(Environment.ExpandEnvironmentVariables(stored))
+            ? Path.Combine(stored, executableName)
+            : stored;
     }
 
     private static string NormalizeFilePath(string value)

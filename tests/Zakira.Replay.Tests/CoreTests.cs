@@ -3,6 +3,7 @@ using Zakira.Replay.Cli;
 using System.Formats.Tar;
 using System.IO.Compression;
 using System.Net;
+using System.Runtime.InteropServices;
 
 namespace Zakira.Replay.Tests;
 
@@ -44,6 +45,43 @@ public sealed class CoreTests
         await store.SetAsync("yt_dlp.path", toolDirectory, CancellationToken.None);
 
         Assert.Equal(System.IO.Path.Combine(toolDirectory, "yt-dlp.exe"), await store.GetAsync("yt-dlp.path", CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task SharedDependencyPathsStayLiteralAndResolveOnEachMachine()
+    {
+        using var temp = new TestTempDirectory();
+        const string rootVariable = "REPLAY_TEST_APPDATA";
+        using var appData = new ScopedEnvironmentVariable(rootVariable, temp.GetPath("first profile"));
+        using var ytDlpOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_YTDLP_PATH", null);
+        using var portableOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", null);
+        var relativeExe = Path.Combine("tools", "yt-dlp.exe");
+        var literalExe = Path.Combine($"%{rootVariable}%", relativeExe);
+        var literalDirectory = Path.Combine($"%{rootVariable}%", "portable");
+        var store = new ConfigStore(temp.GetPath("config.json"));
+        await store.SetAsync("yt-dlp.path", literalExe, CancellationToken.None);
+        await store.SetAsync("dependencies.portableDirectory", literalDirectory, CancellationToken.None);
+        await store.SetAsync("dependencies.autoDownload", "true", CancellationToken.None);
+
+        var config = store.Load();
+        var resolver = new DependencyResolver(config);
+        foreach (var profile in new[] { "first profile", "second profile" })
+        {
+            Environment.SetEnvironmentVariable(rootVariable, temp.GetPath(profile));
+            Directory.CreateDirectory(temp.GetPath(profile, "tools"));
+            var exe = temp.GetPath(profile, relativeExe);
+            File.WriteAllText(exe, "");
+            Assert.Equal(exe, resolver.RequireYtDlp("test"));
+            Assert.Equal("config:yt-dlp.path", resolver.GetYtDlpStatus().Source);
+            Assert.Equal(temp.GetPath(profile, "portable"), new PortableDependencyInstaller(config).Layout.PortableDirectory);
+        }
+
+        Environment.SetEnvironmentVariable(rootVariable, temp.GetPath("missing"));
+        Assert.Contains(temp.GetPath("missing", relativeExe), resolver.GetYtDlpStatus().Message);
+        Assert.Throws<MissingDependencyException>(() => resolver.RequireYtDlp("test"));
+        Assert.False(Directory.Exists(temp.GetPath("missing", "portable")));
+        Assert.Equal(literalExe, await store.GetAsync("yt-dlp.path", CancellationToken.None));
+        Assert.Equal(literalDirectory, await store.GetAsync("dependencies.portableDirectory", CancellationToken.None));
     }
 
     [Fact]
@@ -444,6 +482,109 @@ public sealed class CoreTests
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL_DIRECTORY", previousOnnxModelDirectory);
             Environment.SetEnvironmentVariable("ZAKIRA_REPLAY_ONNX_MODEL", previousOnnxModel);
         }
+    }
+
+    [Theory]
+    [InlineData(Architecture.X64, "yt-dlp_win.zip", "yt-dlp.exe")]
+    [InlineData(Architecture.Arm64, "yt-dlp_win_arm64.zip", "yt-dlp_arm64.exe")]
+    [InlineData(Architecture.X86, "yt-dlp_win_x86.zip", "yt-dlp_x86.exe")]
+    [InlineData(Architecture.Arm, null, null)]
+    public void WindowsYtDlpUsesOfficialArchiveAndLauncherNames(Architecture architecture, string? archive, string? launcher)
+    {
+        var asset = PortableDependencyInstaller.GetWindowsYtDlpAsset(architecture);
+        Assert.Equal(archive, asset?.Archive);
+        Assert.Equal(launcher, asset?.Executable);
+    }
+
+    [SkippableFact]
+    public async Task WindowsYtDlpInstallMigratesLegacyPathAndVerifiesTheWholeBundleOnReuse()
+    {
+        Skip.IfNot(OperatingSystem.IsWindows());
+        using var temp = new TestTempDirectory();
+        using var portableOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", temp.Path);
+        using var ytDlpOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_YTDLP_PATH", null);
+        var asset = PortableDependencyInstaller.GetWindowsYtDlpAsset(RuntimeInformation.OSArchitecture)!.Value;
+        var legacy = temp.GetPath("yt-dlp.exe");
+        File.WriteAllText(legacy, "legacy");
+        var config = new ReplayConfig { Timeouts = new TimeoutsConfig { DependencyCheckSeconds = 17 } };
+        var resolver = new DependencyResolver(config);
+        Assert.Equal(legacy, resolver.RequireYtDlp("test"));
+
+        var path = temp.GetPath("yt-dlp", asset.Executable);
+        var dll = temp.GetPath("yt-dlp", "_internal", "python314.dll");
+        var handler = new RecordingHttpMessageHandler(_ => new ByteArrayContent(YtDlpZip(asset.Executable)));
+        using var http = new HttpClient(handler);
+        var runner = new FakeProcessRunner((file, args) =>
+        {
+            Assert.Equal(path, file);
+            Assert.Equal(["--version"], args);
+            return File.Exists(dll)
+                ? new ProcessResult(file, args, 0, "2026.10.26", "")
+                : new ProcessResult(file, args, 1, "", "Failed to load Python DLL");
+        });
+        var installer = new PortableDependencyInstaller(config, http, runner);
+        async Task<PortableDependencyInstallItem> Install() => Assert.Single((await installer.InstallAsync(["yt-dlp"], false, null, CancellationToken.None)).Items);
+
+        var installed = await Install();
+        Assert.True(installed.Installed);
+        Assert.Equal(path, installed.Path);
+        Assert.Equal("portable", resolver.GetYtDlpStatus().Source);
+        Assert.Equal(path, resolver.RequireYtDlp("test"));
+        Assert.Equal("legacy", File.ReadAllText(legacy));
+        Assert.True(File.Exists(temp.GetPath("yt-dlp", "_internal", "certifi", "cacert.pem")));
+        Assert.Equal(TimeSpan.FromSeconds(17), runner.LastTimeout);
+        Assert.False((await Install()).Installed);
+
+        File.Delete(dll);
+        var failure = await Assert.ThrowsAsync<ReplayException>(Install);
+        Assert.Contains("Failed to load Python DLL", failure.Message);
+        Assert.EndsWith("/" + asset.Archive, Assert.Single(handler.Requests).RequestUri!.AbsolutePath);
+    }
+
+    [SkippableTheory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task FailedWindowsYtDlpVersionCheckDoesNotLeaveOrReplaceAnInstall(bool hasPrevious)
+    {
+        Skip.IfNot(OperatingSystem.IsWindows());
+        using var temp = new TestTempDirectory();
+        using var portableOverride = new ScopedEnvironmentVariable("ZAKIRA_REPLAY_PORTABLE_DIRECTORY", temp.Path);
+        var launcher = PortableDependencyInstaller.GetWindowsYtDlpAsset(RuntimeInformation.OSArchitecture)!.Value.Executable;
+        var path = temp.GetPath("yt-dlp", launcher);
+        var dll = temp.GetPath("yt-dlp", "_internal", "python314.dll");
+        if (hasPrevious)
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(dll)!);
+            File.WriteAllText(path, "previous exe");
+            File.WriteAllText(dll, "previous DLL");
+        }
+
+        using var http = new HttpClient(new RecordingHttpMessageHandler(_ => new ByteArrayContent(YtDlpZip(launcher))));
+        var runner = new FakeProcessRunner((file, args) => new ProcessResult(file, args, 1, "", "Failed to load Python DLL\nAn Application Control policy has blocked this file."));
+        var installer = new PortableDependencyInstaller(new ReplayConfig(), http, runner);
+        var failure = await Assert.ThrowsAsync<ReplayException>(() => installer.InstallAsync(["yt-dlp"], true, null, CancellationToken.None));
+
+        Assert.Contains("--version", failure.Message);
+        Assert.Contains("An Application Control policy has blocked this file", failure.Message);
+        Assert.Equal(hasPrevious, Directory.Exists(temp.GetPath("yt-dlp")));
+        if (hasPrevious)
+        {
+            Assert.Equal("previous exe", File.ReadAllText(path));
+            Assert.Equal("previous DLL", File.ReadAllText(dll));
+        }
+        Assert.Empty(Directory.EnumerateDirectories(temp.Path, ".yt-dlp-*"));
+    }
+
+    private static byte[] YtDlpZip(string launcher)
+    {
+        using var stream = new MemoryStream();
+        using (var zip = new ZipArchive(stream, ZipArchiveMode.Create, leaveOpen: true))
+        {
+            zip.CreateEntry(launcher);
+            zip.CreateEntry("_internal/python314.dll");
+            zip.CreateEntry("_internal/certifi/cacert.pem");
+        }
+        return stream.ToArray();
     }
 
     [SkippableFact]
@@ -1623,6 +1764,7 @@ public sealed class CoreTests
     private sealed class FakeProcessRunner : ProcessRunner
     {
         private readonly Func<string, IReadOnlyList<string>, ProcessResult> handler;
+        public TimeSpan? LastTimeout { get; private set; }
 
         public FakeProcessRunner(Func<string, IReadOnlyList<string>, ProcessResult> handler)
         {
@@ -1636,6 +1778,7 @@ public sealed class CoreTests
             TimeSpan? timeout = null,
             CancellationToken cancellationToken = default)
         {
+            LastTimeout = timeout;
             var args = arguments.ToArray();
             return Task.FromResult(handler(fileName, args));
         }

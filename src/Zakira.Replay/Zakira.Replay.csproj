@@ -34,7 +34,7 @@
     <Description>Let LLMs and AI agents "watch" video. Zakira.Replay turns any video source — YouTube URLs, conference recordings, course lectures, local files — into speaker-attributed transcripts (captions or local Whisper STT), frame-level OCR and structured vision (local or LLM-routed), slide-aware grouping, and timestamped JSON evidence that agents can reason over. Ships as both a CLI (`zakira-replay`) and an MCP server (`zakira-replay mcp serve`) in one .NET 10 binary.</Description>
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <PackageTags>video llm agent mcp transcription evidence ffmpeg yt-dlp cli dotnet-tool zakira</PackageTags>
-    <PackageReleaseNotes>0.17.1 — Windows installs the official yt-dlp directory build for x64, ARM64, or x86 and verifies it with --version. Python is bundled alongside the executable. Shared configs preserve %VAR% references in dependency paths and expand them on the machine running Replay. To migrate an existing single-file install, run `zakira-replay deps install yt-dlp`.</PackageReleaseNotes>
+    <PackageReleaseNotes>0.17.2 — Windows installs the official yt-dlp directory build for x64, ARM64, or x86 and verifies it with --version. Python is bundled alongside the executable. Shared configs preserve %VAR% references in dependency paths and expand them on the machine running Replay. To migrate an existing single-file install, run `zakira-replay deps install yt-dlp`.</PackageReleaseNotes>
   </PropertyGroup>
 
   <ItemGroup>

@@ -7,6 +7,10 @@ All notable changes to Zakira.Replay are documented in this file. Format is loos
 Each release lists user-visible changes plus the underlying contract changes (schemas,
 warning codes, env vars, config keys) so orchestrators can plan migrations.
 
+## [0.17.2] — NuGet.org release of the Windows yt-dlp fixes
+
+This packages the same application code as the local-feed `0.17.1` release: portable Windows yt-dlp with bundled Python and support for shared dependency paths.
+
 ## [0.17.1] — Portable yt-dlp on Windows and shared dependency paths
 
 ### Fixed

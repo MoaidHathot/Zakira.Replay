@@ -1,15 +1,11 @@
-name: Publish to NuGet.org
+name: Main CI and NuGet publish
 
 on:
-  release:
-    types: [published]
+  push:
+    branches: [main]
 
 permissions:
   contents: read
-
-concurrency:
-  group: nuget-publish-${{ github.ref }}
-  cancel-in-progress: false
 
 jobs:
   ci:
@@ -17,20 +13,21 @@ jobs:
 
   publish:
     needs: ci
+    # Immutable repository ID of MoaidHathot/Zakira.Replay. Forks may run CI, not this job.
+    if: >-
+      github.repository_id == '1233744814' &&
+      github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+      needs.ci.outputs.version-bumped == 'true'
     runs-on: ubuntu-latest
     environment: nuget.org
     permissions:
       id-token: write
+    concurrency:
+      group: nuget-publish-${{ needs.ci.outputs.package-version }}
+      cancel-in-progress: false
     env:
       PACKAGE_VERSION: ${{ needs.ci.outputs.package-version }}
     steps:
-      - name: Check release tag matches the packed version
-        run: |
-          if [[ "$GITHUB_REF_NAME" != "v$PACKAGE_VERSION" ]]; then
-            echo "::error::Expected release tag v$PACKAGE_VERSION for this package."
-            exit 1
-          fi
-
       - name: Download the tested build's packages
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:

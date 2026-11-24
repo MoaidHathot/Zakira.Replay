@@ -1499,9 +1499,9 @@ The ffmpeg integration test generates a tiny fixture at runtime and skips automa
 
 ### Publishing to NuGet.org
 
-Publishing a **GitHub Release** runs [the publish workflow](.github/workflows/publish-nuget.yml) on the tagged commit. It runs CI on Windows, Linux and macOS, then publishes the resulting `.nupkg` and `.snupkg` using [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing). Only the publish job can request a short-lived key; no NuGet API key is stored in GitHub.
+**To release, increase `VersionPrefix` in `Directory.Build.props`, update the package release notes and `CHANGELOG.md`, and merge or push the change to `main`.** No tag or GitHub Release is required. [The workflow](.github/workflows/publish-nuget.yml) runs CI on Windows, Linux and macOS, then publishes the tested commit's `.nupkg` and `.snupkg` using [NuGet Trusted Publishing](https://learn.microsoft.com/nuget/nuget-org/trusted-publishing).
 
-**One-time setup:** In GitHub → Settings → Environments, use `nuget.org`, allow deployment tags matching `v*`, and set its Actions variable `NUGET_USER` to the NuGet **profile name** that creates the policy (`MoaidHathot` for this package). In [NuGet.org → Trusted Publishing](https://www.nuget.org/account/trustedpublishing), add a GitHub Actions policy with these values:
+**One-time setup:** In GitHub → Settings → Environments, use `nuget.org`, allow deployments from the **branch** `main` only, and set its Actions variable `NUGET_USER` to the NuGet **profile name** that creates the policy (`MoaidHathot` for this package). In [NuGet.org → Trusted Publishing](https://www.nuget.org/account/trustedpublishing), add a GitHub Actions policy with these values:
 
 | Field | Value |
 |---|---|
@@ -1512,7 +1512,7 @@ Publishing a **GitHub Release** runs [the publish workflow](.github/workflows/pu
 | Workflow file | `publish-nuget.yml` (filename only) |
 | Environment | `nuget.org` |
 
-**For each release:** Update `VersionPrefix` in `Directory.Build.props`, the package release notes, and `CHANGELOG.md`. Publish a GitHub Release from that commit with the tag `v<package-version>` (for example, `v0.17.1` for package `0.17.1`). Pushing the commit or tag alone does not publish. A mismatched tag fails before NuGet login; after a transient push failure, re-run the failed job to retry the same artifacts.
+The publish job runs only in `MoaidHathot/Zakira.Replay`, after CI confirms that `VersionPrefix` increased between the old and new tips of `main` and matches the packed version. PRs, forks, unchanged or decreased versions, and force pushes do not publish. Only the publish job can obtain a short-lived NuGet key. If a push to NuGet fails, re-run the failed job on that workflow run to retry the same artifacts.
 
 ## License
 
